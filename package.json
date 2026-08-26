@@ -11,7 +11,10 @@
     "dev:renderer": "vite",
     "dev:electron": "wait-on tcp:127.0.0.1:5273 && electron .",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:debug": "wait-on tcp:127.0.0.1:5273 && electron . --remote-debugging-port=9222",
+    "verify:fs": "node scripts/verify-filesystem.mjs",
+    "verify:app": "node scripts/verify-renderer.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",

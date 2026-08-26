@@ -11,7 +11,7 @@ import { panels } from '../kernel/panels'
 import { ViewerPanel } from './ViewerPanel'
 import { TimelinePanel } from './TimelinePanel'
 import { NodeMapPanel } from './NodeMapPanel'
-import { FilesPanel } from './FilesPanel'
+import { ContentBrowserPanel } from './ContentBrowserPanel'
 import { InspectorPanel } from './InspectorPanel'
 import { MixerPanel } from './MixerPanel'
 
@@ -36,10 +36,10 @@ export function registerBuiltinPanels() {
       component: NodeMapPanel,
     },
     {
-      id: 'files',
-      title: 'Files',
-      description: 'Media browser and project bin',
-      component: FilesPanel,
+      id: 'content',
+      title: 'Content Browser',
+      description: 'Browse the machine and import media into the project',
+      component: ContentBrowserPanel,
     },
     {
       id: 'inspector',

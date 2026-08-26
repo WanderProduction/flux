@@ -9,7 +9,8 @@ import react from '@vitejs/plugin-react'
  */
 const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"
+  "img-src 'self' data: blob: flux-asset:; media-src 'self' blob: flux-asset:; " +
+  "connect-src 'self' flux-asset:"
 
 const injectCspOnBuild = (): Plugin => ({
   name: 'flux-inject-csp',

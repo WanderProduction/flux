@@ -20,7 +20,7 @@ export const defaultKeymap: Keymap = {
   'ctrl+1': 'panel.focus.viewer',
   'ctrl+2': 'panel.focus.timeline',
   'ctrl+3': 'panel.focus.nodemap',
-  'ctrl+4': 'panel.focus.files',
+  'ctrl+4': 'panel.focus.content',
   'ctrl+5': 'panel.focus.inspector',
   'ctrl+6': 'panel.focus.mixer',
   'ctrl+s': 'workspace.save',

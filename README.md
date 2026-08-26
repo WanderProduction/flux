@@ -46,8 +46,33 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Layout persistence** | `Ctrl S` saves the current workspace's layout, `Ctrl Shift R` resets it. Restored on launch. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 6`, opening the panel if the workspace doesn't have it. |
+| **Content Browser** | Browse the machine, import image and video by reference, thumbnails on cards. |
 
-Six built-in panels: Viewer, Timeline, Node Map, Files, Inspector, Mixer.
+Six built-in panels: Viewer, Timeline, Node Map, **Content Browser**, Inspector, Mixer. Only the
+Content Browser does real work; the other five are still scaffolding.
+
+### The Content Browser
+
+Browse any folder, import media into the project, see it as cards.
+
+**Importing never copies or moves anything.** An asset is a reference — an absolute path plus what
+we know about the file — so importing is instant and touches nothing on disk. The cost of that
+choice is that files can move or vanish behind the project's back, so paths are re-checked on load
+and a card whose original is gone is marked `offline` rather than rendering broken.
+
+Supported formats are limited to what Chromium can decode, because a card we cannot draw is a
+promise we cannot keep. `.mkv`, `.avi` and `.tif` are excluded on purpose — widening the list is an
+engine question, not a UI one. The single definition lives in
+[`shared/mediaTypes.js`](shared/mediaTypes.js) and is imported by *both* the Electron main process
+and the renderer; two copies would drift silently.
+
+Thumbnails are decoded in the renderer and cached as small JPEG data URLs, at most three at a time
+and each under a deadline — a hundred simultaneous video decodes, or one malformed file waiting on
+an event that never fires, is exactly the stall FLUX exists to avoid.
+
+Local files reach the renderer over a `flux-asset://` protocol rather than `file://` (which CSP
+blocks), which also gets range requests so video can seek without loading whole. The handler serves
+**only** paths matching the shared media allowlist.
 
 ---
 
@@ -87,12 +112,46 @@ in the skinning system.
 
 ```
 src/
-  kernel/       commands · panels · keymap · workspaces · store   (the seams)
+  kernel/       commands · panels · keymap · workspaces · store
+                fsBridge · assets · thumbnails                    (the seams)
   panels/       the six built-in panels, registered via the SDK
   shell/        command palette
   styles/       theme tokens + app styles
-electron/       main process + preload bridge
+shared/         media type definitions — imported by BOTH main and renderer
+electron/       main process · preload bridge · filesystem reads
+scripts/        verification harnesses
 ```
+
+---
+
+## Verifying
+
+```bash
+npm run verify:fs
+```
+
+Exercises `electron/filesystem.js` against a real temp directory — listing, filtering, natural
+sort, truncation of huge folders, and the protocol allowlist.
+
+The rest only exists inside Electron (IPC, the `flux-asset` protocol, real decoding), so it is
+checked by attaching to the running app over the DevTools protocol. In three terminals:
+
+```bash
+npm run dev:renderer
+```
+
+```bash
+npm run dev:debug
+```
+
+```bash
+npm run verify:app
+```
+
+`verify:app` expects fixture media in `~/flux-media-test`. Generate it with ffmpeg — two H.264
+mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be listed, and a
+deliberately corrupt `.mp4` that must resolve to "no preview" rather than hang. It clears the
+project's asset list so runs are repeatable.
 
 ---
 
@@ -108,7 +167,8 @@ move behind the kernel seam to native later without touching the UI.
 ## Not built yet
 
 Everything below the shell: the signal graph, the compute scheduler (GPU/CPU/RAM split), caching and
-proxies, decode, playback, the audio graph, rendering, export, plugins, skinning UI.
+proxies, playback, the audio graph, rendering, export, plugins, skinning UI. Audio files are not
+importable yet — the Content Browser is image and video only.
 
 ## License
 

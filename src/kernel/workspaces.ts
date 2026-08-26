@@ -22,22 +22,22 @@ export interface WorkspaceDefinition {
 }
 
 /**
- * EDIT — home base. Viewer + Files on top, Timeline full width beneath.
+ * EDIT — home base. Viewer + Content Browser on top, Timeline full width beneath.
  * The layout a reels editor lives in; the Node Map is not even open.
  */
 function buildEdit(api: DockviewApi) {
   api.addPanel({ id: 'viewer', component: 'viewer', title: 'Viewer' })
   api.addPanel({
-    id: 'files',
-    component: 'files',
-    title: 'Files',
+    id: 'content',
+    component: 'content',
+    title: 'Content Browser',
     position: { referencePanel: 'viewer', direction: 'right' },
   })
   api.addPanel({
     id: 'inspector',
     component: 'inspector',
     title: 'Inspector',
-    position: { referencePanel: 'files', direction: 'within' },
+    position: { referencePanel: 'content', direction: 'within' },
   })
   api.addPanel({
     id: 'timeline',
@@ -45,7 +45,7 @@ function buildEdit(api: DockviewApi) {
     title: 'Timeline',
     position: { referencePanel: 'viewer', direction: 'below' },
   })
-  api.getPanel('files')?.api.setActive()
+  api.getPanel('content')?.api.setActive()
 }
 
 /**

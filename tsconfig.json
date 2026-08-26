@@ -8,6 +8,9 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // shared/ is plain ESM JavaScript so the Electron main process can import it
+    // without a build step, while the renderer gets it through Vite.
+    "allowJs": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "moduleDetection": "force",
@@ -24,5 +27,5 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "shared"]
 }
