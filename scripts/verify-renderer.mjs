@@ -210,6 +210,7 @@ try {
     assert.deepEqual(names, [
       'clipA.mp4',
       'corrupt.mp4',
+      'long_take.mp4',
       'photo.png',
       'render.webm',
       'shot_B.mp4',
@@ -240,6 +241,60 @@ try {
     )
     assert.equal(result.status, 200)
     assert.ok(result.bytes > 1000, `expected real bytes, got ${result.bytes}`)
+  })
+
+  await check('flux-asset protocol answers a byte range', async () => {
+    /*
+     * The single most consequential thing this protocol does, and the reason it
+     * is checked here rather than only against the module: a <video> decides
+     * whether a source is seekable from these headers. Answer a Range with a
+     * plain 200 and Chromium concludes the file cannot be seeked, `currentTime`
+     * assignments silently do nothing, and the viewer shows the first couple of
+     * seconds of every clip and no more.
+     *
+     * Deliberately *not* checked by watching a video seek. Chromium buffers a
+     * small file whole and then seeks inside it perfectly well with no range
+     * support at all, so a media-level check passes or fails on the fixture's
+     * size rather than on the code. This asks the question directly.
+     */
+    const result = await evaluate(
+      cdp,
+      `const url = window.flux.fs.assetUrl(${dir} + '\\\\clipA.mp4');
+       const whole = await fetch(url);
+       const wholeBytes = new Uint8Array(await whole.arrayBuffer());
+       const part = await fetch(url, { headers: { Range: 'bytes=200-299' } });
+       const partBytes = new Uint8Array(await part.arrayBuffer());
+       let matches = partBytes.length === 100;
+       for (let i = 0; matches && i < partBytes.length; i++) {
+         if (partBytes[i] !== wholeBytes[200 + i]) matches = false;
+       }
+       return {
+         acceptRanges: whole.headers.get('accept-ranges'),
+         contentLength: whole.headers.get('content-length'),
+         status: part.status,
+         contentRange: part.headers.get('content-range'),
+         bytes: partBytes.length,
+         matches,
+         size: wholeBytes.length,
+       };`,
+    )
+    assert.equal(result.acceptRanges, 'bytes', 'without this the source is not seekable at all')
+    assert.equal(result.contentLength, String(result.size))
+    assert.equal(result.status, 206, 'a 200 to a Range request means "you cannot seek me"')
+    assert.equal(result.contentRange, `bytes 200-299/${result.size}`)
+    assert.equal(result.bytes, 100, 'only the bytes that were asked for')
+    assert.equal(result.matches, true, 'and the right ones')
+  })
+
+  await check('flux-asset protocol refuses an impossible range', async () => {
+    const result = await evaluate(
+      cdp,
+      `const url = window.flux.fs.assetUrl(${dir} + '\\\\clipA.mp4');
+       const res = await fetch(url, { headers: { Range: 'bytes=99999999-' } });
+       return { status: res.status, contentRange: res.headers.get('content-range') };`,
+    )
+    assert.equal(result.status, 416)
+    assert.ok(result.contentRange?.startsWith('bytes */'))
   })
 
   await check('flux-asset protocol refuses a non-media file', async () => {

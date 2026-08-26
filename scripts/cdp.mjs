@@ -242,7 +242,10 @@ export async function requireFixtures(cdp, mediaDir) {
     )
   }
   const names = result.listing.files.map((f) => f.name)
-  for (const required of ['clipA.mp4', 'still.jpg']) {
+  // long_take.mp4 is required because the short fixtures cannot prove seeking:
+  // Chromium swallows them whole before anything asks it to seek, which is the
+  // exact condition under which a broken asset server looks fine.
+  for (const required of ['clipA.mp4', 'still.jpg', 'long_take.mp4']) {
     if (!names.includes(required)) {
       throw new Error(`fixture ${required} missing from ${mediaDir}`)
     }

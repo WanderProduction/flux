@@ -9,19 +9,59 @@
  *
  * Time is in seconds from the start of the sequence, matching sequence.ts.
  *
- * The clock is driven by requestAnimationFrame against `performance.now()`,
- * not by the <video> element. A video is only the *source* under the playhead:
- * it starts, ends, and is replaced by the next clip, while the sequence's time
- * runs continuously across gaps where no video exists at all. The Viewer keeps
- * its element in step with this — see ViewerPanel.
+ * ## Who is the clock
+ *
+ * Whatever is *playing the media*, when something is. Otherwise the wall clock.
+ *
+ * This is the one design decision in the file and it took being wrong once to
+ * see. The first version accumulated `performance.now()` deltas on every
+ * animation frame and treated the <video> element as a follower to be dragged
+ * into line. Two things go wrong with that, and both of them were measurable:
+ *
+ *   - requestAnimationFrame is not a clock. Chromium throttles it whenever it
+ *     decides the window does not need painting — to a few frames a second, or
+ *     one. The media pipeline keeps running regardless, because it is driven by
+ *     the audio device. So the picture stayed correct and the *sequence's own
+ *     idea of the time* fell behind it, in visible one-second lurches.
+ *   - Correcting the follower means assigning `currentTime`, which is a seek.
+ *     Doing that on every frame flushes the decoder on every frame.
+ *
+ * Every real NLE resolves this the same way, and Premiere is explicit about it:
+ * audio is the master clock and video frames are presented against it. Audio
+ * glitches are far more perceptible than a dropped frame, so the thing feeding
+ * the sound card sets the time and everything else follows.
+ *
+ * So: while a source is playing it *reports* the sequence time and this module
+ * reads it. Animation frames only decide how often the UI resamples — if they
+ * are throttled the playhead updates less often, which is a rendering
+ * consequence, not a timing one. With no source (a gap, a still, an empty
+ * stretch) the wall clock takes over, because time still has to pass there.
  */
 
 import { sequenceDuration, subscribeSequence } from './sequence'
+
+/**
+ * Something that is playing media and can say where it is, in sequence
+ * seconds. Returns null when it cannot — not loaded, stalled, or paused — and
+ * the wall clock covers for it.
+ */
+export type ClockSource = () => number | null
 
 let playing = false
 let time = 0
 let frame: number | null = null
 let lastTick = 0
+let source: ClockSource | null = null
+
+/**
+ * Bumped on every deliberate seek.
+ *
+ * The Viewer moves its element when this changes and at no other time. Without
+ * it there is no way to tell "the time changed because the video advanced" from
+ * "the time changed because the user scrubbed" — and treating the first as the
+ * second is what put a decoder flush on every animation frame.
+ */
+let seekToken = 0
 
 const listeners = new Set<() => void>()
 
@@ -42,6 +82,20 @@ export function isPlaying(): boolean {
   return playing
 }
 
+export function getSeekToken(): number {
+  return seekToken
+}
+
+/**
+ * Hands the clock to whatever is playing, or takes it back with null.
+ *
+ * One source at a time: there is one playhead, so there is one thing that can
+ * be authoritative about where it is.
+ */
+export function setClockSource(next: ClockSource | null): void {
+  source = next
+}
+
 function stopLoop() {
   if (frame !== null) cancelAnimationFrame(frame)
   frame = null
@@ -49,11 +103,16 @@ function stopLoop() {
 
 function tick(now: number) {
   if (!playing) return
+
+  const reported = source?.()
   const elapsed = (now - lastTick) / 1000
   lastTick = now
 
   const end = sequenceDuration()
-  const next = time + elapsed
+  // The source's own position when it has one, and only otherwise the wall
+  // clock. Reading rather than accumulating is what makes a throttled animation
+  // frame cost smoothness instead of accuracy.
+  const next = reported ?? time + elapsed
 
   if (next >= end) {
     // Park exactly on the last frame rather than running past it into empty
@@ -101,6 +160,7 @@ export function seek(seconds: number): void {
   const clamped = Math.min(Math.max(0, seconds), Math.max(0, end))
   if (clamped === time) return
   time = clamped
+  seekToken += 1
   // Reset the tick baseline, or the next frame would charge the playhead for
   // however long the drag took.
   lastTick = performance.now()
@@ -120,6 +180,8 @@ export function resetPlayback(): void {
   playing = false
   stopLoop()
   time = 0
+  seekToken += 1
+  source = null
   emit()
 }
 
@@ -130,6 +192,7 @@ subscribeSequence(() => {
   const end = sequenceDuration()
   if (time > end) {
     time = end
+    seekToken += 1
     if (playing) pause()
     else emit()
   }

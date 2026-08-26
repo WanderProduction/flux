@@ -5,6 +5,7 @@ import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
 import {
   formatTimecode,
+  getSeekToken,
   getTime,
   goToEnd,
   goToStart,
@@ -12,6 +13,7 @@ import {
   pause,
   play,
   seek,
+  setClockSource,
   subscribePlayback,
   toggle,
 } from '../kernel/playback'
@@ -30,20 +32,21 @@ import { PanelFrame } from './PanelFrame'
  * This is a *player*, not a renderer: it shows the source under the playhead
  * directly. There is no compositor yet, so there is nothing to composite; when
  * the engine lands this element becomes the surface it draws into and the clip
- * lookup below moves into the graph. What must not change is who owns the time.
- * kernel/playback.ts owns it, this reads it, and the <video> is dragged along
- * behind — never the other way round. A viewer that used the video element as
- * its clock would run on the source's timeline instead of the sequence's, and
- * would have nothing to say at all about a gap between two clips.
+ * lookup below moves into the graph.
+ *
+ * While the element is playing it *is* the clock — it hands kernel/playback.ts
+ * its own position and the sequence follows, for the reasons set out at the top
+ * of that file. The element is therefore moved in exactly one circumstance: a
+ * deliberate seek, which the transport announces with a token. Moving it
+ * because the time changed would mean moving it because it moved, which is a
+ * decoder flush on every animation frame.
  */
 
 /**
- * How far the element may drift before it is pulled back, in seconds.
+ * How far out the element has to be before a seek bothers to move it.
  *
- * Not zero. Assigning `currentTime` every frame re-seeks the decoder every
- * frame, which stutters far worse than the drift it is correcting. A quarter of
- * a frame at 24fps is under the threshold of noticing and leaves normal
- * playback alone entirely.
+ * A quarter of a frame at 24fps: under the threshold of noticing, and enough
+ * that scrubbing to where the picture already is costs nothing.
  */
 const SYNC_TOLERANCE = 0.01 + 1 / 96
 
@@ -69,6 +72,7 @@ export function ViewerPanel() {
   const [assets, setAssets] = useState<Asset[]>(getAssets)
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
+  const [seekToken, setSeekToken] = useState(getSeekToken)
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
@@ -81,6 +85,7 @@ export function ViewerPanel() {
       subscribePlayback(() => {
         setTime(getTime())
         setPlaying(isPlaying())
+        setSeekToken(getSeekToken())
       }),
     [],
   )
@@ -90,8 +95,14 @@ export function ViewerPanel() {
   const asset = clip ? assets.find((a) => a.id === clip.assetId) : undefined
   const playable = asset && !asset.missing && !asset.unreadable ? asset : undefined
 
-  // ── keeping the element in step with the playhead ─────────────
+  // ── the element, the clock, and the one thing that moves it ───
 
+  /**
+   * Puts the element where the playhead is.
+   *
+   * Called on a deliberate seek and when the source changes, and at no other
+   * time — see the note at the top of this file.
+   */
   const syncVideo = useCallback(() => {
     const video = videoRef.current
     if (!video || !clip) return
@@ -100,9 +111,34 @@ export function ViewerPanel() {
     if (video.readyState === 0) return
     const target = time - clip.start
     if (Math.abs(video.currentTime - target) > SYNC_TOLERANCE) video.currentTime = target
-  }, [clip, time])
+    // `time` is read but deliberately not a dependency: this must fire on a
+    // seek, not on the clock advancing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip, playable?.id, seekToken])
 
   useEffect(syncVideo, [syncVideo])
+
+  /**
+   * Hands the clock to the element while it is playing this clip.
+   *
+   * `clip.start + currentTime` converts the source's own timeline into the
+   * sequence's. Null while paused, stalled or unloaded, which lets the wall
+   * clock cover the gap rather than freezing the playhead on a buffering
+   * stream — and means a stall stops the sequence exactly where the picture
+   * stopped, instead of the time running on without it.
+   */
+  useEffect(() => {
+    if (!clip || !playable || playable.kind !== 'video') {
+      setClockSource(null)
+      return
+    }
+    setClockSource(() => {
+      const video = videoRef.current
+      if (!video || video.paused || video.readyState < 2) return null
+      return clip.start + video.currentTime
+    })
+    return () => setClockSource(null)
+  }, [clip, playable])
 
   useEffect(() => {
     const video = videoRef.current

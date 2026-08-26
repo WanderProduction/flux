@@ -213,8 +213,9 @@ and each under a deadline — a hundred simultaneous video decodes, or one malfo
 an event that never fires, is exactly the stall FLUX exists to avoid.
 
 Local files reach the renderer over a `flux-asset://` protocol rather than `file://` (which CSP
-blocks), which also gets range requests so video can seek without loading whole. The handler serves
-**only** paths matching the shared media allowlist.
+blocks). The handler serves **only** paths matching the shared media allowlist, and it speaks the
+small part of HTTP that matters — see **Serving media** below, because getting that wrong is what a
+broken viewer looks like.
 
 ### The Timeline
 
@@ -322,6 +323,30 @@ the clip underneath it unselectable at exactly the time you are looking at.
 Not yet: trimming clips, audio tracks, and any UI for removing a track (the kernel refuses to remove
 the last one, since a sequence with none has nowhere to drop).
 
+### Serving media
+
+[`electron/assetServer.js`](electron/assetServer.js) exists for one reason: **byte ranges**.
+
+Chromium's media stack decides whether a source is *seekable* from the response it gets. No
+`Accept-Ranges`, no `Content-Length`, and a `Range` request answered with a plain `200` all say the
+same thing — this is a stream you may read from the beginning and nothing else. `video.seekable`
+then comes back empty, assigning `currentTime` silently does nothing, and the element plays the
+couple of seconds it managed to buffer and stops.
+
+Which is not what a server bug looks like from the outside. It looks like a viewer that can only
+ever show the head of a clip. FLUX shipped exactly that until a 60-second file was pointed at it:
+`seekable.end(0)` was `0`, a seek to 45s reported back `0`, and only the first three seconds ever
+buffered.
+
+So the handler answers properly: `Accept-Ranges` and a real `Content-Length` on every response,
+`206` with a `Content-Range` for a range, `416` for one that cannot be satisfied, and a *stream* for
+the body so a 4GB take costs 64KB of memory rather than 4GB.
+
+One trap worth naming, because it bit the checks before it bit anyone else: **a small file seeks
+fine with no range support at all**, because Chromium simply buffers the whole thing. A check that
+watches a short fixture seek therefore passes on a completely broken server. The contract is checked
+against the headers directly instead.
+
 ### Playback
 
 `Space` plays. The playhead runs down the Timeline, the Viewer shows the clip under it, and the
@@ -332,15 +357,56 @@ it and render; only commands move it. The moment two panels each keep their own 
 and "the picture is a few frames off the timeline" is the kind of bug that makes an editor stop
 trusting the tool.
 
-The clock is driven by `requestAnimationFrame`, **not** by the `<video>` element, and the element is
-dragged along behind it. A video is only the *source* under the playhead: it starts, it ends, it is
-replaced by the next clip, while the sequence's time runs continuously across gaps where no video
-exists at all. A viewer that used the element as its clock would be running on the source's
-timeline instead of the sequence's, and would have nothing to say about a gap between two clips.
+**Whatever is playing the media *is* that clock**, while something is. Otherwise the wall clock.
 
-The element is re-seeked only when it drifts past about a quarter of a frame. Assigning
-`currentTime` every frame re-seeks the decoder every frame, which stutters far worse than the drift
-it corrects.
+This took being wrong once to see. The first version accumulated `performance.now()` deltas on every
+animation frame and treated the `<video>` as a follower to be dragged into line. Two things go
+wrong with that, and both were measurable:
+
+- **`requestAnimationFrame` is not a clock.** Chromium throttles it whenever it decides the window
+  does not need painting. The media pipeline keeps running regardless, because it is driven by the
+  audio device — so the picture stayed correct and the sequence's own idea of the time fell behind
+  it, in visible one-second lurches.
+- **Correcting the follower means assigning `currentTime`, which is a seek.** Doing that every frame
+  flushes the decoder every frame. Measured: about one seek per second, `rAF` down from 75fps to 4,
+  and the clock 770ms behind the picture. Handing the clock to the element instead: **zero** seeks
+  during playback, 75fps, worst drift **15ms**.
+
+So the element reports where it is and the sequence follows; animation frames only decide how often
+the UI resamples. The element is moved in exactly one circumstance — a deliberate seek, which the
+transport announces with a token. Moving it because the time changed would mean moving it because it
+moved.
+
+#### How Premiere does this, and where FLUX is on that road
+
+Worth being explicit, because it is the difference between what exists now and what VISION.md is
+actually asking for.
+
+**Premiere never plays your source file.** It has its own decode layer, and around it:
+
+1. **Conform and index on import** — a media cache holding an index of frame positions (so a seek
+   into long-GOP H.264 can find the keyframe to decode from), conformed audio, and peak files for
+   waveforms. This is what the progress bar on import is doing.
+2. **A render pipeline** — for each output frame it walks the sequence, decodes the sources it
+   needs, applies effects on the GPU where it can, and composites into a frame buffer.
+3. **A playback engine with a ring buffer** — worker threads fill a queue of finished frames ahead
+   of the playhead. **Audio is the master clock**; frames are presented against it, and when the
+   pipeline cannot keep up it *drops frames* rather than slowing down, because a glitch in the
+   sound is far more noticeable than a missing frame.
+4. **Preview render files** — the red/yellow/green bar. Anything that cannot play in real time is
+   rendered to disk in a preview codec, and playback reads that instead of re-rendering.
+5. **Proxies** — low-resolution stand-ins swapped in for editing and swapped back out for export.
+6. **Quality throttling** — 1/2 and 1/4 playback resolution, and a lower quality while scrubbing.
+
+FLUX has exactly one piece of that: item 3's clock discipline, and only because a `<video>` element
+comes with a decoder and an audio device attached. Everything the element gives us is also
+everything it limits us to — **one source at a time, no compositing, no effects, and a visible seam
+where one clip becomes the next**, because a different source means a different element.
+
+The road on from here is `VideoDecoder` (WebCodecs) plus a demuxer, decoding into a ring buffer we
+own and compositing on the GPU. That is the point at which items 1, 2 and 4 become possible at all,
+and it is the "GPU-first seed with prerender to cache" in VISION.md. It is a project, not a patch,
+and it should follow the seams being proven rather than precede it.
 
 Small behaviours that are deliberate: playback **stops on the last frame** rather than running past
 it into empty space, so the picture stays up; pressing play at the end **starts over**, because
@@ -360,8 +426,8 @@ This is a *player*, not a renderer — it shows the source directly, because the
 yet to composite anything. When the engine lands, the Viewer becomes the surface it draws into and
 the clip lookup moves into the graph. What must not change is who owns the time.
 
-Not yet: audio scrubbing, loop, frame stepping, and playing across a gap without a black frame at
-the seam.
+Not yet: audio scrubbing, loop, frame stepping, and playing across a cut without a hitch where one
+element is swapped for the next.
 
 ---
 
@@ -480,10 +546,18 @@ frame while the clock has moved on, and a clock running while the video is pause
 perfectly. So it checks that the sequence's time and the element's time stay in agreement, in
 seconds, against a real decode of a real file.
 
-`verify:app`, `verify:tree` and `verify:timeline` expect fixture media in `~/flux-media-test`. Generate it with
-ffmpeg — two H.264 mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be
-listed, and a deliberately corrupt `.mp4` that must resolve to "no preview" rather than hang. Both
-clear the project's asset list and sequence so runs are repeatable.
+`verify:app`, `verify:tree`, `verify:timeline` and `verify:playback` expect fixture media in
+`~/flux-media-test`. Generate it with ffmpeg — two short H.264 mp4s, a VP9 webm, a png, a jpg, a
+nested folder, a `notes.txt` that must never be listed, and a deliberately corrupt `.mp4` that must
+resolve to "no preview" rather than hang. They clear the project's asset list and sequence so runs
+are repeatable.
+
+One fixture is not short. `long_take.mp4` is a minute long, because everything a four-second file
+can tell you about playback it can also tell you while a completely broken server is underneath it:
+
+```bash
+ffmpeg -y -f lavfi -i "testsrc2=size=640x360:rate=25:duration=60" -f lavfi -i "sine=frequency=440:duration=60" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 700k -g 50 -c:a aac -b:a 64k -shortest ~/flux-media-test/long_take.mp4
+```
 
 `verify:timeline` synthesises drag and drop with a real `DataTransfer` and real `DragEvent`s
 dispatched at the actual DOM nodes, so the app's own handlers run as they do under a mouse.

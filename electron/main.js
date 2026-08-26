@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol } from 'electron'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { app, BrowserWindow, dialog, ipcMain, protocol } from 'electron'
+import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 
@@ -11,6 +11,7 @@ import {
   listDrives,
   listSubfolders,
 } from './filesystem.js'
+import { serveFile } from './assetServer.js'
 import { copyIntoImports, createProject, isProject, openProject, saveProject } from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
 
@@ -78,9 +79,11 @@ const isDev = !app.isPackaged
 
 /**
  * Local media is served to the renderer over a custom scheme rather than
- * file://, which the renderer's CSP blocks outright. Going through net.fetch
- * also gets range requests for free, so a <video> can seek without the whole
- * file being pulled into memory first.
+ * file://, which the renderer's CSP blocks outright.
+ *
+ * `stream: true` and `supportFetchAPI: true` are what let the handler answer
+ * with a streamed, ranged response — see electron/assetServer.js for why byte
+ * ranges are the whole ballgame for a video element.
  *
  * Must be registered before the app is ready.
  */
@@ -328,14 +331,16 @@ app.whenReady().then(() => {
     if (!raw) return new Response('missing path', { status: 400 })
 
     const filePath = path.resolve(raw)
+    // Policy here, bytes in assetServer: the renderer may ask for any path it
+    // likes, and only media the app can actually decode is ever handed back.
     if (!isServableMediaPath(filePath)) {
       return new Response('unsupported media type', { status: 403 })
     }
 
     try {
-      return await net.fetch(pathToFileURL(filePath).toString())
+      return await serveFile(request, filePath)
     } catch {
-      return new Response('not found', { status: 404 })
+      return new Response('could not be read', { status: 500 })
     }
   })
 

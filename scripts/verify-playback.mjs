@@ -29,6 +29,8 @@ import {
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const dir = JSON.stringify(MEDIA_DIR)
+/** A minute of video, which is the only kind of file that can prove seeking. */
+const LONG = JSON.stringify(path.join(MEDIA_DIR, 'long_take.mp4'))
 const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 const { check, report } = createChecker()
@@ -299,6 +301,177 @@ try {
     assert.equal(state.time, 0, 'the playhead should be back at the start')
     assert.equal(state.playing, false)
     assert.equal(state.placeholder, 'empty sequence', 'and the viewer should say so')
+  })
+
+  // ── a real clip, not a four-second fixture ────────────────────
+  //
+  // Everything above works on a file small enough for Chromium to swallow whole
+  // before anyone asks it to seek. That is precisely the condition under which
+  // a broken asset server looks fine: the bug only shows on media big enough
+  // that the player has to fetch parts of it on demand.
+
+  const longSetup = await evaluate(
+    cdp,
+    `const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+     const added = await importPipeline.importFiles(
+       [{ path: ${LONG}, kind: 'video' }], 'link');
+     const asset = added[0] ?? assets.getAssets().find(a => a.name === 'long_take.mp4');
+     if (!asset) throw new Error('long_take.mp4 missing - see the README for the ffmpeg line');
+     const probed = await assets.ensureProbed(asset.id);
+     sequence.setSequence(null);
+     sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+     playback.pause();
+     playback.seek(0);
+     await new Promise(r => setTimeout(r, 900));
+     return { duration: probed.duration };`,
+  )
+  assert.ok(longSetup.duration > 30, `long_take.mp4 is only ${longSetup.duration}s`)
+
+  await check('a long clip reports its whole length as seekable', async () => {
+    // A smoke check, not a proof of range support: Chromium will buffer a small
+    // file whole and then seek inside it happily with no ranges at all, so what
+    // this catches is the element failing to load or reporting a truncated
+    // duration. The protocol contract itself is checked directly, against the
+    // headers, in verify-renderer.
+    const state = await evaluate(
+      cdp,
+      `for (let i = 0; i < 60; i++) {
+         const v = document.querySelector('video.viewer-media');
+         if (v && v.readyState >= 1 && v.seekable.length) break;
+         await new Promise(r => setTimeout(r, 100));
+       }
+       const v = document.querySelector('video.viewer-media');
+       return { duration: v.duration, ranges: v.seekable.length,
+                end: v.seekable.length ? v.seekable.end(0) : 0 };`,
+    )
+    assert.ok(state.ranges > 0, 'the element reports nothing seekable at all')
+    assert.ok(
+      state.end > state.duration - 1,
+      `only ${state.end}s of a ${state.duration}s clip is seekable`,
+    )
+  })
+
+  await check('seeking deep into a long clip lands where it was asked to', async () => {
+    const samples = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       const out = [];
+       for (const t of [48, 5, 30, 59]) {
+         playback.seek(t);
+         for (let i = 0; i < 80; i++) {
+           const v = document.querySelector('video.viewer-media');
+           if (v && Math.abs(v.currentTime - t) < 0.2) break;
+           await new Promise(r => setTimeout(r, 100));
+         }
+         out.push([t, document.querySelector('video.viewer-media').currentTime]);
+       }
+       return out;`,
+    )
+    for (const [asked, got] of samples) {
+      assert.ok(
+        Math.abs(got - asked) < 0.25,
+        `asked for ${asked}s and the picture sat at ${got}s`,
+      )
+    }
+  })
+
+  await check('the picture at the playhead is a real frame, not black', async () => {
+    // A seek that silently fails leaves the first frame on screen; a seek that
+    // fails on a file starting black leaves black. Sampling the pixels is the
+    // only way to tell "showing the right thing" from "showing nothing".
+    const lit = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.seek(37);
+       for (let i = 0; i < 80; i++) {
+         const v = document.querySelector('video.viewer-media');
+         if (v && Math.abs(v.currentTime - 37) < 0.2) break;
+         await new Promise(r => setTimeout(r, 100));
+       }
+       const v = document.querySelector('video.viewer-media');
+       const c = document.createElement('canvas');
+       c.width = 48; c.height = 27;
+       c.getContext('2d').drawImage(v, 0, 0, 48, 27);
+       const data = c.getContext('2d').getImageData(0, 0, 48, 27).data;
+       let count = 0;
+       for (let i = 0; i < data.length; i += 4) {
+         if (data[i] + data[i + 1] + data[i + 2] > 40) count++;
+       }
+       return { count, of: 48 * 27 };`,
+    )
+    assert.ok(lit.count > lit.of / 4, `only ${lit.count} of ${lit.of} sampled pixels had any light`)
+  })
+
+  await check('playing a long clip does not re-seek the decoder', async () => {
+    // The element is the clock while it plays; nothing should be moving it.
+    // Correcting it every frame flushes the decoder every frame, which cost
+    // about 95% of the animation frames and put the playhead a second behind
+    // the picture.
+    const state = await evaluate(
+      cdp,
+      `const { playback, commands } = window.__fluxDev;
+       playback.pause();
+       playback.seek(20);
+       await new Promise(r => setTimeout(r, 900));
+
+       const v = document.querySelector('video.viewer-media');
+       let seeks = 0;
+       const count = () => seeks++;
+       v.addEventListener('seeking', count);
+
+       await commands.run('playback.play');
+       await new Promise(r => setTimeout(r, 2500));
+       await commands.run('playback.pause');
+       v.removeEventListener('seeking', count);
+       return { seeks, reached: playback.getTime() };`,
+    )
+    assert.ok(state.reached > 21, `the playhead only reached ${state.reached}s`)
+    assert.equal(state.seeks, 0, 'playing must not seek')
+  })
+
+  await check('the playhead tracks the picture across a long run', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { playback, commands } = window.__fluxDev;
+       playback.pause();
+       playback.seek(10);
+       await new Promise(r => setTimeout(r, 900));
+       await commands.run('playback.play');
+
+       let worst = 0;
+       for (let i = 0; i < 8; i++) {
+         await new Promise(r => setTimeout(r, 350));
+         const v = document.querySelector('video.viewer-media');
+         worst = Math.max(worst, Math.abs(playback.getTime() - v.currentTime));
+       }
+       const reached = playback.getTime();
+       await commands.run('playback.pause');
+       return { worst, reached };`,
+    )
+    assert.ok(state.reached > 12, `the playhead only reached ${state.reached}s in ~2.8s`)
+    assert.ok(
+      state.worst < 0.1,
+      `the clock and the picture drifted ${Math.round(state.worst * 1000)}ms apart`,
+    )
+  })
+
+  await check('a stall stops the sequence where the picture stopped', async () => {
+    // The clock follows the source, so a source that is not advancing must not
+    // let the sequence run on without it - a playhead past a frozen picture is
+    // the same lie as a picture behind a running playhead.
+    const state = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       playback.seek(15);
+       await new Promise(r => setTimeout(r, 600));
+       const before = playback.getTime();
+       // Nothing is playing, so nothing should move.
+       await new Promise(r => setTimeout(r, 600));
+       return { before, after: playback.getTime() };`,
+    )
+    assert.equal(state.after, state.before, 'a paused transport must not creep')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

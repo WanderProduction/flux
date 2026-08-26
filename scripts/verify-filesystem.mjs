@@ -1,5 +1,6 @@
 /**
- * Exercises electron/filesystem.js against a real temp directory.
+ * Exercises electron/filesystem.js and electron/assetServer.js against a real
+ * temp directory.
  *
  * This module is the Content Browser's whole view of the disk, and it is the
  * part that cannot be checked from the renderer — hence a standalone script
@@ -21,6 +22,7 @@ import {
   listDrives,
   listSubfolders,
 } from '../electron/filesystem.js'
+import { parseRange, serveFile } from '../electron/assetServer.js'
 
 let passed = 0
 async function check(name, fn) {
@@ -200,6 +202,96 @@ try {
       )
     }
   })
+  // ── the asset server ──────────────────────────────────────────
+  //
+  // Byte ranges are what make a video seekable, and getting them wrong does not
+  // look like a server bug - it looks like a player that can only ever show the
+  // first couple of seconds of a clip. Which is exactly what it looked like.
+
+  const media = path.join(root, 'clip.mp4')
+  const body = Buffer.alloc(10000)
+  for (let i = 0; i < body.length; i++) body[i] = i % 251
+  await fs.writeFile(media, body)
+
+  const get = (headers) => serveFile(new Request('http://asset/', { headers }), media)
+
+  await check('a plain request advertises its size and that it accepts ranges', async () => {
+    const res = await get({})
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('Accept-Ranges'), 'bytes')
+    assert.equal(res.headers.get('Content-Length'), String(body.length))
+    assert.equal(res.headers.get('Content-Type'), 'video/mp4')
+    const got = Buffer.from(await res.arrayBuffer())
+    assert.ok(got.equals(body), 'the whole file, byte for byte')
+  })
+
+  await check('a range comes back as 206 with only those bytes', async () => {
+    const res = await get({ Range: 'bytes=100-199' })
+    assert.equal(res.status, 206, 'a 200 here tells the media stack the source is not seekable')
+    assert.equal(res.headers.get('Content-Range'), 'bytes 100-199/' + body.length)
+    assert.equal(res.headers.get('Content-Length'), '100')
+    const got = Buffer.from(await res.arrayBuffer())
+    assert.ok(got.equals(body.subarray(100, 200)), 'and they are the right bytes')
+  })
+
+  await check('an open-ended range runs to the end of the file', async () => {
+    const res = await get({ Range: 'bytes=9990-' })
+    assert.equal(res.status, 206)
+    assert.equal(res.headers.get('Content-Range'), 'bytes 9990-9999/' + body.length)
+    assert.equal((await res.arrayBuffer()).byteLength, 10)
+  })
+
+  await check('a suffix range means the last N bytes, not the first', async () => {
+    const res = await get({ Range: 'bytes=-64' })
+    assert.equal(res.status, 206)
+    assert.equal(res.headers.get('Content-Range'), 'bytes 9936-9999/' + body.length)
+    const got = Buffer.from(await res.arrayBuffer())
+    assert.ok(got.equals(body.subarray(body.length - 64)))
+  })
+
+  await check('a range past the end is refused, not answered wrongly', async () => {
+    const res = await get({ Range: 'bytes=99999-' })
+    assert.equal(res.status, 416)
+    assert.equal(res.headers.get('Content-Range'), 'bytes */' + body.length)
+  })
+
+  await check('an end past the file is clamped to the last byte', async () => {
+    const res = await get({ Range: 'bytes=9990-999999' })
+    assert.equal(res.status, 206)
+    assert.equal(res.headers.get('Content-Range'), 'bytes 9990-9999/' + body.length)
+  })
+
+  await check('a range header FLUX does not speak is ignored, not guessed at', async () => {
+    // Multipart ranges are legal HTTP that no media element asks for. The whole
+    // file as a 200 is honest; inventing one part of it is a silent wrong answer.
+    const res = await get({ Range: 'bytes=0-99,200-299' })
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('Content-Length'), String(body.length))
+  })
+
+  await check('parseRange handles the shapes a player actually sends', () => {
+    assert.deepEqual(parseRange('bytes=0-499', 10000), { start: 0, end: 499 })
+    assert.deepEqual(parseRange('bytes=500-', 10000), { start: 500, end: 9999 })
+    assert.deepEqual(parseRange('bytes=-100', 10000), { start: 9900, end: 9999 })
+    assert.equal(parseRange(null, 10000), null)
+    assert.equal(parseRange('bytes=-', 10000), null)
+    assert.equal(parseRange('seconds=1-2', 10000), null)
+    assert.equal(parseRange('bytes=10000-', 10000), 'unsatisfiable')
+    assert.equal(parseRange('bytes=500-499', 10000), 'unsatisfiable')
+  })
+
+  await check('a HEAD answers the question without reading the file', async () => {
+    const res = await serveFile(new Request('http://asset/', { method: 'HEAD' }), media)
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('Content-Length'), String(body.length))
+    assert.equal(res.body, null, 'a body here is a whole file read for no reason')
+  })
+
+  await check('a file that is not there is a 404, not a throw', async () => {
+    const res = await serveFile(new Request('http://asset/'), path.join(root, 'gone.mp4'))
+    assert.equal(res.status, 404)
+  })
+
 } finally {
   await fs.rm(root, { recursive: true, force: true })
 }

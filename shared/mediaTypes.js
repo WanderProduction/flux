@@ -62,6 +62,38 @@ export function isMediaFile(name) {
   return mediaKindOf(name) !== null
 }
 
+/**
+ * MIME type for a media path, or null.
+ *
+ * Chromium picks a demuxer from this. Guessing wrong — or omitting it and
+ * letting the media stack sniff — is the difference between a file that plays
+ * and one that reports an unsupported source for no visible reason.
+ * @type {Readonly<Record<string, string>>}
+ */
+const CONTENT_TYPES = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.ogv': 'video/ogg',
+}
+
+/**
+ * @param {string} name
+ * @returns {string}
+ */
+export function contentTypeOf(name) {
+  return CONTENT_TYPES[extensionOf(name)] ?? 'application/octet-stream'
+}
+
 /** Extensions without the dot, for the native open dialog's filters. */
 export const DIALOG_FILTERS = [
   {
