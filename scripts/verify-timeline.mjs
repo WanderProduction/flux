@@ -78,15 +78,17 @@ try {
   await requireFixtures(cdp, MEDIA_DIR)
   await resetProject(cdp)
 
-  await check('a new sequence has video tracks and no clips', async () => {
+  await check('a new sequence has video above audio, and no clips', async () => {
     const state = await evaluate(
       cdp,
       `const seq = window.__fluxDev.sequence;
        const s = seq.getSequence();
        return { tracks: s.tracks.map(t => t.id), kinds: s.tracks.map(t => t.kind), clips: s.clips.length, fps: s.frameRate };`,
     )
-    assert.deepEqual(state.tracks, ['V2', 'V1'])
-    assert.deepEqual(state.kinds, ['video', 'video'])
+    // The order is the stacking order: video upward because a higher layer is
+    // in front, audio downward because sound only ever sums.
+    assert.deepEqual(state.tracks, ['V2', 'V1', 'A1', 'A2'])
+    assert.deepEqual(state.kinds, ['video', 'video', 'audio', 'audio'])
     assert.equal(state.clips, 0)
     assert.equal(state.fps, 24)
   })
@@ -844,10 +846,17 @@ try {
     const state = await evaluate(
       cdp,
       `const { sequence } = window.__fluxDev;
-       sequence.setSequence({ name: 'One', frameRate: 24,
-         tracks: [{ id: 'V1', kind: 'video', name: 'V1' }], clips: [] });
+       sequence.setSequence(null);
        await new Promise(r => setTimeout(r, 200));
-       const refused = sequence.removeTrack('V1');
+       // Down to one by hand: a sequence handed in with no audio tracks is
+       // repaired on the way in, so this state has to be reached the way a user
+       // would reach it.
+       let guard = 0;
+       while (sequence.getSequence().tracks.length > 1 && guard++ < 20) {
+         sequence.removeTrack(sequence.getSequence().tracks.at(-1).id);
+       }
+       const only = sequence.getSequence().tracks[0].id;
+       const refused = sequence.removeTrack(only);
        return { refused, tracks: sequence.getSequence().tracks.length };`,
     )
     assert.equal(state.refused, false)
@@ -928,23 +937,28 @@ try {
          const down = await window.__dragClip(0, 0, 46, { altKey: true });
          return { up, down, tracks: window.__fluxDev.sequence.getSequence().tracks.map(t => t.id) };`,
     )
-    // V1 is the lower of the two, so "up" is V2.
-    assert.deepEqual(state.tracks, ['V2', 'V1'])
+    // V1 is the lower of the two video tracks, so "up" is V2.
+    assert.deepEqual(state.tracks, ['V2', 'V1', 'A1', 'A2'])
     assert.equal(state.up[0][0], 'V2', 'dragging up should have changed track')
     assert.equal(state.down[0][0], 'V1', 'and dragging back down should undo it')
   })
 
-  await check('a clip cannot be dragged off the end of the track list', async () => {
+  await check('a video clip cannot be dragged down onto an audio track', async () => {
     // Clamped, not refused: the drag should still do the part of itself that
     // can be done rather than snapping back for a reason nothing on screen
     // explains.
+    //
+    // The floor is the bottom of the *video* band, not the bottom of the track
+    // list. There are audio tracks below V1 now, and a picture landing on one
+    // would be a clip whose kind and track disagree — which every other rule
+    // in sequence.ts assumes cannot happen.
     const state = await evaluate(
       cdp,
       seedClips(4) +
         `const down = await window.__dragClip(0, 60, 300, { altKey: true });
          return down;`,
     )
-    assert.equal(state[0][0], 'V1', 'V1 is the last track, so it stays there')
+    assert.equal(state[0][0], 'V1', 'V1 is the last video track, so it stays there')
     assert.equal(state[0][1], 1, 'and the horizontal part of the drag still happened')
   })
 
@@ -1139,6 +1153,343 @@ try {
     )
     assert.equal(state.selected, 1, 'pressing beside the playhead should select the clip')
     assert.equal(state.time, 2, 'and must not have scrubbed')
+  })
+
+  // ── sound, and the shape of it ────────────────────────────────
+
+  /*
+   * A file with audio lands as two clips: the picture on a video track and the
+   * sound on an audio track, linked. What "linked" means is the whole of these
+   * checks — they move together, they are selected together, and deleting one
+   * deletes the other. Losing a take's sound by dragging its picture is not an
+   * edit anyone means to make.
+   *
+   * voice_over.mp4 is the fixture with anything to say here: two seconds loud,
+   * two seconds near-silent, three times over. A waveform drawn from audio that
+   * never changes cannot show whether it is following the audio at all.
+   */
+
+  /*
+   * The drag helper and voice_over.mp4 both have to be put back before this
+   * section can run. A check above deliberately reloads the page, which takes
+   * every page-side helper with it, and the fixture with the interesting audio
+   * is not one the earlier checks import.
+   */
+  await evaluate(cdp, DRAG_HELPER)
+  await evaluate(
+    cdp,
+    `const assets = window.__fluxDev.assets;
+     if (!assets.getAssets().some(a => a.name === 'voice_over.mp4')) {
+       assets.importAssets([{ path: ${dir} + '\\voice_over.mp4', kind: 'video' }]);
+     }
+     await Promise.all(assets.getAssets().map(a => assets.ensureProbed(a.id)));
+     await new Promise(r => setTimeout(r, 300));
+     return assets.getAssets().map(a => a.name);`,
+  )
+
+  /** Drops one fixture onto a lane by index and returns the sequence's clips. */
+  const dropOne = (name, laneIndex, atSeconds = 0) => `
+    const { sequence, view } = window.__fluxDev;
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 60 } });
+    await new Promise(r => setTimeout(r, 200));
+    await window.__drag(${JSON.stringify(name)}, ${laneIndex}, ${atSeconds}, 60);
+    await new Promise(r => setTimeout(r, 300));
+  `
+
+  await check('a file with sound lands as a picture and a sound, linked', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const clips = window.__fluxDev.sequence.getSequence().clips;
+         return clips.map(c => ({ track: c.trackId, kind: c.kind, start: c.start, link: c.linkId }));`,
+    )
+    assert.equal(state.length, 2, `expected a pair, got ${state.length}`)
+    const video = state.find((c) => c.kind === 'video')
+    const audio = state.find((c) => c.kind === 'audio')
+    assert.ok(video && audio, 'one of each')
+    assert.equal(video.track, 'V1')
+    assert.equal(audio.track, 'A1')
+    assert.ok(video.link && video.link === audio.link, 'the two halves must share a link')
+    assert.equal(audio.start, video.start, 'a pair that starts at two moments is a sync error')
+  })
+
+  await check('a file with no sound lands alone', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `const clips = window.__fluxDev.sequence.getSequence().clips;
+         return clips.map(c => ({ kind: c.kind, link: c.linkId ?? null }));`,
+    )
+    assert.deepEqual(state, [{ kind: 'video', link: null }])
+  })
+
+  await check('dragging the picture takes the sound with it', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const before = window.__clips();
+         await window.__dragClip(0, 120, 0, { altKey: true });
+         return { before, after: window.__clips() };`,
+    )
+    // Both halves, both at zero, before anything moves. Compared as sets: the
+    // order two clips at the same moment come back in is not a rule, and
+    // writing a check that depends on it would make it one by accident.
+    assert.deepEqual(
+      state.before.map((row) => row[0]).sort(),
+      ['A1', 'V1'],
+      state.before.join(' '),
+    )
+    assert.deepEqual(state.before.map((row) => row[1]), [0, 0])
+    const starts = state.after.map((row) => row[1])
+    assert.deepEqual(starts, [2, 2], `the pair ended up at ${starts.join(' and ')}`)
+    assert.deepEqual(
+      state.after.map((row) => row[0]).sort(),
+      ['A1', 'V1'],
+      'and neither half changed track',
+    )
+  })
+
+  await check('moving one half of a pair moves both, whoever asks', async () => {
+    /*
+     * The panel expands a press through the link before it drags anything, so
+     * the drag above would pass with or without the rule in the kernel. This is
+     * the rule itself: anything that moves a clip — a command, a ripple edit,
+     * something not written yet — gets it, because it is a fact about the
+     * sequence rather than a courtesy of the panel that happens to be in front.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const video = sequence.getSequence().clips.find(c => c.kind === 'video');
+         sequence.moveClips([video.id], 1.5, 0);
+         await new Promise(r => setTimeout(r, 200));
+         return sequence.getSequence().clips
+           .map(c => ({ kind: c.kind, start: Math.round(c.start * 1000) / 1000 }));`,
+    )
+    assert.equal(state.length, 2)
+    for (const clip of state) {
+      assert.equal(clip.start, 1.5, `the ${clip.kind} half ended up at ${clip.start}s`)
+    }
+  })
+
+  await check('dragging the picture down cannot strand it below its own sound', async () => {
+    // The bands again, from the audio side: the pair is on V1 and A1, and a
+    // drag downward has to be refused by the video half rather than quietly
+    // pushing the audio to A2 on its own.
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `await window.__dragClip(0, 0, 46, { altKey: true });
+         return window.__fluxDev.sequence.getSequence().clips
+           .map(c => c.kind + ':' + c.trackId).sort();`,
+    )
+    assert.deepEqual(state, ['audio:A1', 'video:V1'])
+  })
+
+  await check('pressing either half shows both selected', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const audio = [...document.querySelectorAll('.clip--audio')][0];
+         if (!audio) throw new Error('no audio clip on screen');
+         const box = audio.getBoundingClientRect();
+         audio.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 7,
+             clientX: box.left + 20, clientY: box.top + box.height / 2 }));
+         window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7 }));
+         await new Promise(r => setTimeout(r, 200));
+         return document.querySelectorAll('.clip--selected').length;`,
+    )
+    assert.equal(state, 2, 'pressing the sound should light the picture too')
+  })
+
+  await check('deleting the picture deletes the sound', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const video = sequence.getSequence().clips.find(c => c.kind === 'video');
+         const removed = sequence.removeClips([video.id]);
+         return { removed, left: sequence.getSequence().clips.length };`,
+    )
+    assert.equal(state.removed, 2, 'removing one half must remove both')
+    assert.equal(state.left, 0)
+  })
+
+  await check('dropped on an audio track, a file arrives as its sound alone', async () => {
+    const state = await evaluate(
+      cdp,
+      // Lane 2 is A1: the lanes are drawn in track order, V2 V1 A1 A2.
+      dropOne('voice_over.mp4', 2) +
+        `return window.__fluxDev.sequence.getSequence().clips
+           .map(c => c.kind + ':' + c.trackId);`,
+    )
+    assert.deepEqual(state, ['audio:A1'])
+  })
+
+  await check('a file with no sound is refused by an audio track', async () => {
+    // Not laid down as a silent block: an audio clip that can never make a
+    // noise is not something the timeline should be able to contain.
+    const state = await evaluate(
+      cdp,
+      `const { sequence, view } = window.__fluxDev;
+       sequence.setSequence(null);
+       view.recordView({ timeline: { zoom: 60 } });
+       await new Promise(r => setTimeout(r, 200));
+       const card = [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'clipA.mp4');
+       const lane = document.querySelectorAll('.tl-lane')[2];
+       const dt = new DataTransfer();
+       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       const rect = lane.getBoundingClientRect();
+       lane.dispatchEvent(new DragEvent('drop',
+         { dataTransfer: dt, bubbles: true, clientX: rect.left + 10 }));
+       await new Promise(r => setTimeout(r, 1200));
+       return sequence.getSequence().clips.length;`,
+    )
+    assert.equal(state, 0, 'a silent file has nothing to put on an audio track')
+  })
+
+  await check('a sequence saved before audio tracks existed opens with them', async () => {
+    // Older projects open, work, and save forward. The clips in one have no
+    // kind, which is not wrong, only older — and the only answer that can be
+    // right is the kind of the track they are already on.
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence } = window.__fluxDev;
+       const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+       sequence.setSequence({
+         name: 'Old', frameRate: 24,
+         tracks: [{ id: 'V2', kind: 'video', name: 'V2' }, { id: 'V1', kind: 'video', name: 'V1' }],
+         clips: [{ id: 'c1', assetId: a.id, trackId: 'V1', start: 0, duration: 4 }],
+       });
+       await new Promise(r => setTimeout(r, 300));
+       const s = sequence.getSequence();
+       return { tracks: s.tracks.map(t => t.id), kinds: s.clips.map(c => c.kind) };`,
+    )
+    assert.deepEqual(state.tracks, ['V2', 'V1', 'A1', 'A2'])
+    assert.deepEqual(state.kinds, ['video'])
+  })
+
+  // ── the waveform ──────────────────────────────────────────────
+
+  /**
+   * The inked height of one column of a waveform canvas, in backing pixels.
+   *
+   * Reading the pixels rather than the peaks. What is being checked is that the
+   * drawing follows the audio, and a check that asked the same array the
+   * drawing came from would pass whether or not anything was ever drawn.
+   */
+  const COLUMN = `
+    window.__waveColumn = (atSeconds) => {
+      const canvas = document.querySelector('canvas.clip-wave');
+      if (!canvas) throw new Error('no waveform canvas');
+      const clip = canvas.closest('.clip');
+      const duration = Number(clip.title.match(/([\\d.]+)s/)[1]);
+      const x = Math.min(canvas.width - 1, Math.round((atSeconds / duration) * canvas.width));
+      const data = canvas.getContext('2d').getImageData(x, 0, 1, canvas.height).data;
+      let top = -1, bottom = -1;
+      for (let y = 0; y < canvas.height; y++) {
+        if (data[y * 4 + 3] > 8) { if (top < 0) top = y; bottom = y; }
+      }
+      return top < 0 ? 0 : bottom - top + 1;
+    };
+    return true;`
+  await evaluate(cdp, COLUMN)
+
+  const withWaveform = `
+    const { sequence, view } = window.__fluxDev;
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 60 } });
+    await new Promise(r => setTimeout(r, 200));
+    await window.__drag('voice_over.mp4', 1, 0, 60);
+    for (let i = 0; i < 300; i++) {
+      if (document.querySelector('canvas.clip-wave')) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    await new Promise(r => setTimeout(r, 400));
+  `
+
+  await check('a clip with sound draws a waveform', async () => {
+    const state = await evaluate(
+      cdp,
+      withWaveform +
+        `const canvas = document.querySelector('canvas.clip-wave');
+         return { present: !!canvas, width: canvas?.width ?? 0, height: canvas?.height ?? 0 };`,
+    )
+    assert.equal(state.present, true, 'no waveform was ever drawn')
+    assert.ok(state.width > 100, `the canvas is ${state.width} backing pixels wide`)
+    assert.ok(state.height > 8, `and ${state.height} tall`)
+  })
+
+  await check('the waveform follows the audio, loud and quiet', async () => {
+    // The fixture is two seconds at 0.9 then two at 0.02, three times over. If
+    // the drawing is reading the peaks, that pattern has to be visible in the
+    // pixels — and if it is drawing a band of its own, it cannot be.
+    const state = await evaluate(
+      cdp,
+      withWaveform +
+        `return [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5]
+           .map(t => window.__waveColumn(t));`,
+    )
+    const loud = [0, 1, 4, 5, 8, 9].map((i) => state[i])
+    const quiet = [2, 3, 6, 7, 10, 11].map((i) => state[i])
+    assert.ok(
+      Math.min(...loud) > Math.max(...quiet) * 3,
+      `loud columns ${loud.join(',')} are not clearly taller than quiet ones ${quiet.join(',')}`,
+    )
+    assert.ok(Math.min(...quiet) >= 1, 'silence should still draw a line, not a gap')
+    assert.ok(
+      Math.min(...loud) > 10,
+      `a full-scale passage should nearly fill the clip, not ${Math.min(...loud)}px`,
+    )
+  })
+
+  await check('a clip with no sound draws no waveform', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `await new Promise(r => setTimeout(r, 800));
+         return document.querySelectorAll('canvas.clip-wave').length;`,
+    )
+    assert.equal(state, 0)
+  })
+
+  await check('a linked pair survives a save and a reload', async () => {
+    // The promise the project format makes: everything on the timeline comes
+    // back. A pair that reloads as two unrelated clips would still look right
+    // and would come apart the first time one of them was dragged.
+    const before = await evaluate(
+      cdp,
+      withWaveform +
+        `const { store, project } = window.__fluxDev;
+         const clips = sequence.getSequence().clips
+           .map(c => [c.kind, c.trackId, Math.round(c.start * 1000), !!c.linkId]);
+         const saved = await project.saveProject();
+         if (!saved.ok) throw new Error('save failed: ' + saved.error);
+         await store.flushStores();
+         location.reload();
+         return clips;`,
+    )
+    assert.equal(before.length, 2, 'setup: expected a pair to save')
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       const clips = seq.getSequence().clips;
+       const links = new Set(clips.map(c => c.linkId));
+       return {
+         clips: clips.map(c => [c.kind, c.trackId, Math.round(c.start * 1000), !!c.linkId]),
+         oneLink: links.size === 1 && !links.has(undefined),
+       };`,
+    )
+    assert.deepEqual(after.clips, before, 'the pair did not come back as it went in')
+    assert.equal(after.oneLink, true, 'the two halves are no longer linked to each other')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

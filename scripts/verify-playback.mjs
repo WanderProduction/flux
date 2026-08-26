@@ -673,6 +673,10 @@ try {
       cdp,
       `const { indexCache, videoSource } = window.__fluxDev;
        const times = [0, 4.44, 19.2, 37, 51.75, 12.5];
+       // Cold means cold: without forgetting the entry, the "fresh" walk below
+       // would come off disk too and this would compare the cache against
+       // itself.
+       await indexCache.forgetIndex(${LONG}, 'video');
 
        const walk = async () => {
          const r = await videoSource.VideoSource.open(${LONG});
@@ -689,6 +693,7 @@ try {
 
        indexCache.clearIndexMemory();
        const fresh = await walk();          // read from the file
+       if (indexCache.indexCacheStats().demux !== 1) return { fresh: { error: 'not a cold read' } };
        ${ENSURE_STORED(LONG)}
        indexCache.clearIndexMemory();
        const restored = await walk();       // read from the cache
@@ -760,6 +765,228 @@ try {
     } finally {
       await fs.rm(scratch, { force: true })
     }
+  })
+
+  // ── the shape of the sound ────────────────────────────────────
+
+  /*
+   * Peaks are the one derived thing in FLUX that is genuinely expensive rather
+   * than merely repeated: the audio has to be decoded end to end, because there
+   * is no shortcut to knowing how loud a moment is. So the questions are the
+   * same as for the index — is it used instead of the file, and is it the same
+   * thing when it comes back — plus the one that only applies here: does it
+   * actually describe the audio.
+   *
+   * voice_over.mp4 is two seconds at 0.9 then two at 0.02, three times over.
+   * Peaks built from audio that never changes would agree with almost any bug.
+   */
+  const VOICE = JSON.stringify(path.join(MEDIA_DIR, 'voice_over.mp4'))
+
+  await check('peaks describe the audio they were built from', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { peaks } = window.__fluxDev;
+       // Forgotten, not merely dropped from memory. Clearing memory alone
+       // leaves the entry on disk, so this would read back whatever a previous
+       // run built and never run the builder at all — which is exactly how a
+       // broken builder stays green.
+       await peaks.forgetPeaks(${VOICE});
+       peaks.clearPeaksMemory();
+       const r = await peaks.peaksFor(${VOICE});
+       if (!r.ok) return { error: r.reason };
+       if (peaks.peaksStats().built !== 1) return { error: 'the audio was not decoded' };
+       const p = r.peaks;
+       const at = (t) => {
+         const i = Math.floor(t * p.perSecond);
+         return Math.max(p.max[i], -p.min[i]);
+       };
+       return {
+         perSecond: p.perSecond,
+         channels: p.channels,
+         sampleRate: p.sampleRate,
+         duration: p.duration,
+         count: p.count,
+         loud: [0.5, 1.5, 4.5, 5.5, 8.5, 9.5].map(at),
+         quiet: [2.5, 3.5, 6.5, 7.5, 10.5, 11.5].map(at),
+       };`,
+    )
+    assert.equal(state.error, undefined, state.error)
+    assert.equal(state.perSecond, 400)
+    assert.equal(state.channels, 1)
+    assert.equal(state.sampleRate, 48000)
+    assert.ok(Math.abs(state.duration - 12) < 0.1, `duration ${state.duration}`)
+    assert.ok(Math.abs(state.count - 4800) < 60, `${state.count} buckets for twelve seconds`)
+
+    // 0.9 of full scale is 114 of 127; 0.02 is about 3.
+    for (const value of state.loud) {
+      assert.ok(value > 100, `a full-scale passage read as ${value}/127`)
+    }
+    for (const value of state.quiet) {
+      assert.ok(value < 20, `a near-silent passage read as ${value}/127`)
+    }
+  })
+
+  await check('peaks come back off disk exactly as they were built', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { peaks } = window.__fluxDev;
+       await peaks.forgetPeaks(${VOICE});
+       peaks.clearPeaksMemory();
+       const fresh = await peaks.peaksFor(${VOICE});
+       if (!fresh.ok) return { error: fresh.reason };
+       if (peaks.peaksStats().built !== 1) return { error: 'the audio was not decoded' };
+       // The store is deliberately not awaited by the app, so wait for it here
+       // rather than racing it.
+       for (let i = 0; i < 400; i++) {
+         if (peaks.peaksStats().stored > 0) break;
+         await new Promise(r => setTimeout(r, 25));
+       }
+       if (peaks.peaksStats().stored === 0) return { error: 'peaks were never stored' };
+       const before = { min: [...fresh.peaks.min], max: [...fresh.peaks.max] };
+
+       peaks.clearPeaksMemory();
+       const restored = await peaks.peaksFor(${VOICE});
+       if (!restored.ok) return { error: restored.reason };
+
+       let same = restored.peaks.count === before.min.length;
+       if (same) for (let i = 0; i < before.min.length; i++) {
+         if (restored.peaks.min[i] !== before.min[i] || restored.peaks.max[i] !== before.max[i]) {
+           same = false; break;
+         }
+       }
+       return { same, stats: peaks.peaksStats() };`,
+    )
+    assert.equal(state.error, undefined, state.error)
+    // Prove it took the other path, or this compares one decode against another.
+    assert.equal(state.stats.disk, 1, 'the second read did not come from the cache')
+    assert.equal(state.stats.built, 0, 'the audio was decoded all over again')
+    assert.equal(state.same, true, 'the restored waveform is not the one that was stored')
+  })
+
+  await check('three things derived from one file all survive in the cache', async () => {
+    /*
+     * A video index, an audio index and a waveform, all belonging to
+     * voice_over.mp4. Keyed only by path they would share one entry, each write
+     * overwriting the last.
+     *
+     * What that breaks is *not* correctness — an entry stamped with the wrong
+     * name is refused on read, so every caller simply rebuilds and every value
+     * still comes back right. The symptom is a cache that silently never hits,
+     * which is why this check is about where the answers came from rather than
+     * what they were.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { indexCache, peaks } = window.__fluxDev;
+       await indexCache.forgetIndex(${VOICE}, 'video');
+       await indexCache.forgetIndex(${VOICE}, 'audio');
+       await peaks.forgetPeaks(${VOICE});
+       indexCache.clearIndexMemory();
+       peaks.clearPeaksMemory();
+
+       // Cold: all three built from the file, all three stored.
+       const built = {
+         video: (await indexCache.trackFor(${VOICE}, 'video')).ok,
+         audio: (await indexCache.trackFor(${VOICE}, 'audio')).ok,
+         peaks: (await peaks.peaksFor(${VOICE})).ok,
+       };
+       for (let i = 0; i < 400; i++) {
+         if (indexCache.indexCacheStats().stored >= 2 && peaks.peaksStats().stored >= 1) break;
+         await new Promise(r => setTimeout(r, 25));
+       }
+       const stored = {
+         index: indexCache.indexCacheStats().stored,
+         peaks: peaks.peaksStats().stored,
+       };
+
+       // Warm: memory gone, disk intact. All three must come back off disk.
+       indexCache.clearIndexMemory();
+       peaks.clearPeaksMemory();
+       const video = await indexCache.trackFor(${VOICE}, 'video');
+       const audio = await indexCache.trackFor(${VOICE}, 'audio');
+       const sound = await peaks.peaksFor(${VOICE});
+       return {
+         built, stored,
+         values: {
+           width: video.ok && video.track.width,
+           channels: audio.ok && audio.track.channels,
+           buckets: sound.ok && sound.peaks.count,
+         },
+         from: { index: indexCache.indexCacheStats(), peaks: peaks.peaksStats() },
+       };`,
+    )
+    assert.deepEqual(state.built, { video: true, audio: true, peaks: true })
+    assert.equal(state.stored.index, 2, 'both indexes should have been stored')
+    assert.equal(state.stored.peaks, 1, 'the waveform should have been stored')
+
+    assert.equal(state.from.index.disk, 2, 'the two indexes did not both come off disk')
+    assert.equal(state.from.index.demux, 0, 'an index was read from the file again')
+    assert.equal(state.from.peaks.disk, 1, 'the waveform did not come off disk')
+    assert.equal(state.from.peaks.built, 0, 'the audio was decoded all over again')
+
+    // And they are still each other's opposite, not one entry read three ways.
+    assert.equal(state.values.width, 320)
+    assert.equal(state.values.channels, 1)
+    assert.ok(state.values.buckets > 4000)
+  })
+
+  await check('a file with no audio is asked about once', async () => {
+    // A refusal costs the same round trips as an answer, and the timeline asks
+    // on every redraw. Remembered for the session — and only the session, since
+    // a refusal has nothing to check itself against later.
+    const silent = JSON.stringify(path.join(MEDIA_DIR, 'clipA.mp4'))
+    const state = await evaluate(
+      cdp,
+      `const { peaks } = window.__fluxDev;
+       peaks.clearPeaksMemory();
+       const reasons = [];
+       for (let i = 0; i < 3; i++) {
+         const r = await peaks.peaksFor(${silent});
+         reasons.push(r.ok ? 'built' : r.reason);
+       }
+       return { reasons, stats: peaks.peaksStats() };`,
+    )
+    assert.deepEqual(state.reasons, ['no-audio-track', 'no-audio-track', 'no-audio-track'])
+    assert.equal(state.stats.refused, 2, 'the refusal was not remembered')
+    assert.equal(state.stats.built, 0, 'nothing should have been decoded')
+  })
+
+  await check('audioInfoFor answers without decoding the audio', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { peaks } = window.__fluxDev;
+       peaks.clearPeaksMemory();
+       const info = await peaks.audioInfoFor(${VOICE});
+       return { info, stats: peaks.peaksStats() };`,
+    )
+    assert.equal(state.info.channels, 1)
+    assert.equal(state.info.sampleRate, 48000)
+    assert.equal(state.stats.built, 0, 'asking whether a file has sound must not decode it')
+  })
+
+  await check('an audio clip alone under the playhead shows no picture', async () => {
+    // The Viewer looks down the video tracks and no further. A sound on its own
+    // is a thing FLUX can hold on a timeline and cannot yet play, and drawing
+    // the video track of the file it came from would hide that behind a picture
+    // nothing asked for.
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback } = window.__fluxDev;
+       const asset = assets.getAssets().find(a => a.name === 'voice_over.mp4')
+         ?? (await window.__fluxDev.importPipeline.importFiles(
+              [{ path: ${VOICE}, kind: 'video' }], 'link'))[0];
+       const probed = await assets.ensureProbed(asset.id);
+       sequence.clearSequence();
+       sequence.addClip({ assetId: asset.id, trackId: 'A1', start: 0, duration: probed.duration });
+       playback.seek(2);
+       await new Promise(r => setTimeout(r, 1200));
+       const clips = sequence.getSequence().clips.map(c => c.kind + ':' + c.trackId);
+       return { clips, via: window.__picture().via,
+                placeholder: !!document.querySelector('.viewer-placeholder') };`,
+    )
+    assert.deepEqual(state.clips, ['audio:A1'], 'setup: expected one audio clip')
+    assert.equal(state.via, 'none', `the viewer drew a picture via ${state.via}`)
+    assert.equal(state.placeholder, true, 'and it should say there is nothing to show')
   })
 
   await check('a container the demuxer will not read falls back to the element', async () => {

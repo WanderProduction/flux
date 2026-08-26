@@ -53,6 +53,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 | **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
+| **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
@@ -321,7 +322,52 @@ Drag the ruler, or the playhead itself — it carries a narrow handle down the l
 line is otherwise inert, because it lies over every lane and one that swallowed clicks would make
 the clip underneath it unselectable at exactly the time you are looking at.
 
-Not yet: trimming clips, audio tracks, and any UI for removing a track (the kernel refuses to remove
+#### Sound on the timeline
+
+A file with audio lands as **two clips** — the picture on a video track, the sound on an audio
+track — sharing a link. They move together, they are selected together, and deleting one deletes the
+other, because losing a take's sound by dragging its picture is not an edit anyone means to make.
+That rule lives in `sequence.ts` rather than in the panel: anything that moves a clip gets it,
+including things not written yet.
+
+Tracks stack the way every NLE stacks them, and it is not arbitrary — **video upward** because a
+higher layer is in front, **audio downward** because nothing is in front of anything, it all just
+sums. A clip may only travel within its own band; a picture landing on an audio track would be a
+clip whose kind and track disagree, which every other rule in the sequence assumes cannot happen.
+
+Dropped on an audio track, a file arrives as its sound alone. A file with no sound is refused there
+rather than laid down as a silent block.
+
+The waveform comes from [`shared/peaks.js`](shared/peaks.js): the audio decoded once, end to end,
+and reduced to the loudest sample in each direction per bucket. This is what Premiere's `.pek` files
+are and what its conforming progress bar is producing. Three numbers decide the shape of it:
+
+- **400 buckets a second**, because that is the timeline's maximum zoom — one bucket per pixel
+  there, and fewer than one per pixel everywhere else. Zooming past the peaks would draw a straight
+  line between real samples.
+- **One signed byte** per number. The limit is what the screen can show, not what the audio holds: a
+  byte resolves 1/127 of full scale, which on a waveform twenty pixels tall is a sixth of a pixel.
+- **Two bytes a bucket**, so an hour of audio is under 3MB — which is what makes keeping it beside
+  the media reasonable at all.
+
+Decoding sixty seconds of AAC takes about **230ms**, and reading the result back off disk takes
+**3.4ms**. So it happens in the background, once, and the clip is a plain block until it arrives —
+which is what every NLE shows while it is conforming. Blocking a clip on its own waveform would mean
+a timeline that will not show an edit until it has read the audio.
+
+It goes in the same media cache as the sample table, under the same staleness rules, filed under a
+different name — see [Indexing once](#indexing-once). Getting that key wrong is instructive: with
+one entry per file instead of one per file per thing, every value still comes back *correct*,
+because an entry stamped with the wrong name is refused on read and simply rebuilt. The only symptom
+is a cache that silently never hits.
+
+`AudioData` is borrowed from a pool exactly as `VideoFrame` is, and holding one stops the decoder
+rather than merely using memory. Here it is easy: nothing needs keeping, so each one is folded into
+its buckets and closed in the same breath. What does need throttling is the *queue* — an hour of AAC
+is 150,000 chunks, and submitting them all before the decoder caught up would hold the whole
+compressed track in memory.
+
+Not yet: trimming clips, and any UI for removing a track (the kernel refuses to remove
 the last one, since a sequence with none has nowhere to drop).
 
 ### Serving media
@@ -522,9 +568,14 @@ This is a *player*, not a renderer — it shows the source directly, because the
 yet to composite anything. When the engine lands, the Viewer becomes the surface it draws into and
 the clip lookup moves into the graph. What must not change is who owns the time.
 
-Not yet: audio scrubbing, loop, frame stepping, compositing more than one clip at a time, and a cut
-that does not re-open a source — the index is cached, but the *decoder* is still torn down and
-rebuilt when the playhead crosses one.
+Sound is drawn on the timeline but not yet *mixed*: the Viewer plays the audio belonging to the
+clip it is showing, so an audio clip on its own under the playhead shows no picture and makes no
+noise. A sequence whose sound comes from several audio clips at once needs a mixer, which is the
+audio half of the same gap the compositor fills for picture.
+
+Not yet: a mixer, audio scrubbing, loop, frame stepping, compositing more than one clip at a time,
+and a cut that does not re-open a source — the index is cached, but the *decoder* is still torn down
+and rebuilt when the playhead crosses one.
 
 ---
 
@@ -568,13 +619,14 @@ src/
                 project · view · playback · fsBridge · assets · sequence
                 importPipeline · thumbnails · mediaProbe          (the seams)
     media/      the decode pipeline: demux index -> VideoDecoder -> frames
-                and the cache that means a file is indexed once, not once per open
+                audio peaks -> the waveform on a clip
+                and the cache that means a file is read once, not once per open
   launcher/     the project chooser, shown until a project is open
   panels/       the three built-in panels, registered via the SDK
   shell/        command palette · the import-choice host
   styles/       theme tokens + app styles
 shared/         media types, project naming, the .flux format, the mp4 demuxer
-                and the on-disk shape of its index
+                and the on-disk shape of its index and of audio peaks
                 — imported by BOTH main and renderer, and by the harness
 build/          icons, generated by npm run icons (the script is the source)
 electron/       main process · preload bridge · filesystem reads · project layout
@@ -653,10 +705,16 @@ and containers it cannot read refused rather than guessed at. A demuxer that mis
 not throw — it hands the decoder bytes from the middle of another frame, and that arrives later as
 garbage with no obvious cause.
 
-It also covers the two modules that let an index be kept rather than rebuilt, for the same reason:
-neither imports electron, so both run against a real file in a temp directory. The questions there
-are whether a restored index is the *same* index in every element of every array, and whether a
-stale, torn or rotted one is refused rather than believed.
+It also covers the modules that let an index be kept rather than rebuilt, and the shape of audio
+peaks, for the same reason: none of them imports electron, so all of them run against a real file in
+a temp directory. The questions there are whether a restored index is the *same* index in every
+element of every array, and whether a stale, torn or rotted one is refused rather than believed.
+
+> **A cache is very good at hiding the code that fills it.** Two checks here passed with the builder
+> deliberately broken, because clearing the in-memory layer still left the entry on disk and the
+> check read that instead. Anything asking whether building still works has to *forget* first —
+> which is why `forgetIndex` and `forgetPeaks` exist, and they are also the primitive behind the
+> "delete the media cache" button every NLE has.
 
 `verify:playback` is the one suite where "it looks right" proves nothing: a viewer showing a stale
 frame while the clock has moved on, and a clock running while the video is paused, both photograph
@@ -674,6 +732,14 @@ can tell you about playback it can also tell you while a completely broken serve
 
 ```bash
 ffmpeg -y -f lavfi -i "testsrc2=size=640x360:rate=25:duration=60" -f lavfi -i "sine=frequency=440:duration=60" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 700k -g 50 -c:a aac -b:a 64k -shortest ~/flux-media-test/long_take.mp4
+```
+
+One fixture is loud and quiet on a schedule. `voice_over.mp4` alternates two seconds at 0.9 with two
+seconds at 0.02, three times — because a waveform drawn from audio that never changes cannot show
+whether it is following the audio or drawing a band of its own:
+
+```bash
+ffmpeg -y -f lavfi -i "testsrc2=size=320x180:rate=25:duration=12" -f lavfi -i "aevalsrc=sin(2*PI*300*t)*if(eq(mod(floor(t/2)\,2)\,0)\,0.9\,0.02):d=12:s=48000" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 300k -g 25 -c:a aac -b:a 128k -shortest ~/flux-media-test/voice_over.mp4
 ```
 
 `verify:timeline` synthesises drag and drop with a real `DataTransfer` and real `DragEvent`s

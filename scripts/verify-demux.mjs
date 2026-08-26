@@ -28,14 +28,15 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { keyframeAt, readVideoTrack, sampleAt } from '../shared/mp4.js'
+import { keyframeAt, readAudioTrack, readVideoTrack, sampleAt } from '../shared/mp4.js'
+import { bucketCount, decodePeaks, encodePeaks, peakRange, PEAKS_PER_SECOND } from '../shared/peaks.js'
 import { BYTES_PER_SAMPLE, decodeTrack, encodeTrack } from '../shared/mp4Index.js'
 import {
   entryPath,
   pruneCache,
-  readIndex,
+  readDerived,
   sourceToken,
-  writeIndex,
+  writeDerived,
 } from '../electron/mediaCache.js'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
@@ -78,6 +79,40 @@ async function trackOf(name) {
   return { result, size, handle }
 }
 
+async function audioTrackOf(name) {
+  const { reader, size, handle } = await openReader(path.join(MEDIA_DIR, name))
+  const result = await readAudioTrack(reader)
+  return { result, size, handle }
+}
+
+/**
+ * Peaks with a known shape, for exercising the format without a decoder.
+ *
+ * Deliberately not real audio: what is being checked is that these exact
+ * numbers survive the round trip, and generated values that are always the
+ * same are a better witness to that than a decode would be.
+ */
+function madeUpPeaks(seconds = 3) {
+  const count = bucketCount(seconds)
+  const min = new Int8Array(count)
+  const max = new Int8Array(count)
+  for (let i = 0; i < count; i++) {
+    // Something asymmetric and non-repeating, so a swapped or duplicated array
+    // cannot pass.
+    max[i] = (i * 37) % 128
+    min[i] = -(((i * 61) % 128) >> 1)
+  }
+  return {
+    perSecond: PEAKS_PER_SECOND,
+    count,
+    duration: seconds,
+    channels: 2,
+    sampleRate: 48000,
+    min,
+    max,
+  }
+}
+
 /**
  * Every way two tracks differ, as text.
  *
@@ -89,7 +124,7 @@ async function trackOf(name) {
  */
 function trackDifferences(a, b) {
   const notes = []
-  for (const field of ['codec', 'width', 'height', 'timescale', 'count']) {
+  for (const field of ['codec', 'width', 'height', 'channels', 'sampleRate', 'timescale', 'count']) {
     if (a[field] !== b[field]) notes.push(`${field}: ${a[field]} vs ${b[field]}`)
   }
   if (Math.abs(a.duration - b.duration) > 1e-9) notes.push(`duration: ${a.duration} vs ${b.duration}`)
@@ -352,9 +387,191 @@ try {
     assert.equal(decodeTrack(null), null)
   })
 
+  // ── the audio track ───────────────────────────────────────────
+
+  await check('the audio track reads as its own whole track', async () => {
+    // The same sample table with a different description box, which is the
+    // whole reason this lives in the demuxer rather than in a second library.
+    const { result, size, handle } = await audioTrackOf('voice_over.mp4')
+    assert.equal(result.ok, true, `refused: ${result.reason}`)
+    const audio = result.track
+
+    assert.equal(audio.codec, 'mp4a.40.2', 'AAC-LC, read from the AudioSpecificConfig')
+    assert.equal(audio.channels, 1)
+    assert.equal(audio.sampleRate, 48000)
+    assert.ok(Math.abs(audio.duration - 12) < 0.1, `duration was ${audio.duration}`)
+    assert.ok(audio.count > 400, `only ${audio.count} audio samples for twelve seconds`)
+
+    for (let i = 0; i < audio.count; i++) {
+      assert.ok(audio.bytes[i] > 0, `audio sample ${i} is empty`)
+      assert.ok(
+        audio.offset[i] + audio.bytes[i] <= size,
+        `audio sample ${i} runs past the end of the file`,
+      )
+    }
+    await handle.close()
+  })
+
+  await check('the AudioSpecificConfig is the one the decoder needs', async () => {
+    // Two bytes that say AAC-LC at 48kHz mono. Reading them from the wrong
+    // offset inside the esds descriptor chain gives a decoder that configures
+    // and then produces silence, or nothing.
+    const { result, handle } = await audioTrackOf('voice_over.mp4')
+    const description = result.track.description
+    assert.ok(description.length >= 2, 'no AudioSpecificConfig')
+    assert.equal(description[0] >> 3, 2, 'audio object type: AAC-LC')
+    // Sampling frequency index sits in the next four bits: 3 is 48000.
+    assert.equal(((description[0] & 7) << 1) | (description[1] >> 7), 3)
+    await handle.close()
+  })
+
+  await check('the audio and video tracks of one file do not overlap', async () => {
+    // Both are read out of the same stbl machinery, and a handler match that
+    // fell through to the wrong trak would give two indexes into one stream —
+    // which decodes as garbage rather than failing.
+    const video = await trackOf('voice_over.mp4')
+    const audio = await audioTrackOf('voice_over.mp4')
+    const spans = []
+    for (let i = 0; i < video.result.track.count; i++) {
+      spans.push([video.result.track.offset[i], video.result.track.bytes[i], 'v'])
+    }
+    for (let i = 0; i < audio.result.track.count; i++) {
+      spans.push([audio.result.track.offset[i], audio.result.track.bytes[i], 'a'])
+    }
+    spans.sort((a, b) => a[0] - b[0])
+    let mixed = 0
+    for (let i = 1; i < spans.length; i++) {
+      assert.ok(
+        spans[i - 1][0] + spans[i - 1][1] <= spans[i][0],
+        `a ${spans[i - 1][2]} sample runs into an ${spans[i][2]} one`,
+      )
+      if (spans[i][2] !== spans[i - 1][2]) mixed += 1
+    }
+    // And they really are interleaved, or "fetch while contiguous" would never
+    // have been wrong and this proves nothing.
+    assert.ok(mixed > 10, `the two streams are barely interleaved (${mixed} crossings)`)
+    await video.handle.close()
+    await audio.handle.close()
+  })
+
+  await check('a file with no audio says so rather than guessing', async () => {
+    const { result, handle } = await audioTrackOf('clipA.mp4')
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'no-audio-track')
+    await handle.close()
+  })
+
+  await check('a file with no video says so rather than returning its audio', async () => {
+    // The handler match is what keeps these apart; without it the audio trak
+    // would satisfy a request for video and the decoder would be handed AAC.
+    const { reader, handle } = await openReader(path.join(MEDIA_DIR, 'render.webm'))
+    const result = await readAudioTrack(reader)
+    assert.equal(result.ok, false)
+    await handle.close()
+  })
+
+  // ── peaks, written down and read back ─────────────────────────
+
+  const madeUp = madeUpPeaks()
+  const packed = encodePeaks(madeUp)
+
+  await check('peaks survive being written down and read back', () => {
+    const back = decodePeaks(packed)
+    assert.ok(back, 'the peaks did not decode at all')
+    for (const field of ['perSecond', 'count', 'channels', 'sampleRate']) {
+      assert.equal(back[field], madeUp[field], field)
+    }
+    assert.ok(Math.abs(back.duration - madeUp.duration) < 1e-9, 'duration')
+    assert.deepEqual([...back.min], [...madeUp.min], 'min')
+    assert.deepEqual([...back.max], [...madeUp.max], 'max')
+  })
+
+  await check('CANARY: the peaks round trip would notice one changed bucket', () => {
+    for (const field of ['min', 'max']) {
+      const back = decodePeaks(packed)
+      back[field][7] += 1
+      let noticed = false
+      for (let i = 0; i < madeUp.count; i++) {
+        if (back[field][i] !== madeUp[field][i]) noticed = true
+      }
+      assert.ok(noticed, `a changed ${field} bucket went unnoticed`)
+    }
+  })
+
+  await check('peaks cost two bytes a bucket', () => {
+    // The number the whole design rests on: an hour of audio in under 3MB is
+    // what makes keeping this beside the media reasonable at all.
+    const overhead = packed.length - madeUp.count * 2
+    assert.ok(overhead < 64, `${overhead} bytes of overhead for ${madeUp.count} buckets`)
+    assert.equal(PEAKS_PER_SECOND, 400, 'one bucket per pixel at the timeline maximum zoom')
+  })
+
+  await check('damaged peaks are refused rather than drawn', () => {
+    for (const cut of [1, 31, packed.length - 1]) {
+      assert.equal(decodePeaks(packed.slice(0, cut)), null, `${cut} bytes decoded`)
+    }
+    const version = packed.slice()
+    version[4] += 1
+    assert.equal(decodePeaks(version), null, 'a different format version was believed')
+
+    for (const at of [40, Math.floor(packed.length / 2), packed.length - 3]) {
+      const rotten = packed.slice()
+      rotten[at] ^= 0x40
+      assert.equal(decodePeaks(rotten), null, `a changed byte at ${at} was believed`)
+    }
+
+    const junk = new Uint8Array(packed.length)
+    for (let i = 0; i < junk.length; i++) junk[i] = (i * 7919) % 256
+    assert.equal(decodePeaks(junk), null)
+    assert.equal(decodePeaks(null), null)
+  })
+
+  await check('a column of waveform reads the loudest thing in its span', () => {
+    // What drawing a waveform is, once per pixel. Compared against a plain
+    // scan of the same buckets, because the binary-search-free version of this
+    // is the only one obviously right.
+    const peaks = madeUpPeaks(2)
+    for (const [from, to] of [
+      [0, 0.01],
+      [0.5, 0.75],
+      [1.234, 1.235],
+      [0, 2],
+    ]) {
+      const first = Math.floor(from * peaks.perSecond)
+      const last = Math.min(peaks.count - 1, Math.max(first, Math.ceil(to * peaks.perSecond) - 1))
+      let low = 0
+      let high = 0
+      for (let i = first; i <= last; i++) {
+        low = Math.min(low, peaks.min[i])
+        high = Math.max(high, peaks.max[i])
+      }
+      assert.deepEqual(peakRange(peaks, from, to), [low / 127, high / 127], `${from}..${to}`)
+    }
+  })
+
+  await check('a span narrower than a bucket still shows the bucket it lands in', () => {
+    // Zoomed past the resolution of the peaks, every column would otherwise
+    // come back empty and the waveform would vanish exactly when it is being
+    // looked at most closely.
+    const peaks = madeUpPeaks(1)
+    peaks.max[10] = 100
+    const [, high] = peakRange(peaks, 10 / peaks.perSecond, 10.001 / peaks.perSecond)
+    assert.ok(Math.abs(high - 100 / 127) < 1e-9, `got ${high}`)
+  })
+
+  await check('a clip longer than its audio ends flat rather than throwing', () => {
+    // Clips and their sound are not always the same length, and a waveform that
+    // threw at the end of the sound would take the timeline with it.
+    const peaks = madeUpPeaks(1)
+    assert.deepEqual(peakRange(peaks, 5, 6), [0, 0])
+    assert.deepEqual(peakRange(peaks, -1, -0.5), peakRange(peaks, 0, 1 / peaks.perSecond))
+  })
+
   // ── the cache on disk ─────────────────────────────────────────
 
   const cacheDir = path.join(tmp, 'media-cache')
+  /** What a demuxed video sample table is filed under. See media/indexCache.ts. */
+  const INDEX = 'video-index'
 
   /** A copy of a fixture, because these checks change files to see what happens. */
   async function subject(name) {
@@ -368,17 +585,17 @@ try {
     const token = await sourceToken(file)
     assert.ok(token, 'no token for a file that exists')
 
-    const written = await writeIndex(cacheDir, file, token, encoded)
+    const written = await writeDerived(cacheDir, file, INDEX, token, encoded)
     assert.equal(written.ok, true, written.reason)
 
-    const back = await readIndex(cacheDir, file, token)
+    const back = await readDerived(cacheDir, file, INDEX, token)
     assert.ok(back, 'nothing came back')
     assert.deepEqual([...back], [...encoded], 'the bytes changed on the way through')
   })
 
   await check('a file with nothing cached for it gets nothing', async () => {
     const file = await subject('never-indexed.mp4')
-    assert.equal(await readIndex(cacheDir, file, await sourceToken(file)), null)
+    assert.equal(await readDerived(cacheDir, file, INDEX, await sourceToken(file)), null)
   })
 
   await check('an index is refused once the file it describes has changed', async () => {
@@ -386,13 +603,13 @@ try {
     // longer there feeds the decoder offsets into a file of a different shape.
     const file = await subject('edited.mp4')
     const before = await sourceToken(file)
-    await writeIndex(cacheDir, file, before, encoded)
-    assert.ok(await readIndex(cacheDir, file, before), 'setup: nothing to invalidate')
+    await writeDerived(cacheDir, file, INDEX, before, encoded)
+    assert.ok(await readDerived(cacheDir, file, INDEX, before), 'setup: nothing to invalidate')
 
     await fs.appendFile(file, Buffer.alloc(16))
     const after = await sourceToken(file)
     assert.notEqual(after, before, 'the file changed but its identity did not')
-    assert.equal(await readIndex(cacheDir, file, after), null)
+    assert.equal(await readDerived(cacheDir, file, INDEX, after), null)
   })
 
   await check('an index built from bytes that changed underneath it is not stored', async () => {
@@ -403,16 +620,16 @@ try {
     const token = await sourceToken(file)
     await fs.appendFile(file, Buffer.alloc(4096))
 
-    const written = await writeIndex(cacheDir, file, token, encoded)
+    const written = await writeDerived(cacheDir, file, INDEX, token, encoded)
     assert.equal(written.ok, false)
     assert.equal(written.reason, 'stale')
-    assert.equal(await readIndex(cacheDir, file, await sourceToken(file)), null)
+    assert.equal(await readDerived(cacheDir, file, INDEX, await sourceToken(file)), null)
   })
 
   await check('a file that is gone has no identity and stores nothing', async () => {
     const missing = path.join(tmp, 'not-here.mp4')
     assert.equal(await sourceToken(missing), null)
-    const written = await writeIndex(cacheDir, missing, '1:2', encoded)
+    const written = await writeDerived(cacheDir, missing, INDEX, '1:2', encoded)
     assert.equal(written.ok, false)
     assert.equal(written.reason, 'source-missing')
   })
@@ -424,21 +641,21 @@ try {
   await check('an empty index is not written at all', async () => {
     const file = await subject('empty-index.mp4')
     const token = await sourceToken(file)
-    const written = await writeIndex(cacheDir, file, token, new Uint8Array(0))
+    const written = await writeDerived(cacheDir, file, INDEX, token, new Uint8Array(0))
     assert.equal(written.ok, false)
     assert.equal(written.reason, 'nothing-to-write')
-    assert.equal(await readIndex(cacheDir, file, token), null)
+    assert.equal(await readDerived(cacheDir, file, INDEX, token), null)
   })
 
   await check('a torn cache entry is ignored, not believed', async () => {
     const file = await subject('torn.mp4')
     const token = await sourceToken(file)
-    await writeIndex(cacheDir, file, token, encoded)
+    await writeDerived(cacheDir, file, INDEX, token, encoded)
 
-    const entry = entryPath(cacheDir, file)
+    const entry = entryPath(cacheDir, file, INDEX)
     const raw = await fs.readFile(entry)
     await fs.writeFile(entry, raw.subarray(0, raw.length - 64))
-    assert.equal(await readIndex(cacheDir, file, token), null)
+    assert.equal(await readDerived(cacheDir, file, INDEX, token), null)
   })
 
   await check('a rotted payload is caught by the index, not passed off as one', async () => {
@@ -447,14 +664,14 @@ try {
     // are intact. Neither alone would notice this.
     const file = await subject('rotted.mp4')
     const token = await sourceToken(file)
-    await writeIndex(cacheDir, file, token, encoded)
+    await writeDerived(cacheDir, file, INDEX, token, encoded)
 
-    const entry = entryPath(cacheDir, file)
+    const entry = entryPath(cacheDir, file, INDEX)
     const raw = await fs.readFile(entry)
     raw[raw.length - 200] ^= 0x08
     await fs.writeFile(entry, raw)
 
-    const back = await readIndex(cacheDir, file, token)
+    const back = await readDerived(cacheDir, file, INDEX, token)
     assert.ok(back, 'the envelope should still be intact — otherwise this proves nothing')
     assert.equal(decodeTrack(back), null, 'a rotted index was handed back as good')
   })
@@ -465,7 +682,7 @@ try {
     for (let i = 0; i < 6; i++) {
       const file = await subject(`prune-${i}.mp4`)
       const token = await sourceToken(file)
-      await writeIndex(pruneDir, file, token, encoded)
+      await writeDerived(pruneDir, file, INDEX, token, encoded)
       files.push({ file, token })
     }
 
@@ -474,32 +691,32 @@ try {
     const old = Date.now() - 86_400_000
     for (const [i, { file }] of files.entries()) {
       const when = new Date(old + i * 1000)
-      await fs.utimes(entryPath(pruneDir, file), when, when)
+      await fs.utimes(entryPath(pruneDir, file, INDEX), when, when)
     }
 
     // Reach for the two oldest, which is what has to save them.
     const kept = [files[0], files[1]]
     for (const { file, token } of kept) {
-      assert.ok(await readIndex(pruneDir, file, token), 'setup: no entry to use')
+      assert.ok(await readDerived(pruneDir, file, INDEX, token), 'setup: no entry to use')
       // readIndex touches the entry without waiting for it, so wait for the
       // touch here rather than sleeping and hoping.
       for (let i = 0; i < 100; i++) {
-        const stat = await fs.stat(entryPath(pruneDir, file))
+        const stat = await fs.stat(entryPath(pruneDir, file, INDEX))
         if (stat.mtimeMs > old + 60_000) break
         await new Promise((r) => setTimeout(r, 10))
       }
-      const stat = await fs.stat(entryPath(pruneDir, file))
+      const stat = await fs.stat(entryPath(pruneDir, file, INDEX))
       assert.ok(stat.mtimeMs > old + 60_000, `${path.basename(file)} was not marked as used`)
     }
 
-    const entrySize = (await fs.stat(entryPath(pruneDir, files[0].file))).size
+    const entrySize = (await fs.stat(entryPath(pruneDir, files[0].file, INDEX))).size
     const result = await pruneCache(pruneDir, entrySize * 2 + 1)
     assert.equal(result.kept, 2, `kept ${result.kept}`)
     assert.equal(result.removed, 4, `removed ${result.removed}`)
     assert.ok(result.bytes <= entrySize * 2 + 1, `held ${result.bytes} bytes`)
 
     for (const { file, token } of kept) {
-      assert.ok(await readIndex(pruneDir, file, token), `${path.basename(file)} was dropped`)
+      assert.ok(await readDerived(pruneDir, file, INDEX, token), `${path.basename(file)} was dropped`)
     }
   })
 

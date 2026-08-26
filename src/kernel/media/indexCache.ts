@@ -1,5 +1,5 @@
 import { assetUrl } from '../fsBridge'
-import { readVideoTrack } from '../../../shared/mp4.js'
+import { readAudioTrack, readVideoTrack } from '../../../shared/mp4.js'
 import { BYTES_PER_SAMPLE, decodeTrack, encodeTrack } from '../../../shared/mp4Index.js'
 
 /**
@@ -44,6 +44,10 @@ export interface VideoTrack {
   description: Uint8Array
   width: number
   height: number
+  /** 0 on a video track. */
+  channels: number
+  /** 0 on a video track. */
+  sampleRate: number
   timescale: number
   duration: number
   count: number
@@ -56,6 +60,22 @@ export interface VideoTrack {
 }
 
 export type TrackResult = { ok: true; track: VideoTrack } | { ok: false; reason: string }
+
+/**
+ * Which of a file's tracks is wanted.
+ *
+ * Both are the same sample table with a different description box, so they take
+ * the same path through here and are cached the same way. They are separate
+ * entries rather than one: a clip usually needs only its picture, and reading
+ * the audio index to find that out would double the cost of every open.
+ */
+export type TrackKind = 'video' | 'audio'
+
+/** What each kind is filed under, in memory and on disk. */
+const ENTRY_NAME: Record<TrackKind, string> = {
+  video: 'video-index',
+  audio: 'audio-index',
+}
 
 /**
  * How much decoded index to keep in memory.
@@ -77,6 +97,16 @@ interface Entry {
 const memory = new Map<string, Entry>()
 const refused = new Map<string, { token: string; reason: string }>()
 const inflight = new Map<string, Promise<TrackResult>>()
+/**
+ * Writes that have been started and not finished.
+ *
+ * The app does not wait for a store — the index is already in hand and someone
+ * is waiting to see a frame. But *forgetting* has to wait for it, or a write
+ * still in flight lands after the entry was deleted and puts it back. Which is
+ * not merely untidy: "delete the media cache" that sometimes does not is worse
+ * than one that never did, because the next thing anyone does is trust it.
+ */
+const writing = new Map<string, Promise<unknown>>()
 
 /** Where each answer came from. Read by scripts/verify-playback.mjs. */
 const stats = { memory: 0, disk: 0, demux: 0, stored: 0, refused: 0 }
@@ -102,31 +132,50 @@ export function clearIndexMemory(): void {
 
 interface MediaBridge {
   sourceToken: (path: string) => Promise<string | null>
-  readIndex: (path: string, token: string) => Promise<Uint8Array | null>
-  writeIndex: (
+  read: (path: string, name: string, token: string) => Promise<Uint8Array | null>
+  write: (
     path: string,
+    name: string,
     token: string,
     bytes: Uint8Array,
   ) => Promise<{ ok: boolean; reason?: string }>
+  forget: (path: string, name: string) => Promise<boolean>
 }
 
 function mediaBridge(): MediaBridge | null {
   return (globalThis as { flux?: { media?: MediaBridge } }).flux?.media ?? null
 }
 
-function remember(path: string, token: string, track: VideoTrack) {
-  memory.delete(path)
-  memory.set(path, { token, track, bytes: track.count * BYTES_PER_SAMPLE })
+function remember(key: string, token: string, track: VideoTrack) {
+  memory.delete(key)
+  memory.set(key, { token, track, bytes: track.count * BYTES_PER_SAMPLE })
 
   let held = 0
   for (const entry of memory.values()) held += entry.bytes
   // Oldest use first, which is what Map iteration gives once every hit
   // re-inserts.
-  for (const [key, entry] of memory) {
+  for (const [oldest, entry] of memory) {
     if (held <= MEMORY_BUDGET_BYTES) break
-    memory.delete(key)
+    memory.delete(oldest)
     held -= entry.bytes
   }
+}
+
+/**
+ * Throws away everything remembered about a file's index, on disk and in
+ * memory, so the next open reads the file itself.
+ *
+ * The primitive behind "delete the media cache" — see electron/mediaCache.js.
+ * It is also the only way to ask whether the *cold* path still works, which is
+ * a question a suite has to be able to ask more than once.
+ */
+export async function forgetIndex(path: string, kind: TrackKind = 'video'): Promise<void> {
+  const key = `${kind}:${path}`
+  // Anything already on its way to disk has to land before it can be deleted.
+  await writing.get(key)?.catch(() => {})
+  memory.delete(key)
+  refused.delete(key)
+  await mediaBridge()?.forget(path, ENTRY_NAME[kind]).catch(() => false)
 }
 
 /** Reads bytes for the demuxer through the same ranged protocol the decoder uses. */
@@ -156,17 +205,19 @@ function rangeReader(url: string) {
  * demuxes of one file racing each other is twelve round trips to learn the
  * same thing twice.
  */
-export function trackFor(path: string): Promise<TrackResult> {
-  const existing = inflight.get(path)
+export function trackFor(path: string, kind: TrackKind = 'video'): Promise<TrackResult> {
+  const key = `${kind}:${path}`
+  const existing = inflight.get(key)
   if (existing) return existing
 
-  const work = resolve(path).finally(() => inflight.delete(path))
-  inflight.set(path, work)
+  const work = resolve(path, kind, key).finally(() => inflight.delete(key))
+  inflight.set(key, work)
   return work
 }
 
-async function resolve(path: string): Promise<TrackResult> {
+async function resolve(path: string, kind: TrackKind, key: string): Promise<TrackResult> {
   const bridge = mediaBridge()
+  const name = ENTRY_NAME[kind]
 
   /*
    * The identity first, and on its own.
@@ -178,25 +229,25 @@ async function resolve(path: string): Promise<TrackResult> {
    */
   const token = bridge ? await bridge.sourceToken(path).catch(() => null) : null
 
-  const held = memory.get(path)
+  const held = memory.get(key)
   if (held && (token === null || held.token === token)) {
     stats.memory += 1
-    remember(path, held.token, held.track)
+    remember(key, held.token, held.track)
     return { ok: true, track: held.track }
   }
 
-  const no = refused.get(path)
+  const no = refused.get(key)
   if (no && token !== null && no.token === token) {
     stats.refused += 1
     return { ok: false, reason: no.reason }
   }
 
   if (bridge && token !== null) {
-    const bytes = await bridge.readIndex(path, token).catch(() => null)
+    const bytes = await bridge.read(path, name, token).catch(() => null)
     const track = bytes ? (decodeTrack(bytes) as VideoTrack | null) : null
     if (track) {
       stats.disk += 1
-      remember(path, token, track)
+      remember(key, token, track)
       return { ok: true, track }
     }
     // No entry, or an unreadable one — a layout from before a demuxer change,
@@ -206,28 +257,33 @@ async function resolve(path: string): Promise<TrackResult> {
   stats.demux += 1
   let result
   try {
-    result = await readVideoTrack(rangeReader(assetUrl(path)))
+    const read = kind === 'audio' ? readAudioTrack : readVideoTrack
+    result = await read(rangeReader(assetUrl(path)))
   } catch {
     return { ok: false, reason: 'unreadable' }
   }
 
   if (!result.ok) {
-    if (token !== null) refused.set(path, { token, reason: result.reason })
+    if (token !== null) refused.set(key, { token, reason: result.reason })
     return { ok: false, reason: result.reason }
   }
 
   const track = result.track as VideoTrack
-  if (token !== null) remember(path, token, track)
+  if (token !== null) remember(key, token, track)
 
   if (bridge && token !== null) {
     // Not awaited. The index is already in hand, and the caller is waiting to
     // show a frame — whether tomorrow's open is fast is not their problem.
-    void bridge
-      .writeIndex(path, token, encodeTrack(track))
+    const stored = bridge
+      .write(path, name, token, encodeTrack(track))
       .then((written) => {
         if (written?.ok) stats.stored += 1
       })
       .catch(() => {})
+      .finally(() => {
+        if (writing.get(key) === stored) writing.delete(key)
+      })
+    writing.set(key, stored)
   }
 
   return { ok: true, track }

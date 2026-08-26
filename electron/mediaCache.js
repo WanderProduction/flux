@@ -3,8 +3,14 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 /**
- * The media cache: indexes kept on disk so a file is demuxed once, not once
- * per open.
+ * The media cache: what FLUX has worked out about a file, kept on disk so it is
+ * worked out once rather than once per open.
+ *
+ * Two kinds of thing live here, and there will be more — a demuxed sample table
+ * (see shared/mp4Index.js) and audio peaks (shared/peaks.js). Both are named,
+ * both belong to one source file, and both go stale the moment that file
+ * changes, so they share one envelope and one set of rules rather than growing
+ * a second cache with its own subtly different idea of what stale means.
  *
  * ## Why this is not in the project
  *
@@ -44,8 +50,8 @@ import path from 'node:path'
 /** 'FLXC'. */
 const MAGIC = 0x464c5843
 
-/** Entry layout. Independent of the index format inside it. */
-const ENTRY_FORMAT = 1
+/** Entry layout. Independent of whatever format is inside it. */
+const ENTRY_FORMAT = 2
 
 /**
  * The envelope around an index.
@@ -55,13 +61,14 @@ const ENTRY_FORMAT = 1
  *    6  u16  identity token length
  *    8  u32  payload length
  *   12  u16  source path length
- *   14       reserved to 32
+ *   14  u16  name length
+ *   16       reserved to 32
  *
- * then the token, the source path, and the index itself. What is *inside* the
- * payload is none of this file's business — see shared/mp4Index.js, which has
- * its own version and its own checksum. The split matters: this layer decides
- * whether an entry is for the right bytes, that one decides whether the bytes
- * are intact, and neither alone would catch both.
+ * then the token, the source path, the name, and the payload. What is *inside*
+ * the payload is none of this file's business — see shared/mp4Index.js, which
+ * has its own version and its own checksum. The split matters: this layer
+ * decides whether an entry is for the right bytes, that one decides whether the
+ * bytes are intact, and neither alone would catch both.
  */
 const HEADER_BYTES = 32
 
@@ -79,22 +86,26 @@ const SUFFIX = '.fluxidx'
 export const CACHE_BUDGET_BYTES = 256 * 1024 * 1024
 
 /**
- * One entry per source path.
+ * One entry per source path per name.
  *
  * Windows paths are case-insensitive, so the same file reached two ways must
- * not index twice. Keying by path rather than by content means a file that is
- * edited in place replaces its own entry instead of orphaning it — the reason
- * the directory does not fill up with supersedings.
+ * not be worked out twice. Keying by path rather than by content means a file
+ * that is edited in place replaces its own entries instead of orphaning them —
+ * the reason the directory does not fill up with supersedings.
  */
-export function cacheKey(filePath) {
+export function cacheKey(filePath, name) {
   const resolved = path.resolve(filePath)
   const normalised = process.platform === 'win32' ? resolved.toLowerCase() : resolved
-  return crypto.createHash('sha256').update(normalised).digest('hex').slice(0, 32)
+  return crypto
+    .createHash('sha256')
+    .update(`${name}\u0000${normalised}`)
+    .digest('hex')
+    .slice(0, 32)
 }
 
-/** The file an index for `filePath` lives in. Exported so a harness can damage one. */
-export function entryPath(dir, filePath) {
-  return path.join(dir, `${cacheKey(filePath)}${SUFFIX}`)
+/** The file an entry lives in. Exported so a harness can damage one. */
+export function entryPath(dir, filePath, name) {
+  return path.join(dir, `${cacheKey(filePath, name)}${SUFFIX}`)
 }
 
 /** The same normalisation cacheKey hashes, so a stored path can be compared to a live one. */
@@ -125,7 +136,7 @@ export async function sourceToken(filePath) {
 }
 
 /**
- * The cached index for a file, or null if there is none that matches `token`.
+ * What is cached under `name` for a file, or null if it does not match `token`.
  *
  * The token comes from the caller rather than being read here, so the identity
  * a lookup is answered against is the same one the eventual write is checked
@@ -135,17 +146,17 @@ export async function sourceToken(filePath) {
  *
  * @returns {Promise<Uint8Array | null>}
  */
-export async function readIndex(dir, filePath, token) {
-  if (!token) return null
+export async function readDerived(dir, filePath, name, token) {
+  if (!token || !name) return null
 
   let raw
   try {
-    raw = await fs.readFile(entryPath(dir, filePath))
+    raw = await fs.readFile(entryPath(dir, filePath, name))
   } catch {
     return null
   }
 
-  const bytes = parseEntry(raw, comparablePath(filePath), token)
+  const bytes = parseEntry(raw, comparablePath(filePath), name, token)
   if (!bytes) return null
 
   // Last *used*, not last written, so the prune keeps what is actually being
@@ -153,7 +164,7 @@ export async function readIndex(dir, filePath, token) {
   // and an entry that fails to be touched is only a candidate to be dropped
   // sooner.
   const now = new Date()
-  fs.utimes(entryPath(dir, filePath), now, now).catch(() => {})
+  fs.utimes(entryPath(dir, filePath, name), now, now).catch(() => {})
 
   return bytes
 }
@@ -172,7 +183,7 @@ export async function readIndex(dir, filePath, token) {
  * and a key is a truncated hash — cheap to make self-evidently right rather
  * than probably right.
  */
-function parseEntry(raw, filePath, token) {
+function parseEntry(raw, filePath, name, token) {
   if (raw.length < HEADER_BYTES) return null
   const head = new DataView(raw.buffer, raw.byteOffset, raw.byteLength)
 
@@ -182,7 +193,9 @@ function parseEntry(raw, filePath, token) {
   const tokenLength = head.getUint16(6, true)
   const payloadLength = head.getUint32(8, true)
   const pathLength = head.getUint16(12, true)
-  if (raw.length !== HEADER_BYTES + tokenLength + pathLength + payloadLength) return null
+  const nameLength = head.getUint16(14, true)
+  const preamble = HEADER_BYTES + tokenLength + pathLength + nameLength
+  if (raw.length !== preamble + payloadLength) return null
 
   const text = new TextDecoder()
   const at = raw.byteOffset + HEADER_BYTES
@@ -190,21 +203,26 @@ function parseEntry(raw, filePath, token) {
   if (storedToken !== token) return null
   const storedPath = text.decode(new Uint8Array(raw.buffer, at + tokenLength, pathLength))
   if (storedPath !== filePath) return null
+  const storedName = text.decode(
+    new Uint8Array(raw.buffer, at + tokenLength + pathLength, nameLength),
+  )
+  if (storedName !== name) return null
 
-  const from = at + tokenLength + pathLength
+  const from = raw.byteOffset + preamble
   return new Uint8Array(raw.buffer.slice(from, from + payloadLength))
 }
 
 /**
- * Stores an index against the file it was built from.
+ * Stores something under `name` against the file it was worked out from.
  *
  * Refused — quietly, and reported as `stale` — when the file no longer matches
- * the identity the index was built against. See the note about the window at
- * the top of this file.
+ * the identity it was built against. See the note about the window at the top
+ * of this file.
  *
  * @returns {Promise<{ ok: true, bytes: number } | { ok: false, reason: string }>}
  */
-export async function writeIndex(dir, filePath, token, payload) {
+export async function writeDerived(dir, filePath, name, token, payload) {
+  if (!name) return { ok: false, reason: 'unnamed' }
   if (!token || !payload || payload.length === 0) return { ok: false, reason: 'nothing-to-write' }
 
   const now = await sourceToken(filePath)
@@ -214,20 +232,22 @@ export async function writeIndex(dir, filePath, token, payload) {
   const encoder = new TextEncoder()
   const tokenBytes = encoder.encode(token)
   const pathBytes = encoder.encode(comparablePath(filePath))
-  const out = new Uint8Array(
-    HEADER_BYTES + tokenBytes.length + pathBytes.length + payload.length,
-  )
+  const nameBytes = encoder.encode(name)
+  const preamble = HEADER_BYTES + tokenBytes.length + pathBytes.length + nameBytes.length
+  const out = new Uint8Array(preamble + payload.length)
   const head = new DataView(out.buffer)
   head.setUint32(0, MAGIC, true)
   head.setUint16(4, ENTRY_FORMAT, true)
   head.setUint16(6, tokenBytes.length, true)
   head.setUint32(8, payload.length, true)
   head.setUint16(12, pathBytes.length, true)
+  head.setUint16(14, nameBytes.length, true)
   out.set(tokenBytes, HEADER_BYTES)
   out.set(pathBytes, HEADER_BYTES + tokenBytes.length)
-  out.set(payload, HEADER_BYTES + tokenBytes.length + pathBytes.length)
+  out.set(nameBytes, HEADER_BYTES + tokenBytes.length + pathBytes.length)
+  out.set(payload, preamble)
 
-  const target = entryPath(dir, filePath)
+  const target = entryPath(dir, filePath, name)
   // Written aside and renamed. A cache entry torn in half by a crash would be
   // rejected on read rather than believed, but it would also sit there taking
   // up the budget and being rebuilt every time; renaming means an entry either
@@ -243,6 +263,27 @@ export async function writeIndex(dir, filePath, token, payload) {
   }
 
   return { ok: true, bytes: out.length }
+}
+
+/**
+ * Forgets one thing about one file.
+ *
+ * The primitive behind "delete the media cache" — the button every NLE has,
+ * because a cache is a thing that can be wrong in ways nobody can diagnose, and
+ * being able to throw it away is the difference between a bad afternoon and a
+ * reinstall. Nothing is lost: everything here can be worked out again from the
+ * media.
+ *
+ * @returns {Promise<boolean>} whether there was anything to forget.
+ */
+export async function forgetDerived(dir, filePath, name) {
+  if (!name) return false
+  try {
+    await fs.rm(entryPath(dir, filePath, name))
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**

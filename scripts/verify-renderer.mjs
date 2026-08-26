@@ -215,6 +215,7 @@ try {
       'render.webm',
       'shot_B.mp4',
       'still.jpg',
+      'voice_over.mp4',
     ])
     assert.ok(!names.includes('notes.txt'), 'non-media must not be listed')
     assert.deepEqual(

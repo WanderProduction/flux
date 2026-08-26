@@ -68,11 +68,20 @@ const SYNC_TOLERANCE = 0.01 + 1 / 96
 /**
  * The clip visible at `time`, or null.
  *
- * Topmost track wins: tracks are stored in the order they are drawn, V2 above
- * V1, so the first match down the list is the one covering the others.
+ * Topmost *video* track wins: tracks are stored in the order they are drawn, V2
+ * above V1, so the first match down the list is the one covering the others.
+ *
+ * Audio tracks are skipped, and not merely because a waveform is not a picture.
+ * The sound this panel plays comes from the same file as the clip it is
+ * showing, so treating an audio clip as the thing to show would put the Viewer
+ * on the audio half of a linked pair — the same file, the same moment, and a
+ * decode of a video track that nothing asked for. What is missing is a mixer:
+ * a sequence whose sound comes from several audio clips at once is a thing FLUX
+ * cannot yet play, and pretending otherwise here would hide that.
  */
 export function clipAt(sequence: SequenceState, time: number): Clip | null {
   for (const track of sequence.tracks) {
+    if (track.kind !== 'video') continue
     const found = sequence.clips.find(
       (clip) =>
         clip.trackId === track.id && time >= clip.start && time < clip.start + clip.duration,

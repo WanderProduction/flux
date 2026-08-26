@@ -48,8 +48,10 @@
  * @typedef {object} VideoTrack
  * @property {string} codec WebCodecs codec string, e.g. `avc1.64001f`
  * @property {Uint8Array} description the avcC record VideoDecoder needs
- * @property {number} width
- * @property {number} height
+ * @property {number} width 0 on an audio track
+ * @property {number} height 0 on an audio track
+ * @property {number} channels 0 on a video track
+ * @property {number} sampleRate 0 on a video track
  * @property {number} timescale ticks per second
  * @property {number} duration seconds
  * @property {number} count number of samples
@@ -136,12 +138,15 @@ function versionOf(view, body) {
   return view.getUint8(body)
 }
 
-function parseStsd(view, body, end) {
+/** The first sample entry in an stsd, or null. */
+function firstSampleEntry(view, body) {
   // version/flags, entry count, then the entries.
-  const entries = view.getUint32(body + 4)
-  if (entries < 1) return null
+  if (view.getUint32(body + 4) < 1) return null
+  return readHeader(view, body + 8)
+}
 
-  const first = readHeader(view, body + 8)
+function parseVisualEntry(view, body, end) {
+  const first = firstSampleEntry(view, body)
   if (!first) return null
   /*
    * A visual sample entry is a fixed 78-byte preamble and then child boxes.
@@ -298,12 +303,126 @@ function parseMdhd(view, body) {
 }
 
 /**
+ * Reads one descriptor out of an MPEG-4 descriptor chain.
+ *
+ * The chain inside `esds` is not boxes. Each descriptor is a tag byte then a
+ * length written seven bits at a time, high bit set on every byte but the
+ * last — so a length of 300 is two bytes and a length of 4 is one, and reading
+ * it as a fixed field walks straight into the payload.
+ */
+function readDescriptor(view, at, end) {
+  if (at + 2 > end) return null
+  const tag = view.getUint8(at)
+  let size = 0
+  let cursor = at + 1
+  for (let i = 0; i < 4 && cursor < end; i++) {
+    const byte = view.getUint8(cursor)
+    cursor += 1
+    size = (size << 7) | (byte & 0x7f)
+    if (!(byte & 0x80)) break
+  }
+  if (cursor + size > end) return null
+  return { tag, body: cursor, end: cursor + size }
+}
+
+/**
+ * The AudioSpecificConfig buried in an `esds`, which is what AudioDecoder wants
+ * as its `description`.
+ *
+ * ES_Descriptor -> DecoderConfigDescriptor -> DecoderSpecificInfo, each one
+ * inside the last. The optional fields in the middle are the part worth being
+ * careful about: an ES_Descriptor may or may not carry a dependency id, a URL
+ * and an OCR id, and skipping the wrong number of bytes lands the search for
+ * the next descriptor inside this one.
+ */
+function parseEsds(view, body, end) {
+  const es = readDescriptor(view, body + 4, end) // past version/flags
+  if (!es || es.tag !== 0x03) return null
+
+  let at = es.body + 2 // ES_ID
+  const flags = view.getUint8(at)
+  at += 1
+  if (flags & 0x80) at += 2 // depends on another stream
+  if (flags & 0x40) at += 1 + view.getUint8(at) // carries a URL
+  if (flags & 0x20) at += 2 // has its own clock reference
+
+  const config = readDescriptor(view, at, es.end)
+  if (!config || config.tag !== 0x04) return null
+
+  const objectType = view.getUint8(config.body)
+  // 13 bytes of buffer size and bitrates before the specific info.
+  const specific = readDescriptor(view, config.body + 13, config.end)
+  if (!specific || specific.tag !== 0x05) return null
+
+  const description = new Uint8Array(
+    view.buffer.slice(view.byteOffset + specific.body, view.byteOffset + specific.end),
+  )
+  return { objectType, description }
+}
+
+function parseAudioEntry(view, body, end) {
+  const first = firstSampleEntry(view, body)
+  if (!first) return null
+  /*
+   * An audio sample entry is a fixed 28-byte preamble and then child boxes.
+   *
+   *   8   SampleEntry:      reserved[6], data_reference_index
+   *   20  AudioSampleEntry: reserved[8], channelcount, samplesize,
+   *                         pre_defined, reserved, samplerate (16.16)
+   *
+   * The sample rate here is the one to trust for anything under 65,536Hz; the
+   * mdhd timescale agrees with it in every file an encoder writes, and this is
+   * where the reader that needs a rate expects to find it.
+   */
+  const format = first.type
+  const channels = view.getUint16(first.body + 16)
+  const sampleRate = view.getUint16(first.body + 24)
+
+  const esds = findChild(view, first.body + 28, Math.min(first.end, end), 'esds')
+  if (!esds) return { format, channels, sampleRate, description: null, codec: null }
+
+  const config = parseEsds(view, esds.body, esds.end)
+  if (!config || config.description.length < 1) {
+    return { format, channels, sampleRate, description: null, codec: null }
+  }
+
+  /*
+   * `mp4a.40.2` and friends: object type indication, then the audio object
+   * type from the top five bits of the AudioSpecificConfig. Chromium accepts
+   * `mp4a.40.2` for plain AAC-LC and wants the real number for HE-AAC, so it
+   * is read rather than assumed.
+   */
+  const audioObjectType = config.description[0] >> 3
+  const codec = `mp4a.${config.objectType.toString(16)}.${audioObjectType}`
+  return { format, channels, sampleRate, description: config.description, codec }
+}
+
+/**
  * Reads the index for the first video track.
  *
  * @param {ByteReader} reader
  * @returns {Promise<{ ok: true, track: VideoTrack } | { ok: false, reason: string }>}
  */
 export async function readVideoTrack(reader) {
+  return readTrack(reader, 'vide')
+}
+
+/**
+ * Reads the index for the first audio track.
+ *
+ * Same sample table, different sample entry. Everything about where the
+ * samples are and when they play is identical — which is the point of doing it
+ * here rather than reaching for a second library: an audio track is a video
+ * track with a different description box.
+ *
+ * @param {ByteReader} reader
+ * @returns {Promise<{ ok: true, track: AudioTrack } | { ok: false, reason: string }>}
+ */
+export async function readAudioTrack(reader) {
+  return readTrack(reader, 'soun')
+}
+
+async function readTrack(reader, handlerWanted) {
   const moov = await findMoov(reader)
   if (!moov) return { ok: false, reason: 'no-moov' }
 
@@ -326,7 +445,7 @@ export async function readVideoTrack(reader) {
       view.getUint8(hdlr.body + 10),
       view.getUint8(hdlr.body + 11),
     )
-    if (handler !== 'vide') continue
+    if (handler !== handlerWanted) continue
 
     /*
      * An edit list remaps the media's timeline onto the track's. The one
@@ -358,7 +477,10 @@ export async function readVideoTrack(reader) {
     const stscBox = findChild(view, stblBox.body, stblBox.end, 'stsc')
     if (!stsdBox || !sttsBox || !stszBox || !stscBox) return { ok: false, reason: 'malformed' }
 
-    const stsd = parseStsd(view, stsdBox.body, stsdBox.end)
+    const stsd =
+      handlerWanted === 'soun'
+        ? parseAudioEntry(view, stsdBox.body, stsdBox.end)
+        : parseVisualEntry(view, stsdBox.body, stsdBox.end)
     if (!stsd) return { ok: false, reason: 'malformed' }
     if (!stsd.description || !stsd.codec) {
       return { ok: false, reason: `unsupported-codec:${stsd.format}` }
@@ -404,8 +526,13 @@ export async function readVideoTrack(reader) {
       track: {
         codec: stsd.codec,
         description: stsd.description,
-        width: stsd.width,
-        height: stsd.height,
+        // Both shapes carry both pairs, one of which is zero. A track that
+        // reported only its own kind's fields would make every caller ask what
+        // kind it was holding before it could read anything off it.
+        width: stsd.width ?? 0,
+        height: stsd.height ?? 0,
+        channels: stsd.channels ?? 0,
+        sampleRate: stsd.sampleRate ?? 0,
         timescale,
         duration: duration / timescale,
         count,
@@ -419,7 +546,7 @@ export async function readVideoTrack(reader) {
     }
   }
 
-  return { ok: false, reason: 'no-video-track' }
+  return { ok: false, reason: handlerWanted === 'soun' ? 'no-audio-track' : 'no-video-track' }
 }
 
 /**

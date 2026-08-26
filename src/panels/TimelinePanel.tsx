@@ -20,8 +20,12 @@ import {
   seek,
   subscribePlayback,
 } from '../kernel/playback'
+import { audioInfoFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
+import { peakRange } from '../../shared/peaks.js'
 import {
   addClip,
+  addLinkedClips,
+  withLinked,
   addTrack,
   findFreeStart,
   moveClips,
@@ -304,13 +308,17 @@ export function TimelinePanel() {
       // "this one".
       const current = selectedRef.current
       const additive = event.shiftKey || event.ctrlKey || event.metaKey
+      // A picture and the sound that came with it are one thing to the hand, so
+      // pressing either shows both selected. moveClips would move the pair
+      // regardless; this is so what happens is what was visibly about to.
+      const together = withLinked([clip.id])
       let chosen: Set<string>
       if (additive) {
         chosen = new Set(current)
-        if (chosen.has(clip.id)) chosen.delete(clip.id)
-        else chosen.add(clip.id)
+        if (chosen.has(clip.id)) together.forEach((id) => chosen.delete(id))
+        else together.forEach((id) => chosen.add(id))
       } else {
-        chosen = current.has(clip.id) ? new Set(current) : new Set([clip.id])
+        chosen = current.has(clip.id) ? new Set(current) : new Set(together)
       }
       setSelected(chosen)
       // Immediately, not on the next render: a second press can arrive in the
@@ -517,13 +525,33 @@ export function TimelinePanel() {
         const asset = await ensureProbed(assetId)
         if (!asset || asset.missing || asset.unreadable || !asset.duration) continue
 
-        const clip = addClip({
-          assetId,
-          trackId: track.id,
-          start: cursor,
-          duration: asset.duration,
-        })
-        if (clip) cursor = clip.start + clip.duration
+        // Cheap: the audio track's index, not its waveform. See media/peaks.ts.
+        const hasAudio = Boolean(await audioInfoFor(asset.path))
+
+        /*
+         * Dropped on an audio track, a file arrives as its sound alone — which
+         * is what an audio track is for, and what Premiere does. A file with no
+         * sound is refused rather than laid down as a silent block: an audio
+         * clip that can never make a noise is not a thing the timeline should
+         * be able to contain.
+         */
+        if (track.kind === 'audio') {
+          if (!hasAudio) continue
+          const clip = addClip({
+            assetId,
+            trackId: track.id,
+            start: cursor,
+            duration: asset.duration,
+          })
+          if (clip) cursor = clip.start + clip.duration
+          continue
+        }
+
+        const { video } = addLinkedClips(
+          { assetId, trackId: track.id, start: cursor, duration: asset.duration },
+          hasAudio,
+        )
+        if (video) cursor = video.start + video.duration
       }
     },
     [timeAt, idsFromDrop],
@@ -639,7 +667,11 @@ export function TimelinePanel() {
           <div className="tl-header-spacer" />
           <div className="tl-header-list" ref={headersRef}>
             {sequence.tracks.map((track) => (
-              <div className="tl-header" key={track.id} style={{ height: TRACK_HEIGHT }}>
+              <div
+                className={`tl-header tl-header--${track.kind}`}
+                key={track.id}
+                style={{ height: TRACK_HEIGHT }}
+              >
                 <span className="track-name">{track.name}</span>
               </div>
             ))}
@@ -665,7 +697,7 @@ export function TimelinePanel() {
 
             {sequence.tracks.map((track) => (
               <div
-                className="tl-lane"
+                className={`tl-lane tl-lane--${track.kind}`}
                 key={track.id}
                 style={{ height: TRACK_HEIGHT }}
                 onDragOver={(e) => onDragOver(e, track)}
@@ -760,7 +792,7 @@ function ClipBlock({
 
   return (
     <div
-      className={`clip clip--video${state}${selected ? ' clip--selected' : ''}${
+      className={`clip clip--${clip.kind}${state}${selected ? ' clip--selected' : ''}${
         dragging ? ' clip--dragging' : ''
       }`}
       style={{
@@ -771,8 +803,97 @@ function ClipBlock({
       title={`${label} · ${clip.duration.toFixed(2)}s`}
       onPointerDown={onPointerDown}
     >
-      {thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />}
+      {clip.kind === 'audio' ? (
+        <Waveform path={asset?.path} width={width} start={0} duration={clip.duration} />
+      ) : (
+        thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />
+      )}
       <span className="clip-label">{label}</span>
     </div>
   )
+}
+
+/**
+ * The clip's sound, drawn.
+ *
+ * A canvas rather than an SVG path or a run of divs: at 400 pixels per second a
+ * minute of audio is 24,000 columns, and a timeline that built 24,000 DOM nodes
+ * per clip would stop being a timeline. Drawing is one pass over the peaks with
+ * one line per pixel — see shared/peaks.js for why there is a bucket per pixel
+ * to draw from.
+ *
+ * The peaks are asked for once and drawn whenever they arrive. Until then the
+ * clip is a plain block, which is what every NLE shows while it is conforming;
+ * blocking the clip on its own waveform would mean a timeline that will not
+ * show an edit until it has read the audio.
+ */
+function Waveform({
+  path,
+  width,
+  start,
+  duration,
+}: {
+  path: string | undefined
+  width: number
+  start: number
+  duration: number
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [peaks, setPeaks] = useState(() => (path ? cachedPeaks(path) : null))
+
+  useEffect(() => {
+    if (!path) return
+    let live = true
+    const held = cachedPeaks(path)
+    setPeaks(held)
+    if (held) return
+    void peaksFor(path).then((result) => {
+      if (live) setPeaks(result.ok ? result.peaks : null)
+    })
+    return () => {
+      live = false
+    }
+  }, [path])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !peaks) return
+
+    // Backing store in device pixels, size in CSS pixels: a waveform drawn at
+    // one device pixel per column on a 150% display is the only version of this
+    // that looks like a waveform rather than a smear.
+    const ratio = window.devicePixelRatio || 1
+    const columns = Math.max(1, Math.floor(width))
+    const height = canvas.clientHeight || 1
+    canvas.width = Math.round(columns * ratio)
+    canvas.height = Math.round(height * ratio)
+
+    const context = canvas.getContext('2d')
+    if (!context) return
+    context.setTransform(ratio, 0, 0, ratio, 0, 0)
+    context.clearRect(0, 0, columns, height)
+
+    const middle = height / 2
+    const reach = height / 2 - 1
+    context.strokeStyle = getComputedStyle(canvas).color
+    context.lineWidth = 1
+
+    context.beginPath()
+    for (let x = 0; x < columns; x++) {
+      const from = start + (x / columns) * duration
+      const to = start + ((x + 1) / columns) * duration
+      const [low, high] = peakRange(peaks, from, to)
+      // Half a pixel, so a one-pixel line lands on the pixel rather than across
+      // the seam between two.
+      const at = x + 0.5
+      // A minimum of one pixel: silence should read as a line through the
+      // middle, not as a gap where the waveform stopped.
+      context.moveTo(at, middle - Math.max(high * reach, 0.5))
+      context.lineTo(at, middle + Math.max(-low * reach, 0.5))
+    }
+    context.stroke()
+  }, [peaks, width, start, duration])
+
+  if (!peaks) return null
+  return <canvas className="clip-wave" ref={canvasRef} />
 }

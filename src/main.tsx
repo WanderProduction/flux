@@ -21,6 +21,7 @@ import * as playback from './kernel/playback'
 import * as importPipeline from './kernel/importPipeline'
 import * as videoSource from './kernel/media/videoSource'
 import * as indexCache from './kernel/media/indexCache'
+import * as peaks from './kernel/media/peaks'
 
 // Panels register before the first render so the dock's component map is
 // complete on mount. Plugins will hook in here later, ahead of this call.
@@ -57,6 +58,7 @@ if (import.meta.env.DEV) {
       importPipeline,
       videoSource,
       indexCache,
+      peaks,
     },
   })
 }

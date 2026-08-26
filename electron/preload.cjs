@@ -48,9 +48,15 @@ contextBridge.exposeInMainWorld('flux', {
      * bytes can never be stored against another. See electron/mediaCache.js.
      */
     sourceToken: (filePath) => ipcRenderer.invoke('media:sourceToken', filePath),
-    readIndex: (filePath, token) => ipcRenderer.invoke('media:readIndex', filePath, token),
-    writeIndex: (filePath, token, bytes) =>
-      ipcRenderer.invoke('media:writeIndex', filePath, token, bytes),
+    /**
+     * Derived data, by name: a demuxed sample table, audio peaks, whatever
+     * comes next. One envelope and one staleness rule for all of it.
+     */
+    read: (filePath, name, token) => ipcRenderer.invoke('media:read', filePath, name, token),
+    write: (filePath, name, token, bytes) =>
+      ipcRenderer.invoke('media:write', filePath, name, token, bytes),
+    /** Throws one cached thing away, so it is worked out again next time. */
+    forget: (filePath, name) => ipcRenderer.invoke('media:forget', filePath, name),
   },
   project: {
     create: (root, name) => ipcRenderer.invoke('project:create', root, name),

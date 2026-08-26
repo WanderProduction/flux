@@ -456,6 +456,14 @@ kbd {
   background: var(--flux-bg-panel);
   box-sizing: border-box;
 }
+/* Audio sits below video and reads as a separate region, the way it does in
+   every NLE — a lane you can tell apart at a glance without reading its name. */
+.tl-lane--audio {
+  background: color-mix(in srgb, var(--flux-audio) 4%, var(--flux-bg-panel));
+}
+.tl-header--audio .track-name {
+  color: color-mix(in srgb, var(--flux-audio) 55%, var(--flux-text-dim));
+}
 
 .clip {
   position: absolute;
@@ -524,6 +532,26 @@ kbd {
   object-fit: cover;
   flex: 0 0 auto;
   opacity: 0.85;
+}
+/*
+ * The waveform fills the block and the label rides over it.
+ *
+ * `color` rather than a hardcoded stroke: the canvas reads its own computed
+ * colour, so a skin that redefines --flux-audio moves the waveform with
+ * everything else instead of leaving one thing behind.
+ */
+.clip-wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  color: color-mix(in srgb, var(--flux-audio) 75%, #ffffff);
+  opacity: 0.85;
+  pointer-events: none;
+}
+.clip--audio .clip-label {
+  position: relative;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
 }
 .clip-label {
   overflow: hidden;

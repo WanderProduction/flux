@@ -53,8 +53,10 @@ const MAGIC = 0x464c5849
  * Layout and meaning. Bump on any change to either.
  *
  *   1 — offset/bytes/dts/pts/key/order, presentation times shifted to zero.
+ *   2 — channel count and sample rate, so an audio track's index is as
+ *       complete as a video track's.
  */
-export const FORMAT = 1
+export const FORMAT = 2
 
 /**
  * Fixed part of the header; the codec string and avcC record follow it.
@@ -70,10 +72,13 @@ export const FORMAT = 1
  *   20  u16  codec string length
  *   22  u16  avcC length
  *   24  u32  checksum of everything past this header
- *   28  u32  reserved
+ *   28  u16  channel count (0 on a video track)
+ *   30  u16  reserved
  *   32  f64  duration, seconds
+ *   40  u32  sample rate (0 on a video track)
+ *   44  u32  reserved
  */
-const HEADER_BYTES = 40
+const HEADER_BYTES = 48
 
 /** 1 on a little-endian machine, which is what the array bytes below are in. */
 function nativeEndian() {
@@ -150,7 +155,9 @@ export function encodeTrack(track) {
   head.setUint32(16, track.timescale, true)
   head.setUint16(20, codec.length, true)
   head.setUint16(22, description.length, true)
+  head.setUint16(28, track.channels ?? 0, true)
   head.setFloat64(32, track.duration, true)
+  head.setUint32(40, track.sampleRate ?? 0, true)
 
   let at = HEADER_BYTES
   out.set(codec, at)
@@ -213,6 +220,8 @@ export function decodeTrack(bytes) {
     description,
     width: head.getUint16(12, true),
     height: head.getUint16(14, true),
+    channels: head.getUint16(28, true),
+    sampleRate: head.getUint32(40, true),
     timescale: head.getUint32(16, true),
     duration: head.getFloat64(32, true),
     count,

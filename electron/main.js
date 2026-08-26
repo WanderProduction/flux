@@ -12,7 +12,13 @@ import {
   listSubfolders,
 } from './filesystem.js'
 import { serveFile } from './assetServer.js'
-import { pruneCache, readIndex, sourceToken, writeIndex } from './mediaCache.js'
+import {
+  forgetDerived,
+  pruneCache,
+  readDerived,
+  sourceToken,
+  writeDerived,
+} from './mediaCache.js'
 import { copyIntoImports, createProject, isProject, openProject, saveProject } from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
 
@@ -312,16 +318,19 @@ const mediaCachePath = () => path.join(app.getPath('userData'), 'media-cache')
  */
 ipcMain.handle('media:sourceToken', (_e, filePath) => sourceToken(filePath))
 /**
- * The cached index, but only if the file still matches `token`.
+ * What is cached under `name` for a file, but only if it still matches `token`.
  *
  * Uint8Array survives the structured clone, so the bytes arrive as bytes with
  * no base64 round trip through a string.
  */
-ipcMain.handle('media:readIndex', (_e, filePath, token) =>
-  readIndex(mediaCachePath(), filePath, token),
+ipcMain.handle('media:read', (_e, filePath, name, token) =>
+  readDerived(mediaCachePath(), filePath, name, token),
 )
-ipcMain.handle('media:writeIndex', (_e, filePath, token, payload) =>
-  writeIndex(mediaCachePath(), filePath, token, payload),
+ipcMain.handle('media:write', (_e, filePath, name, token, payload) =>
+  writeDerived(mediaCachePath(), filePath, name, token, payload),
+)
+ipcMain.handle('media:forget', (_e, filePath, name) =>
+  forgetDerived(mediaCachePath(), filePath, name),
 )
 
 ipcMain.handle('dialog:pickProjectFile', async (event) => {
