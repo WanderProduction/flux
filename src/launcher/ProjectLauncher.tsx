@@ -6,9 +6,11 @@ import {
   forgetRecent,
   getRecents,
   isProjectFolder,
+  launchTarget,
   loadRecents,
   openProject,
   pickDirectory,
+  pickProjectFile,
   subscribeProject,
   type ProjectError,
   type RecentProject,
@@ -38,6 +40,12 @@ export function ProjectLauncher() {
     const unsubscribe = subscribeProject(() => setRecents([...getRecents()]))
     void loadRecents()
     nameRef.current?.focus()
+
+    // Launched by double-clicking a .flux document: open it straight away
+    // rather than making the user find it again in a list.
+    void launchTarget().then((target) => {
+      if (target) void openProject(target)
+    })
     return unsubscribe
   }, [])
 
@@ -91,7 +99,9 @@ export function ProjectLauncher() {
   )
 
   const browseAndOpen = useCallback(async () => {
-    const chosen = await pickDirectory()
+    // A .flux file, not a folder: the document is the thing the user thinks of
+    // as their project, and it is what a double-click would hand us.
+    const chosen = await pickProjectFile()
     if (chosen) await open(chosen)
   }, [open])
 
@@ -155,7 +165,7 @@ export function ProjectLauncher() {
             </button>
 
             <button className="ghost-button" onClick={() => void browseAndOpen()}>
-              Open an existing project…
+              Open a .flux project…
             </button>
 
             {error && <p className="launcher-error">{error}</p>}

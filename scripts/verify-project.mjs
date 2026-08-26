@@ -86,7 +86,7 @@ try {
     )
 
     const entries = await fs.readdir(projectA)
-    assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files'])
+    assert.deepEqual(entries.sort(), ['Alpha.flux', 'exports', 'imports', 'project_files'])
   })
 
   await check('the project root is the named folder', async () => {
@@ -94,19 +94,59 @@ try {
     assert.equal(root, projectA)
   })
 
-  await check('project state is written into the project, not userData', async () => {
-    await evaluate(
+  await check('a new project starts saved, and importing marks it unsaved', async () => {
+    const state = await evaluate(
       cdp,
-      `const { assets, store } = window.__fluxDev;
+      `const { assets, project } = window.__fluxDev;
+       const before = project.isDirty();
        assets.importAssets([{ path: ${js(path.join(MEDIA_DIR, 'clipA.mp4'))}, kind: 'video' }]);
-       await store.flushStores();
-       return true;`,
+       await new Promise(r => setTimeout(r, 200));
+       return { before, after: project.isDirty() };`,
     )
-    const stored = JSON.parse(
-      await fs.readFile(path.join(projectA, 'project_files', 'assets.json'), 'utf8'),
+    assert.equal(state.before, false, 'a freshly created project has nothing to save')
+    assert.equal(state.after, true, 'importing is unsaved work')
+  })
+
+  await check('saving writes the .flux document and clears the unsaved mark', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { project } = window.__fluxDev;
+       const result = await project.saveProject();
+       return { ok: result.ok, error: result.error, dirty: project.isDirty(),
+                file: project.getProject()?.file };`,
     )
-    assert.equal(stored.length, 1)
-    assert.equal(stored[0].name, 'clipA.mp4')
+    assert.equal(state.ok, true, `save failed: ${state.error}`)
+    assert.equal(state.dirty, false)
+    assert.equal(state.file, path.join(projectA, 'Alpha.flux'))
+
+    const doc = JSON.parse(await fs.readFile(state.file, 'utf8'))
+    assert.equal(doc.name, 'Alpha')
+    assert.equal(doc.assets.length, 1)
+    assert.equal(doc.assets[0].name, 'clipA.mp4')
+  })
+
+  await check('the document sits in the project root, beside the folders', async () => {
+    const entries = await fs.readdir(projectA)
+    assert.deepEqual(entries.sort(), ['Alpha.flux', 'exports', 'imports', 'project_files'])
+  })
+
+  await check('Ctrl S is wired to Save Project', async () => {
+    const result = await evaluate(
+      cdp,
+      `const { assets, project, commands } = window.__fluxDev;
+       assets.importAssets([{ path: ${js(path.join(MEDIA_DIR, 'still.jpg'))}, kind: 'image' }]);
+       await new Promise(r => setTimeout(r, 200));
+       const dirtyBefore = project.isDirty();
+       // Through the keymap's command id, the same path the key press takes.
+       await commands.run('project.save');
+       await new Promise(r => setTimeout(r, 400));
+       return { dirtyBefore, dirtyAfter: project.isDirty() };`,
+    )
+    assert.equal(result.dirtyBefore, true)
+    assert.equal(result.dirtyAfter, false)
+
+    const doc = JSON.parse(await fs.readFile(path.join(projectA, 'Alpha.flux'), 'utf8'))
+    assert.equal(doc.assets.length, 2, 'the second import should be in the saved document')
   })
 
   await check('closing a project returns to the launcher', async () => {
@@ -139,6 +179,39 @@ try {
     assert.deepEqual(names, [], `Beta should be empty, got ${JSON.stringify(names)}`)
   })
 
+  await check('closing and reopening restores the saved work', async () => {
+    const names = await evaluate(
+      cdp,
+      `const { project, assets } = window.__fluxDev;
+       project.closeProject();
+       await new Promise(r => setTimeout(r, 200));
+       const whileClosed = assets.getAssets().length;
+       const r = await project.openProject(${js(projectA)});
+       if (!r.ok) throw new Error(r.error);
+       await new Promise(r => setTimeout(r, 300));
+       return { whileClosed, names: assets.getAssets().map(a => a.name).sort(),
+                dirty: project.isDirty() };`,
+    )
+    assert.equal(names.whileClosed, 0, 'closing drops the state')
+    assert.deepEqual(names.names, ['clipA.mp4', 'still.jpg'])
+    assert.equal(names.dirty, false, 'a saved project reopens clean')
+  })
+
+  await check('a project can be opened by its .flux file', async () => {
+    const result = await evaluate(
+      cdp,
+      `const { project } = window.__fluxDev;
+       project.closeProject();
+       await new Promise(r => setTimeout(r, 150));
+       const r = await project.openProject(${js(path.join(projectA, 'Alpha.flux'))});
+       return { ok: r.ok, error: r.error, root: project.getProject()?.root,
+                name: project.getProject()?.name };`,
+    )
+    assert.equal(result.ok, true, `open failed: ${result.error}`)
+    assert.equal(result.root, projectA)
+    assert.equal(result.name, 'Alpha')
+  })
+
   await check('reopening the first project brings its assets back', async () => {
     const names = await evaluate(
       cdp,
@@ -148,18 +221,12 @@ try {
        for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(res => setTimeout(res, 100));
        return assets.getAssets().map(a => a.name);`,
     )
-    assert.deepEqual(names, ['clipA.mp4'])
+    assert.deepEqual(names, ['clipA.mp4', 'still.jpg'])
   })
 
   await check('Beta was never polluted by Alpha on disk', async () => {
-    const betaAssets = path.join(projectB, 'project_files', 'assets.json')
-    try {
-      const stored = JSON.parse(await fs.readFile(betaAssets, 'utf8'))
-      assert.deepEqual(stored, [], `Beta's assets file holds ${JSON.stringify(stored)}`)
-    } catch (err) {
-      // Never written at all is equally correct.
-      if (err.code !== 'ENOENT') throw err
-    }
+    const doc = JSON.parse(await fs.readFile(path.join(projectB, 'Beta.flux'), 'utf8'))
+    assert.deepEqual(doc.assets, [], `Beta's document holds ${JSON.stringify(doc.assets)}`)
   })
 
   await check('both projects are in the recents list', async () => {
@@ -334,13 +401,20 @@ try {
     await fs.access(path.join(MEDIA_DIR, 'clipA.mp4'))
   })
 
-  await check('a remembered choice stops the dialog appearing', async () => {
+  await check('a remembered choice survives save and reopen', async () => {
     const mode = await evaluate(
       cdp,
-      `const { importMode, store } = window.__fluxDev;
+      `const { importMode, project } = window.__fluxDev;
        importMode.setImportMode('link');
-       await store.flushStores();
-       await importMode.loadImportMode();
+       // The preference lives in the document now, so the real question is
+       // whether it survives a save and reopen.
+       await project.saveProject();
+       const root = project.getProject().root;
+       project.closeProject();
+       await new Promise(r => setTimeout(r, 200));
+       const r = await project.openProject(root);
+       if (!r.ok) throw new Error(r.error);
+       await new Promise(r => setTimeout(r, 300));
        return importMode.getImportMode();`,
     )
     assert.equal(mode, 'link')

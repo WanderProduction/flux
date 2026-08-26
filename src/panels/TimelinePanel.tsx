@@ -7,8 +7,6 @@ import {
   addClip,
   findFreeStart,
   getSequence,
-  isSequenceLoaded,
-  loadSequence,
   removeClips,
   sequenceDuration,
   snapToFrame,
@@ -65,10 +63,8 @@ export function TimelinePanel() {
   const lanesRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const unsubscribe = subscribeSequence(() => setSequence({ ...getSequence() }))
-    if (!isSequenceLoaded()) void loadSequence()
-    else setSequence({ ...getSequence() })
-    return unsubscribe
+    setSequence({ ...getSequence() })
+    return subscribeSequence(() => setSequence({ ...getSequence() }))
   }, [])
 
   useEffect(() => subscribeAssets(() => setAssets([...getAssets()])), [])

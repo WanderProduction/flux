@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('flux', {
     exists: (paths) => ipcRenderer.invoke('fs:exists', paths),
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles'),
     pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
+    pickProjectFile: () => ipcRenderer.invoke('dialog:pickProjectFile'),
     /**
      * A renderer-usable URL for a file on disk. Lives here, beside the protocol
      * it targets, so the scheme is defined once on the Electron side instead of
@@ -30,8 +31,9 @@ contextBridge.exposeInMainWorld('flux', {
     is: (root) => ipcRenderer.invoke('project:is', root),
     copyIntoImports: (root, sourcePath) =>
       ipcRenderer.invoke('project:copyIntoImports', root, sourcePath),
-    storeGet: (root, name) => ipcRenderer.invoke('project:storeGet', root, name),
-    storeSet: (root, name, value) => ipcRenderer.invoke('project:storeSet', root, name, value),
+    save: (file, document) => ipcRenderer.invoke('project:save', file, document),
+    autosave: (root, document) => ipcRenderer.invoke('project:autosave', root, document),
+    launchTarget: () => ipcRenderer.invoke('project:launchTarget'),
   },
   platform: process.platform,
 })

@@ -17,7 +17,6 @@
 
 import { assetUrl, existsMany, hasFilesystem, type MediaKind } from './fsBridge'
 import { probeMedia } from './mediaProbe'
-import { loadStore, saveStore } from './store'
 
 export interface Asset {
   id: string
@@ -40,15 +39,17 @@ export interface Asset {
   inProject?: boolean
 }
 
-const STORE = 'assets'
-
 let assets: Asset[] = []
 let loaded = false
 const listeners = new Set<() => void>()
 
+/**
+ * Notifies only. Persistence belongs to kernel/project.ts, which listens here
+ * and folds the result into the project document — one file is the project, so
+ * one place decides when it is written.
+ */
 function emit() {
   listeners.forEach((listener) => listener())
-  void saveStore(STORE, assets, 'project')
 }
 
 export function subscribeAssets(listener: () => void): () => void {
@@ -80,30 +81,29 @@ function nextId(): string {
   return `a${Date.now().toString(36)}${idCounter.toString(36)}`
 }
 
-export async function loadAssets(): Promise<void> {
-  const stored = await loadStore<Asset[]>(STORE, [], 'project')
-  const fromDisk = Array.isArray(stored) ? stored : []
-
-  // Anything imported while this read was in flight has to survive it. Assigning
-  // the stored array wholesale would drop those imports without a trace — a
-  // narrow race, but the failure is silent and the user's work is what is lost.
-  // Paths are the identity, and the in-memory copy wins.
-  const alreadyHeld = new Set(assets.map((asset) => asset.path))
-  assets = [...fromDisk.filter((asset) => !alreadyHeld.has(asset.path)), ...assets]
-
-  // Re-check on every load, because anything could have happened to these files
-  // while FLUX was closed.
-  if (hasFilesystem && assets.length > 0) {
-    try {
-      const present = await existsMany(assets.map((asset) => asset.path))
-      assets = assets.map((asset) => ({ ...asset, missing: present[asset.path] === false }))
-    } catch (err) {
-      console.warn('[flux] could not verify asset paths', err)
-    }
-  }
-
+/**
+ * Replaces the whole list, without notifying persistence that anything changed.
+ *
+ * This is how a project document is applied on open. It is deliberately not
+ * `importAssets`: that means "the user added these", which would immediately
+ * mark the freshly-opened project as unsaved.
+ */
+export function setAssets(next: Asset[]): void {
+  assets = Array.isArray(next) ? next : []
   loaded = true
   listeners.forEach((listener) => listener())
+}
+
+/** Re-checks every asset's path, for a project that has just been opened. */
+export async function verifyAssetPaths(): Promise<void> {
+  if (!hasFilesystem || assets.length === 0) return
+  try {
+    const present = await existsMany(assets.map((asset) => asset.path))
+    assets = assets.map((asset) => ({ ...asset, missing: present[asset.path] === false }))
+    listeners.forEach((listener) => listener())
+  } catch (err) {
+    console.warn('[flux] could not verify asset paths', err)
+  }
 }
 
 export interface ImportCandidate {

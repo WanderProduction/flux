@@ -23,7 +23,8 @@ export const defaultKeymap: Keymap = {
   'ctrl+4': 'panel.focus.content',
   'ctrl+5': 'panel.focus.inspector',
   'ctrl+6': 'panel.focus.mixer',
-  'ctrl+s': 'workspace.save',
+  'ctrl+s': 'project.save',
+  'ctrl+alt+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
   delete: 'timeline.deleteSelected',
 }

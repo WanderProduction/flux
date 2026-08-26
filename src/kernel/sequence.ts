@@ -11,8 +11,6 @@
  * Times are in seconds throughout, snapped to the frame grid on write.
  */
 
-import { loadStore, saveStore } from './store'
-
 export type TrackKind = 'video' | 'audio'
 
 export interface Track {
@@ -39,8 +37,6 @@ export interface SequenceState {
   clips: Clip[]
 }
 
-const STORE = 'sequence'
-
 /**
  * Video only, top-down. There is no audio track yet because there is no audio
  * anything yet — adding an empty A1 would imply a capability that does not
@@ -62,9 +58,9 @@ let sequence: SequenceState = defaultSequence()
 let loaded = false
 const listeners = new Set<() => void>()
 
+/** Notifies only; kernel/project.ts owns writing the document. */
 function emit() {
   listeners.forEach((listener) => listener())
-  void saveStore(STORE, sequence, 'project')
 }
 
 export function subscribeSequence(listener: () => void): () => void {
@@ -80,21 +76,13 @@ export function isSequenceLoaded(): boolean {
   return loaded
 }
 
-export async function loadSequence(): Promise<void> {
-  const stored = await loadStore<SequenceState | null>(STORE, null, 'project')
-  // A stored sequence with no tracks would leave nowhere to drop, and the panel
-  // would look broken with no way to recover.
-  const base = stored?.tracks?.length ? stored : defaultSequence()
-
-  // Same race as loadAssets: a clip dropped while this read was in flight must
-  // not be thrown away by the result arriving.
-  const held = sequence.clips
-  const heldIds = new Set(held.map((clip) => clip.id))
-  sequence = {
-    ...base,
-    clips: [...(base.clips ?? []).filter((clip) => !heldIds.has(clip.id)), ...held],
-  }
-
+/**
+ * Replaces the sequence from a project document, without marking it changed.
+ * A stored sequence with no tracks would leave nowhere to drop, so it falls
+ * back rather than presenting a timeline the user cannot use.
+ */
+export function setSequence(next: SequenceState | null): void {
+  sequence = next?.tracks?.length ? next : defaultSequence()
   loaded = true
   listeners.forEach((listener) => listener())
 }

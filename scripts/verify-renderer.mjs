@@ -168,6 +168,7 @@ try {
       'list',
       'pickDirectory',
       'pickFiles',
+      'pickProjectFile',
       'places',
       'subfolders',
     ])

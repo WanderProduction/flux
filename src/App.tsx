@@ -8,7 +8,15 @@ import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
 import { CommandPalette } from './shell/CommandPalette'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
-import { closeProject, getProject, subscribeProject, type Project } from './kernel/project'
+import {
+  closeProject,
+  getProject,
+  isDirty,
+  isSaving,
+  saveProject,
+  subscribeProject,
+  type Project,
+} from './kernel/project'
 
 const LAYOUTS_STORE = 'workspaces'
 const LAST_WORKSPACE_STORE = 'last-workspace'
@@ -35,6 +43,17 @@ function Workspace({ project }: { project: Project }) {
   const [activeId, setActiveId] = useState('edit')
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(isDirty)
+  const [saving, setSaving] = useState(isSaving)
+
+  useEffect(
+    () =>
+      subscribeProject(() => {
+        setDirty(isDirty())
+        setSaving(isSaving())
+      }),
+    [],
+  )
 
   // Panels are read from the registry, not hardcoded — a plugin that registers
   // before mount is picked up here with no change to the shell.
@@ -164,10 +183,20 @@ function Workspace({ project }: { project: Project }) {
         run: resetWorkspace,
       },
       {
+        id: 'project.save',
+        title: 'Save Project',
+        category: 'Project',
+        detail: 'Writes the .flux document',
+        run: async () => {
+          const result = await saveProject()
+          say(result.ok ? 'Project saved' : `Could not save: ${result.error}`)
+        },
+      },
+      {
         id: 'project.close',
         title: 'Close Project',
         category: 'Project',
-        detail: 'Returns to the launcher; everything is already saved',
+        detail: 'Returns to the launcher',
         run: closeProject,
       },
       ...panels.list().map((panel) => ({
@@ -180,7 +209,7 @@ function Workspace({ project }: { project: Project }) {
     ])
 
     return () => handle.dispose()
-  }, [ready, applyWorkspace, saveWorkspace, resetWorkspace, focusPanel])
+  }, [ready, applyWorkspace, saveWorkspace, resetWorkspace, focusPanel, say])
 
   useEffect(() => keymap.attach(), [keymap])
 
@@ -232,6 +261,9 @@ function Workspace({ project }: { project: Project }) {
       <footer className="statusbar">
         <span className="status-left">
           <span className="status-scope">{project.name} ▸ Sequence 1</span>
+          <span className="status-dim">
+            {saving ? 'saving…' : dirty ? 'unsaved changes' : 'saved'}
+          </span>
         </span>
         <span className="status-right">
           {flash && <span className="status-flash">{flash}</span>}

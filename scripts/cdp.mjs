@@ -192,21 +192,16 @@ export async function ensureProject(cdp, parent, name = 'Verification') {
 export async function resetProject(cdp) {
   const ok = await evaluate(
     cdp,
-    `const { assets, sequence, commands } = window.__fluxDev;
+    `const { assets, sequence, commands, project } = window.__fluxDev;
      for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
      if (!assets.isLoaded()) throw new Error('asset store never finished loading');
-     if (!sequence.isSequenceLoaded()) await sequence.loadSequence();
 
      assets.removeAssets(assets.getAssets().map(a => a.id));
      sequence.clearSequence();
 
-     // Force both stores to disk. removeAssets correctly skips the write when
-     // nothing was in memory, which would leave a previous suite's persisted
-     // state on disk to reappear after the next reload.
-     const { store } = window.__fluxDev;
-     await store.saveStore('assets', [], 'project');
-     await store.saveStore('sequence', sequence.getSequence(), 'project');
-     await store.flushStores();
+     // Write the cleared state through to the document, so a previous suite's
+     // saved work cannot reappear after the next open.
+     await project.saveProject();
 
      // Put the Content Browser back where a suite expects to find it.
      await commands.run('content.collapseTree');

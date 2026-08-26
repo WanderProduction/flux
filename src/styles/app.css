@@ -1607,3 +1607,15 @@ kbd {
   padding-top: 4px;
   border-top: 1px solid var(--flux-border);
 }
+
+/* Unsaved-changes marker on the project chip. */
+.project-chip--dirty {
+  border-color: var(--flux-warn);
+  color: var(--flux-text);
+}
+.project-dot {
+  margin-left: 6px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--flux-warn);
+}

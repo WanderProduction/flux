@@ -13,6 +13,7 @@
     "dev:debug": "wait-on tcp:127.0.0.1:5273 && electron . --remote-debugging-port=9222",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "icons": "node scripts/make-icons.mjs",
     "verify:fs": "node scripts/verify-filesystem.mjs",
     "verify:project-fs": "node scripts/verify-project-fs.mjs",
     "verify:project": "node scripts/verify-project.mjs",
@@ -34,5 +35,37 @@
     "typescript": "^5.9.0",
     "vite": "^7.1.0",
     "wait-on": "^9.0.0"
+  },
+  "build": {
+    "appId": "dev.flux.app",
+    "productName": "FLUX",
+    "files": [
+      "dist/**",
+      "electron/**",
+      "shared/**",
+      "build/icon.*",
+      "build/document.*"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": "nsis"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.video"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "AudioVideo"
+    },
+    "fileAssociations": [
+      {
+        "ext": "flux",
+        "name": "FLUX Project",
+        "description": "FLUX project document",
+        "icon": "build/document.ico",
+        "role": "Editor"
+      }
+    ]
   }
 }

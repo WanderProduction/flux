@@ -361,35 +361,62 @@ try {
     assert.ok(count > 0, 'restored clips should be drawn')
   })
 
-  await check('an import racing the initial store load is not discarded', async () => {
-    // Regression: loadAssets used to assign the stored array wholesale, so
-    // anything imported while that read was in flight vanished without a trace.
+  await check('applying a project document does not mark it unsaved', async () => {
+    // The state modules notify on every change and kernel/project.ts listens to
+    // mark the project dirty, so *opening* one used to claim unsaved work
+    // before the user had touched anything - the asset path re-check runs just
+    // after open and touches every asset.
     const result = await evaluate(
       cdp,
-      `const { assets } = window.__fluxDev;
-       const racing = assets.loadAssets();          // read in flight...
-       assets.importAssets([{ path: ${dir} + '\\\\photo.png', kind: 'image' }]); // ...import lands mid-read
-       await racing;
-       return assets.getAssets().map(a => a.name);`,
+      `const { project, assets } = window.__fluxDev;
+       const root = project.getProject().root;
+       await project.saveProject();
+       project.closeProject();
+       await new Promise(r => setTimeout(r, 200));
+       const r = await project.openProject(root);
+       if (!r.ok) throw new Error(r.error);
+       // Wait past the path re-check, which is async.
+       await new Promise(r => setTimeout(r, 1200));
+       return { dirty: project.isDirty(), assets: assets.getAssets().length };`,
     )
-    assert.ok(
-      result.includes('photo.png'),
-      `import made during the load was lost — got ${JSON.stringify(result)}`,
-    )
+    assert.equal(result.dirty, false, 'a freshly opened saved project has nothing to save')
   })
 
-  await check('a clip dropped while the sequence loads is not discarded', async () => {
+  await check('editing after an open does mark it unsaved again', async () => {
+    const dirty = await evaluate(
+      cdp,
+      `const { project, sequence, assets } = window.__fluxDev;
+       const asset = assets.getAssets()[0];
+       if (!asset) throw new Error('fixture project has no assets');
+       sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 30, duration: 2 });
+       await new Promise(r => setTimeout(r, 200));
+       return project.isDirty();`,
+    )
+    assert.equal(dirty, true, 'a real edit must mark the project unsaved')
+  })
+
+  await check('the sequence survives save, close and reopen', async () => {
     const result = await evaluate(
       cdp,
-      `const { assets, sequence: seq } = window.__fluxDev;
-       const asset = assets.getAssets().find(a => a.name === 'photo.png');
-       await assets.ensureProbed(asset.id);
-       const racing = seq.loadSequence();
-       const clip = seq.addClip({ assetId: asset.id, trackId: 'V2', start: 100, duration: 3 });
-       await racing;
-       return seq.getSequence().clips.some(c => c.id === clip?.id);`,
+      `const { project, sequence } = window.__fluxDev;
+       const before = sequence.getSequence().clips
+         .map(c => [c.trackId, Math.round(c.start * 1000), Math.round(c.duration * 1000)])
+         .sort();
+       await project.saveProject();
+       const root = project.getProject().root;
+       project.closeProject();
+       await new Promise(r => setTimeout(r, 200));
+       const r = await project.openProject(root);
+       if (!r.ok) throw new Error(r.error);
+       await new Promise(r => setTimeout(r, 500));
+       const after = sequence.getSequence().clips
+         .map(c => [c.trackId, Math.round(c.start * 1000), Math.round(c.duration * 1000)])
+         .sort();
+       return { before, after, dirty: project.isDirty() };`,
     )
-    assert.equal(result, true, 'a clip added during the load was lost')
+    assert.ok(result.before.length > 0, 'fixture should have clips to persist')
+    assert.deepEqual(result.after, result.before)
+    assert.equal(result.dirty, false)
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

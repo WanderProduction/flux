@@ -16,20 +16,12 @@ import {
 import {
   getAssets,
   importAssets,
-  isLoaded,
-  loadAssets,
   removeAssets,
   subscribeAssets,
   type Asset,
 } from '../kernel/assets'
 import { setAssetDragPayload } from '../kernel/dragAssets'
-import {
-  getImportMode,
-  isImportModeLoaded,
-  loadImportMode,
-  setImportMode,
-  type ImportMode,
-} from '../kernel/importMode'
+import { getImportMode, setImportMode, type ImportMode } from '../kernel/importMode'
 import {
   getPinned,
   isPinned,
@@ -106,10 +98,9 @@ export function ContentBrowserPanel() {
   useEffect(() => subscribeProject(() => setProjectState(getProject())), [])
 
   useEffect(() => {
-    const unsubscribe = subscribeAssets(() => setAssets([...getAssets()]))
-    if (!isLoaded()) void loadAssets()
-    else setAssets([...getAssets()])
-    return unsubscribe
+    // The project applies the document; the panel only mirrors it.
+    setAssets([...getAssets()])
+    return subscribeAssets(() => setAssets([...getAssets()]))
   }, [])
 
   useEffect(() => {
@@ -117,10 +108,6 @@ export function ContentBrowserPanel() {
     if (!isPinnedLoaded()) void loadPinned()
     else setPinnedFolders([...getPinned()])
     return unsubscribe
-  }, [])
-
-  useEffect(() => {
-    if (!isImportModeLoaded()) void loadImportMode()
   }, [])
 
   // ── rail width, remembered across sessions ────────────────────
