@@ -41,6 +41,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 
 | | |
 |---|---|
+| **Projects** | Create or open a project on launch. State lives in the project folder. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
 | **Workspaces** | Saved panel layouts. `1` Edit · `2` Sound Design · `3` Nodes / Motion. |
 | **Layout persistence** | `Ctrl S` saves the current workspace's layout, `Ctrl Shift R` resets it. Restored on launch. |
@@ -51,6 +52,35 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 
 Six built-in panels: Viewer, Timeline, Node Map, **Content Browser**, Inspector, Mixer. The Content
 Browser and Timeline do real work; the other four are still scaffolding.
+
+### Projects
+
+FLUX opens on a launcher: name a project, choose a folder, and it creates
+
+```
+<your folder>/
+  project_files/    the manifest, and the project's own state
+  imports/          media copied into the project
+  exports/          renders — nothing writes here yet
+```
+
+`project_files` is the part FLUX owns — the manifest (name, app version, format
+number) and the project's assets and sequence. `imports` and `exports` are yours.
+
+**Project state lives in the project folder, not in app data.** Opening a different project shows a
+different timeline, and a project folder copied to another machine brings its contents with it.
+Workspace layouts, the keymap and the recents list stay app-scoped, because those describe the
+person using FLUX rather than the work.
+
+There is no explicit save: assets and the sequence are written as they change. The manifest carries
+a format number, and a project written by a newer FLUX is refused rather than misread — a project
+file is the one thing in a media app that must never be quietly corrupted.
+
+The launcher always appears on launch rather than silently reopening the last project. In an app
+where a stray edit lands in whatever happened to be open, "which project am I in?" should not be a
+question you answer by looking at the timeline.
+
+*Not yet: autosave snapshots, and project folders for organising assets inside the bin.*
 
 ### The Content Browser
 
@@ -77,9 +107,20 @@ only ever produce a permission error.
 
 Browse any folder, import media into the project, see it as cards.
 
-**Importing never copies or moves anything.** An asset is a reference — an absolute path plus what
-we know about the file — so importing is instant and touches nothing on disk. The cost of that
-choice is that files can move or vanish behind the project's back, so paths are re-checked on load
+**Importing asks how.** An asset is always a reference — an absolute path plus what we know about
+the file — but you choose where that path points:
+
+- **Copy into the project** — the file is copied into `imports` first. The project folder becomes
+  self-contained, which is what makes it safe to archive or move, and reads come off one disk.
+- **Leave the files where they are** — the asset points at the original. Instant and costs no space,
+  but the project depends on that path surviving.
+
+Neither is right for everyone, so FLUX asks, with a *Always do this* option; *Ask Again How To
+Import* in the palette puts the question back. Either way the original is never moved or altered,
+and a copy never overwrites: a name collision suffixes instead, because two cards both starting at
+`C0001.MP4` is routine and overwriting would destroy the first import.
+
+Either way files can still move or vanish behind the project's back, so paths are re-checked on load
 and a card whose original is gone is marked `offline` rather than rendering broken.
 
 Supported formats are limited to what Chromium can decode, because a card we cannot draw is a
@@ -159,12 +200,14 @@ in the skinning system.
 ```
 src/
   kernel/       commands · panels · keymap · workspaces · store
-                fsBridge · assets · thumbnails                    (the seams)
+                project · fsBridge · assets · sequence
+                thumbnails · mediaProbe · importMode              (the seams)
+  launcher/     the project chooser, shown until a project is open
   panels/       the six built-in panels, registered via the SDK
   shell/        command palette
   styles/       theme tokens + app styles
 shared/         media type definitions — imported by BOTH main and renderer
-electron/       main process · preload bridge · filesystem reads
+electron/       main process · preload bridge · filesystem reads · project layout
 scripts/        verification harnesses
 ```
 
@@ -176,8 +219,15 @@ scripts/        verification harnesses
 npm run verify:fs
 ```
 
-Exercises `electron/filesystem.js` against a real temp directory — listing, filtering, natural
-sort, truncation of huge folders, and the protocol allowlist.
+```bash
+npm run verify:project-fs
+```
+
+These need no running app. `verify:fs` exercises `electron/filesystem.js` against a real temp
+directory — listing, filtering, natural sort, truncation of huge folders, and the protocol
+allowlist. `verify:project-fs` does the same for project creation: the folder layout, refusing to
+create over an existing project, refusing a newer format, and copying into `imports` without ever
+overwriting.
 
 The rest only exists inside Electron (IPC, the `flux-asset` protocol, real decoding), so it is
 checked by attaching to the running app over the DevTools protocol. In three terminals:
@@ -192,6 +242,10 @@ npm run dev:debug
 
 ```bash
 npm run verify:app
+```
+
+```bash
+npm run verify:project
 ```
 
 ```bash

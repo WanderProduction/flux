@@ -17,10 +17,18 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 
-import { attach, createChecker, evaluate, requireFixtures, resetProject } from './cdp.mjs'
+import {
+  attach,
+  createChecker,
+  ensureProject,
+  evaluate,
+  requireFixtures,
+  resetProject,
+} from './cdp.mjs'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const dir = JSON.stringify(MEDIA_DIR)
+const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 const { check, report } = createChecker()
 const cdp = await attach()
@@ -56,6 +64,7 @@ try {
   // Shared reset: clears assets, the sequence, AND the Content Browser's view.
   // Running these suites back-to-back once failed purely because one left the
   // browser parked in a folder while the next assumed the project view.
+  await ensureProject(cdp, VERIFY_PROJECT)
   await requireFixtures(cdp, MEDIA_DIR)
   await resetProject(cdp)
 
@@ -325,9 +334,11 @@ try {
       `await window.__fluxDev.store.flushStores(); location.reload(); return true;`,
     )
     await new Promise((r) => setTimeout(r, 2500))
+    // A reload lands on the launcher; reopen before asserting persistence.
+    await ensureProject(cdp, VERIFY_PROJECT)
     const after = await evaluate(
       cdp,
-      `for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
          await new Promise(r => setTimeout(r, 250));
        const seq = window.__fluxDev.sequence;
        for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));

@@ -7,11 +7,26 @@ import { createKeymapController, defaultKeymap } from './kernel/keymap'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
 import { CommandPalette } from './shell/CommandPalette'
+import { ProjectLauncher } from './launcher/ProjectLauncher'
+import { closeProject, getProject, subscribeProject, type Project } from './kernel/project'
 
 const LAYOUTS_STORE = 'workspaces'
 const LAST_WORKSPACE_STORE = 'last-workspace'
 
 export function App() {
+  const [project, setProject] = useState<Project | null>(getProject)
+
+  useEffect(() => subscribeProject(() => setProject(getProject())), [])
+
+  // The dock is unmounted entirely while no project is open, so panels can
+  // assume a project exists rather than every one of them guarding for its
+  // absence. It also guarantees their state is rebuilt when a different project
+  // opens, instead of the previous project's timeline lingering on screen.
+  if (!project) return <ProjectLauncher />
+  return <Workspace key={project.root} project={project} />
+}
+
+function Workspace({ project }: { project: Project }) {
   const apiRef = useRef<DockviewApi | null>(null)
   const savedRef = useRef<SavedLayouts>({})
   const keymap = useMemo(() => createKeymapController(defaultKeymap), [])
@@ -148,6 +163,13 @@ export function App() {
         category: 'Workspace',
         run: resetWorkspace,
       },
+      {
+        id: 'project.close',
+        title: 'Close Project',
+        category: 'Project',
+        detail: 'Returns to the launcher; everything is already saved',
+        run: closeProject,
+      },
       ...panels.list().map((panel) => ({
         id: `panel.focus.${panel.id}`,
         title: `Focus ${panel.title}`,
@@ -168,6 +190,14 @@ export function App() {
         <span className="brand">
           FLUX<span className="brand-dot">.</span>
         </span>
+
+        <button
+          className="project-chip"
+          onClick={closeProject}
+          title={`${project.root}\nClick to close and return to the launcher`}
+        >
+          {project.name}
+        </button>
 
         <nav className="workspace-tabs">
           {workspaces.map((workspace) => (
@@ -201,7 +231,7 @@ export function App() {
 
       <footer className="statusbar">
         <span className="status-left">
-          <span className="status-scope">Project ▸ Sequence 1</span>
+          <span className="status-scope">{project.name} ▸ Sequence 1</span>
         </span>
         <span className="status-right">
           {flash && <span className="status-flash">{flash}</span>}

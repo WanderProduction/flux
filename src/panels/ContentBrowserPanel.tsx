@@ -23,6 +23,15 @@ import {
   type Asset,
 } from '../kernel/assets'
 import { setAssetDragPayload } from '../kernel/dragAssets'
+import {
+  getImportMode,
+  isImportModeLoaded,
+  loadImportMode,
+  setImportMode,
+  type ImportMode,
+} from '../kernel/importMode'
+import { copyIntoImports, getProject } from '../kernel/project'
+import { ImportChoiceDialog, type ImportChoice } from './ImportChoiceDialog'
 import { loadStore, saveStore } from '../kernel/store'
 import { mediaKindOf } from '../../shared/mediaTypes.js'
 import { PanelFrame } from './PanelFrame'
@@ -50,6 +59,15 @@ function folderOf(filePath: string): string {
 
 type Location = { type: 'project' } | { type: 'folder'; path: string }
 
+/** What the import pipeline accepts, whether it came from the grid or a dialog. */
+interface ImportEntry {
+  path: string
+  kind: MediaKind
+  size?: number
+  mtimeMs?: number
+  inProject?: boolean
+}
+
 const RAIL_STORE = 'ui-content-browser'
 const RAIL_MIN = 140
 const RAIL_MAX = 460
@@ -65,6 +83,13 @@ export function ContentBrowserPanel() {
   const [projectOpen, setProjectOpen] = useState(true)
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null)
   const [railWidth, setRailWidth] = useState(RAIL_DEFAULT)
+  /** Set while the copy-or-link dialog is up; resolved by the user's answer. */
+  const [pendingImport, setPendingImport] = useState<{
+    entries: ImportEntry[]
+    resolve: (choice: ImportChoice | null) => void
+  } | null>(null)
+  const [copyProgress, setCopyProgress] = useState<string | null>(null)
+  const [copyError, setCopyError] = useState<string | null>(null)
 
   // ── project assets ────────────────────────────────────────────
   useEffect(() => {
@@ -181,19 +206,86 @@ export function ContentBrowserPanel() {
   }, [location, listing, openFolder])
 
   // ── import ────────────────────────────────────────────────────
-  const importPaths = useCallback(
-    (entries: Array<{ path: string; kind: MediaKind; size?: number; mtimeMs?: number }>) => {
-      const added = importAssets(entries)
-      setSelected(new Set())
-      return added.length
-    },
+
+  useEffect(() => {
+    if (!isImportModeLoaded()) void loadImportMode()
+  }, [])
+
+  /** Puts the dialog up and waits for an answer. */
+  const askImportMode = useCallback(
+    (entries: ImportEntry[]) =>
+      new Promise<ImportChoice | null>((resolve) => setPendingImport({ entries, resolve })),
     [],
   )
 
+  /**
+   * Copies each file into the project, then imports the copies.
+   *
+   * Sequential rather than parallel: copying several camera files at once
+   * saturates the disk and makes every one of them slower, and a serial queue
+   * is what lets the progress line say which file is being worked on.
+   */
+  const importByCopy = useCallback(async (entries: ImportEntry[]) => {
+    const copied: ImportEntry[] = []
+    const failures: string[] = []
+
+    for (const [index, entry] of entries.entries()) {
+      setCopyProgress(`Copying ${index + 1} of ${entries.length}…`)
+      const result = await copyIntoImports(entry.path)
+      if (result.ok && result.path) {
+        copied.push({
+          path: result.path,
+          kind: entry.kind,
+          size: result.size,
+          mtimeMs: result.mtimeMs,
+          inProject: true,
+        })
+      } else {
+        failures.push(`${entry.path.split(/[\\/]/).pop()} (${result.error ?? 'failed'})`)
+      }
+    }
+
+    setCopyProgress(null)
+    if (copied.length > 0) importAssets(copied)
+    if (failures.length > 0) {
+      // Surfaced rather than swallowed: a copy that silently did not happen is
+      // a file the user believes is backed up and is not.
+      setCopyError(`Could not copy ${failures.length}: ${failures.join(', ')}`)
+    }
+    return copied.length
+  }, [])
+
+  /**
+   * The single way media enters the project. Honours the saved preference, and
+   * asks when there isn't one.
+   */
+  const importPaths = useCallback(
+    async (entries: ImportEntry[]) => {
+      if (entries.length === 0) return 0
+      setSelected(new Set())
+
+      // Without a project there is nowhere to copy to, so linking is the only
+      // option available.
+      const canCopy = Boolean(getProject())
+      let mode: ImportMode = canCopy ? getImportMode() : 'link'
+
+      if (mode === 'ask') {
+        const choice = await askImportMode(entries)
+        if (!choice) return 0
+        mode = choice.mode
+        if (choice.remember) setImportMode(choice.mode)
+      }
+
+      if (mode === 'copy') return importByCopy(entries)
+      return importAssets(entries).length
+    },
+    [askImportMode, importByCopy],
+  )
+
   const importSelected = useCallback(() => {
-    if (!listing) return 0
+    if (!listing) return
     const chosen = listing.files.filter((file) => selected.has(file.path))
-    return importPaths(chosen)
+    void importPaths(chosen)
   }, [listing, selected, importPaths])
 
   const importViaDialog = useCallback(async () => {
@@ -204,8 +296,8 @@ export function ContentBrowserPanel() {
     // same shared definition main validated against, never a second regex.
     const entries = paths
       .map((path) => ({ path, kind: mediaKindOf(path) }))
-      .filter((entry): entry is { path: string; kind: MediaKind } => entry.kind !== null)
-    importPaths(entries)
+      .filter((entry): entry is ImportEntry => entry.kind !== null)
+    await importPaths(entries)
   }, [importPaths])
 
   // ── project tree rows ─────────────────────────────────────────
@@ -278,6 +370,13 @@ export function ContentBrowserPanel() {
       { id: 'content.project', title: 'Go to Project', category: 'Content', run: openProject },
       { id: 'content.up', title: 'Go Up One Folder', category: 'Content', run: goUp },
       { id: 'content.refresh', title: 'Refresh Folder', category: 'Content', run: refresh },
+      {
+        id: 'content.resetImportMode',
+        title: 'Ask Again How To Import',
+        category: 'Content',
+        detail: 'Clears the remembered copy-or-link choice',
+        run: () => setImportMode('ask'),
+      },
       {
         id: 'content.collapseTree',
         title: 'Collapse All Folders',
@@ -419,6 +518,13 @@ export function ContentBrowserPanel() {
         />
 
         <div className="cb-main">
+          {copyProgress && <div className="cb-progress">{copyProgress}</div>}
+          {copyError && (
+            <div className="cb-banner cb-banner--error" onClick={() => setCopyError(null)}>
+              {copyError}
+            </div>
+          )}
+
           {location.type === 'project' ? (
             <ProjectGrid
               assets={assets}
@@ -432,11 +538,25 @@ export function ContentBrowserPanel() {
               selected={selected}
               onOpenFolder={openFolder}
               onToggle={toggle}
-              onImportOne={(file) => importPaths([file])}
+              onImportOne={(file) => void importPaths([file])}
             />
           )}
         </div>
       </div>
+
+      {pendingImport && (
+        <ImportChoiceDialog
+          count={pendingImport.entries.length}
+          onChoose={(choice) => {
+            pendingImport.resolve(choice)
+            setPendingImport(null)
+          }}
+          onCancel={() => {
+            pendingImport.resolve(null)
+            setPendingImport(null)
+          }}
+        />
+      )}
     </PanelFrame>
   )
 }
@@ -523,7 +643,7 @@ function FolderGrid({
   selected: Set<string>
   onOpenFolder: (path: string) => void
   onToggle: (path: string) => void
-  onImportOne: (file: { path: string; kind: MediaKind; size: number; mtimeMs: number }) => void
+  onImportOne: (file: ImportEntry) => void
 }) {
   if (status === 'denied') {
     return (
@@ -580,7 +700,7 @@ function FolderGrid({
               className={`card${selected.has(file.path) ? ' card--selected' : ''}`}
               title={file.path}
               onClick={() => onToggle(file.path)}
-              onDoubleClick={() => onImportOne(file)}
+              onDoubleClick={() => void onImportOne(file)}
             >
               <AssetThumb path={file.path} kind={file.kind} />
               <div className="card-meta">

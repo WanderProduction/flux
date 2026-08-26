@@ -1130,3 +1130,340 @@ kbd {
 .watermark-hint {
   font-size: var(--flux-text-sm);
 }
+
+/* ── Project launcher ──────────────────────────────────────── */
+
+.launcher {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 24px;
+  background: var(--flux-bg);
+  overflow: auto;
+}
+
+.launcher-panel {
+  width: min(880px, 100%);
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+  overflow: hidden;
+}
+
+.launcher-head {
+  padding: 26px 28px 20px;
+  border-bottom: 1px solid var(--flux-border);
+}
+.launcher-brand {
+  font-size: 24px;
+}
+.launcher-tagline {
+  margin: 6px 0 0;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-md);
+}
+
+.launcher-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.launcher-col {
+  padding: 22px 28px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.launcher-col--recents {
+  border-left: 1px solid var(--flux-border);
+  background: color-mix(in srgb, var(--flux-bg) 55%, var(--flux-bg-panel));
+}
+
+.launcher-title {
+  margin: 0;
+  font-size: var(--flux-text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--flux-text-faint);
+  font-weight: 600;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field-label {
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+.field-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  outline: none;
+}
+.field-input:focus-visible {
+  border-color: var(--flux-accent);
+}
+.field-input--button {
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.field-input--button:hover {
+  background: var(--flux-bg-hover);
+}
+.field-placeholder {
+  color: var(--flux-text-faint);
+  font-family: var(--flux-font);
+}
+
+.launcher-note,
+.launcher-warn,
+.launcher-error,
+.launcher-empty {
+  margin: 0;
+  font-size: var(--flux-text-sm);
+  line-height: 1.6;
+}
+.launcher-note,
+.launcher-empty {
+  color: var(--flux-text-faint);
+}
+.launcher-note code {
+  font-family: var(--flux-font-mono);
+  color: var(--flux-text-dim);
+}
+.launcher-warn {
+  color: var(--flux-warn);
+}
+.launcher-error {
+  color: var(--flux-warn);
+  border: 1px solid var(--flux-warn);
+  border-radius: var(--flux-radius);
+  padding: 7px 9px;
+}
+
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--flux-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.primary-button {
+  margin-top: 4px;
+  padding: 9px 12px;
+  border: 1px solid var(--flux-accent-dim);
+  border-radius: var(--flux-radius);
+  background: color-mix(in srgb, var(--flux-accent) 18%, var(--flux-bg-elevated));
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  cursor: pointer;
+}
+.primary-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--flux-accent) 30%, var(--flux-bg-elevated));
+}
+.primary-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ghost-button {
+  padding: 7px 12px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: transparent;
+  color: var(--flux-text-dim);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+}
+.ghost-button:hover {
+  background: var(--flux-bg-hover);
+  color: var(--flux-text);
+}
+
+.recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow: auto;
+}
+.recent {
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--flux-radius);
+}
+.recent:hover {
+  background: var(--flux-bg-hover);
+}
+.recent-open {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 9px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.recent-open:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.recent-name {
+  color: var(--flux-text);
+  font-size: var(--flux-text-md);
+}
+.recent-path {
+  color: var(--flux-text-faint);
+  font-size: 10px;
+  font-family: var(--flux-font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-tag {
+  color: var(--flux-warn);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.recent-forget {
+  flex: 0 0 auto;
+  width: 26px;
+  border: 0;
+  background: none;
+  color: var(--flux-text-faint);
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+}
+.recent:hover .recent-forget {
+  opacity: 1;
+}
+.recent-forget:hover {
+  color: var(--flux-warn);
+}
+
+/* ── Project chip in the top bar ───────────────────────────── */
+
+.project-chip {
+  display: flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: 11px;
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text-dim);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-chip:hover {
+  border-color: var(--flux-accent-dim);
+  color: var(--flux-accent);
+}
+
+/* ── Import choice dialog ──────────────────────────────────── */
+
+.dialog {
+  width: min(560px, 92vw);
+  padding: 20px;
+  background: var(--flux-bg-elevated);
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius-lg);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+.dialog-title {
+  margin: 0 0 14px;
+  font-size: var(--flux-text-lg);
+  color: var(--flux-text);
+}
+.dialog-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.choice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-panel);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+.choice:hover,
+.choice:focus-visible {
+  border-color: var(--flux-accent);
+  background: var(--flux-bg-hover);
+  outline: none;
+}
+.choice-name {
+  color: var(--flux-text);
+  font-size: var(--flux-text-md);
+}
+.choice-detail {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.6;
+}
+.choice-detail code {
+  font-family: var(--flux-font-mono);
+  color: var(--flux-text-dim);
+}
+
+.dialog-remember {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 14px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+}
+
+/* ── Copy progress ─────────────────────────────────────────── */
+
+.cb-progress {
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--flux-border);
+  background: var(--flux-bg);
+  color: var(--flux-accent);
+  font-size: var(--flux-text-sm);
+  font-family: var(--flux-font-mono);
+}
+.cb-banner--error {
+  border-color: var(--flux-warn);
+  color: var(--flux-warn);
+  cursor: pointer;
+}

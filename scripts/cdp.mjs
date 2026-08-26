@@ -9,6 +9,8 @@
  * Uses Node's built-in WebSocket (Node 22+); no dependencies.
  */
 
+import fs from 'node:fs/promises'
+
 const DEFAULT_PORT = 9222
 
 export async function findPageTarget(port = DEFAULT_PORT) {
@@ -105,9 +107,12 @@ export async function attach(port = DEFAULT_PORT) {
   const cdp = connect(target.webSocketDebuggerUrl)
   await cdp.ready
   await cdp.send('Runtime.enable')
+  // Either shell counts as "rendered": .app is the dock, .launcher is the
+  // project chooser the app now starts on. Waiting only for .app made attaching
+  // while at the launcher stall for the whole timeout.
   await evaluate(
     cdp,
-    `for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
+    `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
        await new Promise(r => setTimeout(r, 250));
      return true;`,
   )
@@ -120,6 +125,40 @@ export async function attach(port = DEFAULT_PORT) {
     )
   }
   return cdp
+}
+
+/**
+ * Ensures a project is open, creating one in `root` if needed.
+ *
+ * The app now starts at the launcher, so every suite that touches a panel has
+ * to get past it first. Import mode is forced to 'link' so the copy-or-link
+ * dialog does not appear mid-suite and swallow a click — the copy path has its
+ * own checks in verify-project.
+ */
+export async function ensureProject(cdp, root, name = 'Verification') {
+  // createProject refuses a folder that is not there, so the harness owns
+  // making it — the same thing the launcher's directory picker does for a user.
+  await fs.mkdir(root, { recursive: true })
+
+  const result = await evaluate(
+    cdp,
+    `const { project, importMode } = window.__fluxDev;
+     const root = ${JSON.stringify(root)};
+     importMode.setImportMode('link');
+
+     const open = project.getProject();
+     if (open && open.root === root) return { ok: true, reused: true };
+
+     const existing = await project.isProjectFolder(root);
+     const r = existing ? await project.openProject(root) : await project.createProject(root, ${JSON.stringify(name)});
+     if (!r.ok) return { ok: false, error: r.error };
+
+     for (let i = 0; i < 60 && !document.querySelector('.dock-host'); i++)
+       await new Promise(res => setTimeout(res, 250));
+     return { ok: true, reused: false };`,
+  )
+  if (!result.ok) throw new Error(`could not open a project at ${root}: ${result.error}`)
+  return result
 }
 
 /**
@@ -141,6 +180,14 @@ export async function resetProject(cdp) {
 
      assets.removeAssets(assets.getAssets().map(a => a.id));
      sequence.clearSequence();
+
+     // Force both stores to disk. removeAssets correctly skips the write when
+     // nothing was in memory, which would leave a previous suite's persisted
+     // state on disk to reappear after the next reload.
+     const { store } = window.__fluxDev;
+     await store.saveStore('assets', [], 'project');
+     await store.saveStore('sequence', sequence.getSequence(), 'project');
+     await store.flushStores();
 
      // Put the Content Browser back where a suite expects to find it.
      await commands.run('content.collapseTree');

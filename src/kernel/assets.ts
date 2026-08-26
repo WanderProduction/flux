@@ -1,12 +1,18 @@
 /**
  * The project's imported assets.
  *
- * An asset is a *reference*: an absolute path plus what we know about the file.
- * FLUX never copies or moves the original — importing costs nothing and touches
- * nothing on disk. The consequence is that a file can be renamed, moved or
- * deleted behind the project's back, so every asset carries a `missing` flag
- * and the store re-checks the paths on load. Silently rendering a broken card
- * is how an NLE loses someone's footage without telling them.
+ * An asset is always a *reference*: an absolute path plus what we know about the
+ * file. What varies is where that path points. On import the user chooses:
+ *
+ *   link — the path stays on the original file. Instant, touches nothing.
+ *   copy — the file is copied into <project>/imports first, and the asset
+ *          points at the copy, so the project folder is self-contained.
+ *
+ * Either way the original is never moved or altered. And either way the file
+ * can still be renamed or deleted behind the project's back, so every asset
+ * carries a `missing` flag and the store re-checks paths on load. Silently
+ * rendering a broken card is how an NLE loses someone's footage without
+ * telling them.
  */
 
 import { assetUrl, existsMany, hasFilesystem, type MediaKind } from './fsBridge'
@@ -30,6 +36,8 @@ export interface Asset {
   duration?: number
   /** True once probed and found undecodable — stops the timeline retrying forever. */
   unreadable?: boolean
+  /** True when the file lives inside the project's imports folder. */
+  inProject?: boolean
 }
 
 const STORE = 'assets'
@@ -40,7 +48,7 @@ const listeners = new Set<() => void>()
 
 function emit() {
   listeners.forEach((listener) => listener())
-  void saveStore(STORE, assets)
+  void saveStore(STORE, assets, 'project')
 }
 
 export function subscribeAssets(listener: () => void): () => void {
@@ -73,7 +81,7 @@ function nextId(): string {
 }
 
 export async function loadAssets(): Promise<void> {
-  const stored = await loadStore<Asset[]>(STORE, [])
+  const stored = await loadStore<Asset[]>(STORE, [], 'project')
   const fromDisk = Array.isArray(stored) ? stored : []
 
   // Anything imported while this read was in flight has to survive it. Assigning
@@ -104,6 +112,7 @@ export interface ImportCandidate {
   kind: MediaKind
   size?: number
   mtimeMs?: number
+  inProject?: boolean
 }
 
 /** Returns the assets actually added — already-imported paths are skipped. */
@@ -122,6 +131,7 @@ export function importAssets(candidates: ImportCandidate[]): Asset[] {
       size: candidate.size ?? 0,
       mtimeMs: candidate.mtimeMs ?? 0,
       addedAt: Date.now(),
+      inProject: candidate.inProject,
     })
   }
 
@@ -179,6 +189,21 @@ export function removeAssets(ids: string[]): number {
   const removed = before - assets.length
   if (removed > 0) emit()
   return removed
+}
+
+/**
+ * Drops everything, without writing.
+ *
+ * Called when a project opens or closes. This module holds its state at module
+ * scope, so without an explicit reset the previous project's assets would still
+ * be here when the next one loads — the timeline would show the wrong footage
+ * and, worse, the first save would write it into the new project's folder. The
+ * lack of a save here is the point: a reset must never touch either project.
+ */
+export function resetAssets(): void {
+  assets = []
+  loaded = false
+  listeners.forEach((listener) => listener())
 }
 
 export async function recheckMissing(): Promise<void> {

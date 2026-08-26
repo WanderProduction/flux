@@ -64,7 +64,7 @@ const listeners = new Set<() => void>()
 
 function emit() {
   listeners.forEach((listener) => listener())
-  void saveStore(STORE, sequence)
+  void saveStore(STORE, sequence, 'project')
 }
 
 export function subscribeSequence(listener: () => void): () => void {
@@ -81,7 +81,7 @@ export function isSequenceLoaded(): boolean {
 }
 
 export async function loadSequence(): Promise<void> {
-  const stored = await loadStore<SequenceState | null>(STORE, null)
+  const stored = await loadStore<SequenceState | null>(STORE, null, 'project')
   // A stored sequence with no tracks would leave nowhere to drop, and the panel
   // would look broken with no way to recover.
   const base = stored?.tracks?.length ? stored : defaultSequence()
@@ -172,6 +172,18 @@ export function removeClips(ids: string[]): number {
 /** Last frame occupied by any clip. Drives the scrollable width of the timeline. */
 export function sequenceDuration(): number {
   return sequence.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0)
+}
+
+/**
+ * Returns to a pristine default sequence, without writing.
+ *
+ * Same reason as resetAssets: module-scope state would otherwise carry one
+ * project's clips into the next, and the first save would persist them there.
+ */
+export function resetSequence(): void {
+  sequence = defaultSequence()
+  loaded = false
+  listeners.forEach((listener) => listener())
 }
 
 export function clearSequence(): void {

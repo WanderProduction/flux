@@ -11,6 +11,14 @@ import {
   listDrives,
   listSubfolders,
 } from './filesystem.js'
+import {
+  copyIntoImports,
+  createProject,
+  isProject,
+  openProject,
+  readProjectStore,
+  writeProjectStore,
+} from './project.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DEV_URL = 'http://127.0.0.1:5273'
@@ -131,6 +139,30 @@ ipcMain.handle('fs:subfolders', async (_e, dirPath) => {
   }
 })
 ipcMain.handle('fs:exists', (_e, paths) => existsMany(paths))
+
+/**
+ * Project state lives inside the project folder, not in userData: opening a
+ * different project must show a different timeline, and copying a project
+ * folder to another machine has to bring its contents with it.
+ */
+ipcMain.handle('project:storeGet', (_e, root, name) => readProjectStore(root, name))
+ipcMain.handle('project:storeSet', (_e, root, name, value) => writeProjectStore(root, name, value))
+
+ipcMain.handle('project:create', (_e, root, name) => createProject(root, name, app.getVersion()))
+ipcMain.handle('project:open', (_e, root) => openProject(root))
+ipcMain.handle('project:is', (_e, root) => isProject(root))
+ipcMain.handle('project:copyIntoImports', (_e, root, sourcePath) =>
+  copyIntoImports(root, sourcePath),
+)
+
+ipcMain.handle('dialog:pickDirectory', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Choose a folder for the project',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  return result.canceled ? null : (result.filePaths[0] ?? null)
+})
 
 ipcMain.handle('dialog:pickFiles', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)

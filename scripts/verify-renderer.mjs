@@ -21,6 +21,8 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 
+import { ensureProject } from './cdp.mjs'
+
 const PORT = 9222
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 
@@ -127,29 +129,48 @@ await cdp.ready
 await cdp.send('Runtime.enable')
 
 const dir = JSON.stringify(MEDIA_DIR)
+const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 try {
   // Wait for React to have rendered something before poking at it.
   await evaluate(
     cdp,
-    `for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
+    `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
        await new Promise(r => setTimeout(r, 250));
      return true;`,
   )
+
+  // The app starts at the launcher now, so open a project before touching a
+  // panel. ensureProject also forces import mode to 'link' so the copy-or-link
+  // dialog cannot appear mid-suite; the copy path is checked in verify-project.
+  await ensureProject(cdp, VERIFY_PROJECT)
 
   // Start from an empty project so the run is repeatable. This clears the
   // real asset store — fine for a dev fixture app, and the header says so.
   await evaluate(
     cdp,
-    `const assets = window.__fluxDev.assets;
-     for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+    `const { assets, store } = window.__fluxDev;
+     for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+     if (!assets.isLoaded()) throw new Error('asset store never finished loading');
      assets.removeAssets(assets.getAssets().map(a => a.id));
+     // Write through: removeAssets skips the save when nothing was in memory,
+     // which would leave a previous suite's state on disk to reappear later.
+     await store.saveStore('assets', [], 'project');
+     await store.flushStores();
      return true;`,
   )
 
   await check('preload bridge exposes the filesystem API', async () => {
     const api = await evaluate(cdp, `return Object.keys(window.flux?.fs ?? {}).sort();`)
-    assert.deepEqual(api, ['assetUrl', 'exists', 'list', 'pickFiles', 'places', 'subfolders'])
+    assert.deepEqual(api, [
+      'assetUrl',
+      'exists',
+      'list',
+      'pickDirectory',
+      'pickFiles',
+      'places',
+      'subfolders',
+    ])
   })
 
   await check('fs:places returns real folders and drives over IPC', async () => {
@@ -439,9 +460,12 @@ try {
       `await window.__fluxDev.store.flushStores(); location.reload(); return true;`,
     )
     await new Promise((r) => setTimeout(r, 2500))
+    // A reload lands on the launcher, since FLUX does not silently reopen the
+    // last project. Persistence is only observable once it is opened again.
+    await ensureProject(cdp, VERIFY_PROJECT)
     const names = await evaluate(
       cdp,
-      `for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
          await new Promise(r => setTimeout(r, 250));
        const assets = window.__fluxDev.assets;
        for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));

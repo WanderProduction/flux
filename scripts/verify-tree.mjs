@@ -25,10 +25,18 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 
-import { attach, createChecker, evaluate, requireFixtures, resetProject } from './cdp.mjs'
+import {
+  attach,
+  createChecker,
+  ensureProject,
+  evaluate,
+  requireFixtures,
+  resetProject,
+} from './cdp.mjs'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const dir = JSON.stringify(MEDIA_DIR)
+const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 const PC = 'This PC'
 
 // Written as they appear inside the evaluated page source, where `\\` is one
@@ -119,6 +127,7 @@ const HELPERS = String.raw`
 `
 
 try {
+  await ensureProject(cdp, VERIFY_PROJECT)
   await requireFixtures(cdp, MEDIA_DIR)
   await resetProject(cdp)
   await evaluate(cdp, `window.__fluxDev.commands.run('panel.focus.content'); return true;`)
