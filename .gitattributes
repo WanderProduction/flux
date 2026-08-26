@@ -1,0 +1,4 @@
+# Normalise line endings across contributors' platforms.
+# Without this a Windows and a Linux contributor produce whole-file diffs of
+# each other's work, which is unreadable in review.
+* text=auto eol=lf

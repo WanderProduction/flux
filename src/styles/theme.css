@@ -1,0 +1,82 @@
+/*
+ * FLUX theme tokens.
+ *
+ * Every colour, radius and font in the app resolves through a variable defined
+ * here. That is deliberate: "custom UI skins by script" from VISION.md means a
+ * skin is a file that redefines these tokens and nothing else. If a component
+ * hardcodes a colour, it has punched a hole in the skinning system — don't.
+ */
+
+:root {
+  /* Surfaces, back to front */
+  --flux-bg: #0d0e12;
+  --flux-bg-panel: #14161d;
+  --flux-bg-elevated: #1b1e27;
+  --flux-bg-hover: #232733;
+  --flux-bg-active: #2b3040;
+
+  /* Lines */
+  --flux-border: #242835;
+  --flux-border-strong: #333949;
+
+  /* Text */
+  --flux-text: #dcdfe8;
+  --flux-text-dim: #838a9c;
+  --flux-text-faint: #5a6070;
+
+  /* Signal — the accent identity: cyan for flow, violet for drivers */
+  --flux-accent: #4cc2ff;
+  --flux-accent-dim: #2b7fa8;
+  --flux-driver: #a06bff;
+  --flux-audio: #46d39a;
+  --flux-warn: #ffb648;
+
+  /* Shape */
+  --flux-radius: 4px;
+  --flux-radius-lg: 8px;
+
+  /* Type */
+  --flux-font: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --flux-font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
+  --flux-text-sm: 11px;
+  --flux-text-md: 12px;
+  --flux-text-lg: 13px;
+
+  /* Chrome metrics */
+  --flux-topbar-h: 34px;
+  --flux-statusbar-h: 22px;
+}
+
+/*
+ * Bridge FLUX tokens into dockview's own custom properties so the dock chrome
+ * (tabs, sashes, drop targets) is skinned by the same variables as everything
+ * else. Without this a skin would restyle our panels and leave dockview's
+ * furniture looking like a different application.
+ */
+.flux-dock {
+  --dv-background-color: var(--flux-bg);
+  --dv-paneview-active-outline-color: var(--flux-accent);
+
+  --dv-group-view-background-color: var(--flux-bg-panel);
+  --dv-tabs-and-actions-container-background-color: var(--flux-bg);
+
+  --dv-activegroup-visiblepanel-tab-background-color: var(--flux-bg-panel);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--flux-bg);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--flux-bg-panel);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--flux-bg);
+
+  --dv-activegroup-visiblepanel-tab-color: var(--flux-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--flux-text-faint);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--flux-text-dim);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--flux-text-faint);
+
+  --dv-separator-border: var(--flux-border);
+  --dv-paneview-header-border-color: var(--flux-border);
+  --dv-tab-divider-color: var(--flux-border);
+
+  --dv-drag-over-background-color: rgba(76, 194, 255, 0.16);
+  --dv-drag-over-border-color: var(--flux-accent);
+
+  --dv-floating-box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+  --dv-active-sash-color: var(--flux-accent);
+}
