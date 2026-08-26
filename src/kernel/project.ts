@@ -1,14 +1,15 @@
 /**
  * The open project, and the document that is the project.
  *
- * This module owns persistence. assets.ts and sequence.ts are pure state: they
- * announce changes and nothing else, and this listens, marks the project
- * unsaved, and folds everything into one `.flux` document. One file is the
- * project, so exactly one place decides when it gets written.
+ * This module owns persistence. assets.ts, sequence.ts and view.ts are pure
+ * state: they announce changes and nothing else, and this listens, marks the
+ * project unsaved, and folds everything into one `.flux` document. One file is
+ * the project, so exactly one place decides when it gets written.
  *
- * Saving is explicit (Ctrl S). Autosave writes continuously to
- * project_files/autosave.flux so nothing is lost between saves, and an autosave
- * newer than the document wins on open — see openProject in electron/project.js.
+ * Saving is explicit — Ctrl S, and nothing else. There is deliberately no
+ * autosave yet. Because of that, closing with unsaved work has to *ask*: see
+ * the close guard in electron/main.js, which is driven by the dirty flag this
+ * module pushes across the bridge.
  */
 
 import {
@@ -33,10 +34,9 @@ import {
   subscribeSequence,
   type SequenceState,
 } from './sequence'
+import { getView, resetView, setView, type ViewState } from './view'
 import { loadStore, saveStore } from './store'
-
-/** How long after the last change the autosave is written. */
-const AUTOSAVE_DELAY_MS = 1500
+import { DOCUMENT_FORMAT } from '../../shared/projectFormat.js'
 
 export interface ProjectDocument {
   flux: { format: number; version: string }
@@ -44,13 +44,15 @@ export interface ProjectDocument {
   createdAt: number
   savedAt: number
   settings?: { importMode?: ImportMode }
+  /** Workspace, timeline zoom, where the browser was. Never marks work unsaved. */
+  view?: ViewState
   assets: Asset[]
   sequence: SequenceState | null
 }
 
 export interface Project extends ProjectDocument {
   root: string
-  /** Absolute path of the .flux document. */
+  /** Absolute path of the .flux document, inside project_files. */
   file: string
 }
 
@@ -78,8 +80,8 @@ interface OpenResult {
   project?: Project
   error?: ProjectError
   dirty?: boolean
-  recovered?: boolean
   migrated?: boolean
+  relocated?: boolean
 }
 
 interface ProjectBridge {
@@ -87,10 +89,15 @@ interface ProjectBridge {
   open: (target: string) => Promise<OpenResult>
   is: (root: string) => Promise<boolean>
   save: (file: string, document: ProjectDocument) => Promise<{ ok: boolean; error?: string }>
-  autosave: (root: string, document: ProjectDocument) => Promise<{ ok: boolean }>
   copyIntoImports: (root: string, sourcePath: string) => Promise<CopyResult>
   /** A .flux path passed on the command line, when FLUX was launched with one. */
   launchTarget: () => Promise<string | null>
+  /** Tells the main process whether closing would lose work. */
+  setUnsaved: (unsaved: boolean) => void
+  /** Main asks for a save before it lets the window close. */
+  onSaveAndClose: (handler: () => Promise<void>) => void
+  /** A .flux opened while FLUX was already running. */
+  onOpenTarget: (handler: (file: string) => void) => void
 }
 
 interface FluxBridge {
@@ -123,7 +130,6 @@ let current: Project | null = null
 let recents: RecentProject[] = []
 let dirty = false
 let saving = false
-let autosaveTimer: number | null = null
 /**
  * Set while a document is being applied to the state modules.
  *
@@ -136,7 +142,18 @@ let autosaveTimer: number | null = null
 let applying = false
 const listeners = new Set<() => void>()
 
+/** Last value pushed to main, so the bridge is not hit on every notification. */
+let pushedUnsaved = false
+
+function pushUnsaved() {
+  const unsaved = Boolean(current) && dirty
+  if (unsaved === pushedUnsaved) return
+  pushedUnsaved = unsaved
+  bridge?.project?.setUnsaved(unsaved)
+}
+
 function emit() {
+  pushUnsaved()
   listeners.forEach((listener) => listener())
 }
 
@@ -167,41 +184,31 @@ export function getRecents(): RecentProject[] {
 export function buildDocument(): ProjectDocument | null {
   if (!current) return null
   return {
-    flux: current.flux,
+    // Stamped, not carried over: a project opened from an older format is
+    // being written in the current one, and a document that keeps claiming the
+    // format it arrived as is simply lying about its own shape.
+    flux: { format: DOCUMENT_FORMAT, version: current.flux.version },
     name: current.name,
     createdAt: current.createdAt,
     savedAt: Date.now(),
     settings: { importMode: getImportMode() },
+    view: getView(),
     assets: getAssets(),
     sequence: getSequence(),
   }
 }
 
-function scheduleAutosave() {
-  if (!current) return
-  if (autosaveTimer !== null) window.clearTimeout(autosaveTimer)
-  // Debounced: dragging a clip fires a change per frame, and writing the whole
-  // document each time would put the disk in the interaction path.
-  autosaveTimer = window.setTimeout(() => {
-    autosaveTimer = null
-    const document = buildDocument()
-    if (document && current) void requireProject().autosave(current.root, document)
-  }, AUTOSAVE_DELAY_MS)
-}
-
 /** Anything that changes project state lands here. */
 function markDirty() {
   if (!current || applying) return
-  if (!dirty) {
-    dirty = true
-    emit()
-  }
-  scheduleAutosave()
+  if (dirty) return
+  dirty = true
+  emit()
 }
 
 // Persistence is wired once, at module load, rather than from a component:
 // state can change with no panel mounted, and those changes still have to be
-// saved.
+// saved. view.ts is absent on purpose — see the note at the top of that file.
 subscribeAssets(markDirty)
 subscribeSequence(markDirty)
 subscribeImportMode(markDirty)
@@ -249,13 +256,10 @@ export function forgetRecent(root: string) {
 
 /** Drops all project state without writing anything. */
 function clearState() {
-  if (autosaveTimer !== null) {
-    window.clearTimeout(autosaveTimer)
-    autosaveTimer = null
-  }
   resetAssets()
   resetSequence()
   resetImportMode()
+  resetView()
 }
 
 /**
@@ -273,9 +277,10 @@ function adopt(project: Project, startDirty: boolean) {
   setAssets(project.assets ?? [])
   setSequence(project.sequence ?? null)
   setImportMode(project.settings?.importMode ?? 'ask', { persist: false })
+  setView(project.view)
 
-  // setAssets/setSequence notify without marking dirty, so this is the whole
-  // truth about whether there is unsaved work.
+  // setAssets/setSequence/setView notify without marking dirty, so this is the
+  // whole truth about whether there is unsaved work.
   dirty = startDirty
   rememberRecent(project)
   emit()
@@ -329,13 +334,26 @@ export async function saveProject(): Promise<{ ok: boolean; error?: string }> {
   if (result.ok) {
     current = { ...current, ...document }
     dirty = false
-    if (autosaveTimer !== null) {
-      window.clearTimeout(autosaveTimer)
-      autosaveTimer = null
-    }
   }
   emit()
   return result
+}
+
+// ── main-process conversations ────────────────────────────────
+
+if (bridge?.project) {
+  // The window will not close on unsaved work without asking; when the user
+  // picks Save there, main hands the save back here, because the renderer is
+  // the only side that knows what the document currently is.
+  bridge.project.onSaveAndClose(async () => {
+    await saveProject()
+  })
+
+  // Double-clicking a .flux while FLUX is already running opens it here rather
+  // than starting a second copy of the app.
+  bridge.project.onOpenTarget((file) => {
+    void openProject(file)
+  })
 }
 
 // ── misc bridge passthroughs ──────────────────────────────────

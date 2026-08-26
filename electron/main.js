@@ -11,14 +11,7 @@ import {
   listDrives,
   listSubfolders,
 } from './filesystem.js'
-import {
-  copyIntoImports,
-  createProject,
-  isProject,
-  openProject,
-  saveProject,
-  writeAutosave,
-} from './project.js'
+import { copyIntoImports, createProject, isProject, openProject, saveProject } from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -31,13 +24,44 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 let launchTarget = argvProjectFile(process.argv)
 
 function argvProjectFile(argv) {
-  return argv.slice(1).find((arg) => arg.toLowerCase().endsWith('.flux')) ?? null
+  return argv.slice(1).find((arg) => arg.toLowerCase().endsWith(PROJECT_EXTENSION)) ?? null
 }
+
+/**
+ * One FLUX, one window.
+ *
+ * Without the lock, double-clicking a second project starts a second copy of
+ * the app: two processes, two caches, and — once the same project is open in
+ * both — two writers racing for one document. Windows hands the new argv to the
+ * instance already running instead, which is also how a project gets opened
+ * from Explorer while FLUX is up.
+ */
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) app.quit()
+
+app.on('second-instance', (_event, argv) => {
+  const target = argvProjectFile(argv)
+  const [win] = BrowserWindow.getAllWindows()
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.focus()
+  if (target) win.webContents.send('project:open-target', target)
+})
 
 app.on('open-file', (event, filePath) => {
   event.preventDefault()
-  launchTarget = filePath
+  const [win] = BrowserWindow.getAllWindows()
+  // Before the window exists this is the launch target; after, it is a request
+  // to open a project in the app the user is already looking at.
+  if (win) win.webContents.send('project:open-target', filePath)
+  else launchTarget = filePath
 })
+
+/** Pushed from the renderer: true when closing now would lose an edit. */
+let unsavedWork = false
+/** Set once the user has answered the close prompt, so the retry goes through. */
+let closing = false
+
 const DEV_URL = 'http://127.0.0.1:5273'
 const isDev = !app.isPackaged
 
@@ -111,7 +135,12 @@ function createWindow() {
     show: false,
     autoHideMenuBar: true,
     title: 'FLUX',
-    icon: path.join(__dirname, '..', 'build', 'icon.png'),
+    icon: path.join(
+      __dirname,
+      '..',
+      'build',
+      process.platform === 'win32' ? 'icon.ico' : 'icon.png',
+    ),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -121,7 +150,53 @@ function createWindow() {
 
   win.once('ready-to-show', () => win.show())
 
+  /**
+   * Nothing may close over unsaved work without asking.
+   *
+   * There is no autosave, so this dialog is the only thing standing between a
+   * stray Alt+F4 and a lost edit. `unsavedWork` is pushed from the renderer as
+   * it changes, because a 'close' handler cannot wait for an answer: preventing
+   * the close has to be decided synchronously.
+   */
+  win.on('close', (event) => {
+    if (closing || !unsavedWork) return
+    event.preventDefault()
+
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      buttons: ['Save', "Don't Save", 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
+      title: 'FLUX',
+      message: 'Save changes before closing?',
+      detail: 'Your changes since the last save will be lost otherwise.',
+    })
+
+    if (choice === 2) return // Cancel: stay open
+    if (choice === 1) {
+      closing = true
+      win.close()
+      return
+    }
+    // Save: the renderer owns the document, so it does the writing and tells
+    // us when the file is actually on disk.
+    win.webContents.send('project:save-and-close')
+  })
+
   if (isDev) {
+    // Double-clicking a .flux launches this directly, which in dev means the
+    // renderer comes from Vite. Saying so beats a blank window that looks like
+    // the project failed to open.
+    win.webContents.once('did-fail-load', () => {
+      dialog.showMessageBoxSync(win, {
+        type: 'error',
+        title: 'FLUX',
+        message: 'The FLUX dev server is not running.',
+        detail: `This is a development build, so the interface is served from ${DEV_URL}.
+Run "npm run dev" and try again.`,
+      })
+      win.close()
+    })
     win.loadURL(DEV_URL)
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
@@ -164,8 +239,26 @@ ipcMain.handle('fs:exists', (_e, paths) => existsMany(paths))
  * folder to another machine has to bring its contents with it.
  */
 ipcMain.handle('project:save', (_e, file, document) => saveProject(file, document))
-ipcMain.handle('project:autosave', (_e, root, document) => writeAutosave(root, document))
-ipcMain.handle('project:launchTarget', () => launchTarget)
+/**
+ * Handed over once, then forgotten.
+ *
+ * The launcher asks for this every time it mounts, and closing a project brings
+ * the launcher back - so a value that persisted would reopen the same project
+ * the moment you closed it, and closing would be impossible.
+ */
+ipcMain.handle('project:launchTarget', () => {
+  const target = launchTarget
+  launchTarget = null
+  return target
+})
+
+ipcMain.on('project:unsaved', (_e, value) => {
+  unsavedWork = Boolean(value)
+})
+ipcMain.on('project:close-confirmed', (event) => {
+  closing = true
+  BrowserWindow.fromWebContents(event.sender)?.close()
+})
 
 ipcMain.handle('project:create', (_e, root, name) => createProject(root, name, app.getVersion()))
 ipcMain.handle('project:open', (_e, root) => openProject(root))

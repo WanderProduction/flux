@@ -14,12 +14,15 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "icons": "node scripts/make-icons.mjs",
+    "register": "node scripts/register-file-type.mjs",
+    "unregister": "node scripts/register-file-type.mjs --unregister",
     "verify:fs": "node scripts/verify-filesystem.mjs",
     "verify:project-fs": "node scripts/verify-project-fs.mjs",
     "verify:project": "node scripts/verify-project.mjs",
     "verify:app": "node scripts/verify-renderer.mjs",
     "verify:tree": "node scripts/verify-tree.mjs",
-    "verify:timeline": "node scripts/verify-timeline.mjs"
+    "verify:timeline": "node scripts/verify-timeline.mjs",
+    "verify:launch": "node scripts/verify-launch.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",

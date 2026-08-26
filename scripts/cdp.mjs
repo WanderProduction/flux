@@ -192,12 +192,15 @@ export async function ensureProject(cdp, parent, name = 'Verification') {
 export async function resetProject(cdp) {
   const ok = await evaluate(
     cdp,
-    `const { assets, sequence, commands, project } = window.__fluxDev;
+    `const { assets, sequence, commands, project, view } = window.__fluxDev;
      for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
      if (!assets.isLoaded()) throw new Error('asset store never finished loading');
 
      assets.removeAssets(assets.getAssets().map(a => a.id));
      sequence.clearSequence();
+     // The workspace is part of the document now, so a suite that switched it
+     // would otherwise hand the next suite a layout with no Content Browser.
+     view.setView(null);
 
      // Write the cleared state through to the document, so a previous suite's
      // saved work cannot reappear after the next open.

@@ -6,6 +6,7 @@ import { panels } from './kernel/panels'
 import { createKeymapController, defaultKeymap } from './kernel/keymap'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
+import { getView, recordView } from './kernel/view'
 import { CommandPalette } from './shell/CommandPalette'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
 import {
@@ -18,8 +19,13 @@ import {
   type Project,
 } from './kernel/project'
 
+/**
+ * Layouts are an app-level preference, the way a Premiere or AE workspace is:
+ * how *you* like panels arranged, the same in every project. Which workspace is
+ * currently open belongs to the project instead — it is where you left off in
+ * this piece of work — so it rides in the .flux document. See kernel/view.ts.
+ */
 const LAYOUTS_STORE = 'workspaces'
-const LAST_WORKSPACE_STORE = 'last-workspace'
 
 export function App() {
   const [project, setProject] = useState<Project | null>(getProject)
@@ -39,8 +45,18 @@ function Workspace({ project }: { project: Project }) {
   const savedRef = useRef<SavedLayouts>({})
   const keymap = useMemo(() => createKeymapController(defaultKeymap), [])
 
+  /**
+   * The workspace this project was saved in, read once at mount.
+   *
+   * Once, and into the initial state - not in the restore effect. activeId is
+   * reported back into the view as it changes, so a default of 'edit' would
+   * record 'edit' over the saved value before the restore ever got to read it,
+   * and every project would reopen in Edit no matter what was saved.
+   */
+  const openInRef = useRef(getWorkspace(getView().workspace) ? getView().workspace : 'edit')
+
   const [ready, setReady] = useState(false)
-  const [activeId, setActiveId] = useState('edit')
+  const [activeId, setActiveId] = useState(openInRef.current)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [dirty, setDirty] = useState(isDirty)
@@ -131,13 +147,10 @@ function Workspace({ project }: { project: Project }) {
     let cancelled = false
 
     void (async () => {
-      const [layouts, last] = await Promise.all([
-        loadStore<SavedLayouts>(LAYOUTS_STORE, {}),
-        loadStore<string>(LAST_WORKSPACE_STORE, 'edit'),
-      ])
+      const layouts = await loadStore<SavedLayouts>(LAYOUTS_STORE, {})
       if (cancelled) return
       savedRef.current = layouts
-      applyWorkspace(getWorkspace(last) ? last : 'edit')
+      applyWorkspace(openInRef.current)
     })()
 
     return () => {
@@ -145,9 +158,11 @@ function Workspace({ project }: { project: Project }) {
     }
   }, [ready, applyWorkspace])
 
-  // Remember the active workspace across launches.
+  // Reopening the project brings back the workspace it was left in. Recorded,
+  // not saved: switching workspaces is not an edit and must not light the
+  // unsaved dot — it travels with the next real save.
   useEffect(() => {
-    if (ready) void saveStore(LAST_WORKSPACE_STORE, activeId)
+    if (ready) recordView({ workspace: activeId })
   }, [ready, activeId])
 
   // Everything the app can do is registered here as a command; the keymap and

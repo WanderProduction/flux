@@ -41,10 +41,11 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 
 | | |
 |---|---|
-| **Projects** | Create or open a project on launch. State lives in the project folder. |
+| **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
 | **Workspaces** | Saved panel layouts. `1` Edit · `2` Sound Design · `3` Nodes / Motion. |
-| **Layout persistence** | `Ctrl S` saves the current workspace's layout, `Ctrl Shift R` resets it. Restored on launch. |
+| **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
+| **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 6`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Two rail trees — the local disks and the project. Browse, import by reference, thumbnails on cards. |
@@ -61,19 +62,19 @@ project inside it:
 ```
 <your folder>/
   <Project Name>/
-    <Project Name>.flux   the project document — this IS the project
-    project_files/        the app's bookkeeping: autosave
-    imports/              media copied into the project
-    exports/              renders — nothing writes here yet
+    project_files/
+      <Project Name>.flux   the project document — this IS the project
+    imports/                media copied into the project
+    exports/                renders — nothing writes here yet
 ```
 
 The named folder matters: without it, choosing Downloads once would scatter those three folders
 straight into Downloads, and a second project could never live beside the first. The launcher shows
-the exact path before you commit, and the name is sanitised for the filesystem while the manifest
+the exact path before you commit, and the name is sanitised for the filesystem while the document
 keeps what you typed.
 
-`project_files` is the part FLUX owns — the manifest (name, app version, format
-number) and the project's assets and sequence. `imports` and `exports` are yours.
+`project_files` is the part FLUX owns — the document, and whatever bookkeeping comes later.
+`imports` and `exports` are yours.
 
 **Project state lives in the project folder, not in app data.** Opening a different project shows a
 different timeline, and a project folder copied to another machine brings its contents with it.
@@ -82,31 +83,66 @@ person using FLUX rather than the work.
 
 ### The `.flux` document
 
-The `.flux` file holds everything the project knows — name, assets, sequence, per-project settings.
-It sits in the project root rather than inside `project_files` because it is the user's document,
-not the app's bookkeeping: it is the thing you back up, copy and double-click.
+One file is the project. `project_files/<Project Name>.flux` holds everything the project knows:
+
+- **name** and when it was created
+- **assets** — every import, with its path, probed dimensions and duration
+- **sequence** — tracks, and every clip with its track, start and length
+- **settings** — per-project preferences, currently the copy-or-link import mode
+- **view** — the workspace you were in, the timeline's zoom, the folder the browser was showing
+
+That last one is the difference between a file that stores your edit and a project that reopens
+where you left it, which is what a `.prproj` actually does. It is saved but it is deliberately *not*
+unsaved work: zooming the timeline never lights the dirty dot, because a dot that appears when you
+scroll is a dot people learn to ignore.
 
 It is plain JSON on purpose. VISION.md promises open, inspectable project files, and a media app
 that can lose an edit to an opaque blob has failed at the only job that matters. It also means a
 project diffs in git.
 
-**`Ctrl S` saves.** (Layout save moved to `Ctrl Alt S` — a media app that eats `Ctrl S` for a window
-layout is fighting muscle memory.) The chip in the top bar carries a dot while there is unsaved work.
+**`Ctrl S` saves, and nothing else does.** (Layout save moved to `Ctrl Alt S` — a media app that
+eats `Ctrl S` for a window layout is fighting muscle memory.) The chip in the top bar carries a dot
+while there is unsaved work, and the status bar reads *saved* / *unsaved changes* / *saving…*.
 
 Saves are **atomic**: a temp file plus a rename, so a crash mid-write cannot truncate the real
-document. Between saves, **autosave** writes continuously to `project_files/autosave.flux`, and an
-autosave newer than the document wins on open — the project comes back marked unsaved rather than
-silently discarding whatever happened after the last save.
+document.
+
+There is **no autosave yet**. Because of that, closing the window over unsaved work
+**asks first** — Save / Don't Save / Cancel — since that prompt is the only thing between a stray
+Alt+F4 and a lost edit.
 
 The document carries a format number. One written by a newer FLUX is **refused rather than
 misread**: presenting a damaged edit as the real one, and then saving over it, is the failure a
-project file must never have. Folder projects from before the format existed migrate on open.
+project file must never have. Older projects are read and upgraded — both the folder-only layout
+from before the format existed, and format 2, which kept the document loose in the project root. A
+relocated document is moved on the next save, and the copy left behind is removed only once the new
+one is safely written and only if it is the same document (matched by creation time, not by being a
+`.flux` in the right place).
 
 The launcher always appears on launch rather than silently reopening the last project. In an app
 where a stray edit lands in whatever happened to be open, "which project am I in?" should not be a
 question you answer by looking at the timeline.
 
-*Not yet: versioned autosave snapshots, Save As, and project folders for organising assets inside the bin.*
+*Not yet: autosave, Save As, and project folders for organising assets inside the bin.*
+
+### Opening a project from Explorer
+
+```bash
+npm run register
+```
+
+writes per-user registry keys (`HKCU\Software\Classes`, never `HKLM` — no elevation, nothing that
+touches other accounts) so `.flux` files carry the FLUX icon and open on double-click. `npm run
+unregister` removes them.
+
+FLUX takes a **single-instance lock**: a double-clicked project opens in the window already running
+rather than starting a second copy. Two processes editing one document is a race with someone's
+edit as the stake.
+
+Registration points at the dev build, so `npm run dev` has to be running for a double-click to land
+— if it is not, FLUX says so instead of opening a blank window. Pass `--exe <path>` to point it at
+an installed build instead. A packaged FLUX registers the association itself at install time, via
+`fileAssociations` in `package.json`.
 
 ### The Content Browser
 
@@ -233,7 +269,7 @@ in the skinning system.
 ```
 src/
   kernel/       commands · panels · keymap · workspaces · store
-                project · fsBridge · assets · sequence
+                project · view · fsBridge · assets · sequence
                 thumbnails · mediaProbe · importMode              (the seams)
   launcher/     the project chooser, shown until a project is open
   panels/       the six built-in panels, registered via the SDK
@@ -291,6 +327,17 @@ npm run verify:tree
 npm run verify:timeline
 ```
 
+`verify:launch` is the odd one out: it stops any running FLUX and starts its own, because "what
+happens when FLUX is **not** already running" is half of what it checks. It reads the launch command
+straight out of the registry rather than reconstructing it, so it checks the association
+`npm run register` actually wrote — a cold start opening the double-clicked project, closing it
+landing on the launcher instead of reopening it, and a second document being handed to the running
+app rather than starting a second copy.
+
+```bash
+npm run verify:launch
+```
+
 `verify:app`, `verify:tree` and `verify:timeline` expect fixture media in `~/flux-media-test`. Generate it with
 ffmpeg — two H.264 mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be
 listed, and a deliberately corrupt `.mp4` that must resolve to "no preview" rather than hang. Both
@@ -344,6 +391,10 @@ install, and the mark is adjusted by editing numbers rather than opening a desig
 The outputs in `build/` are committed so a fresh clone runs without a generation step, but the
 script is the source of truth: change the drawing, re-run it, commit what it produced.
 
-The `.flux` document gets its own icon, registered through `fileAssociations` in `package.json`.
-That association takes effect once the app is packaged with electron-builder, which is not wired up
-yet; launching with a path (`electron . path/to/x.flux`) already opens that project today.
+The `.flux` document gets its own icon: the app's dark plate with a folded corner, deliberately not
+a white page with a badge on it. At 16px in Explorer a white page reads as "generic file, nothing
+handles this", which is the one impression a project document must not give.
+
+Registering it with Windows is `npm run register` — see **Opening a project from Explorer** above.
+A packaged build does it at install time through `fileAssociations` in `package.json`; packaging
+with electron-builder is not wired up yet.

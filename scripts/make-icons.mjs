@@ -27,8 +27,8 @@ const BG = [13, 14, 18, 255] // --flux-bg
 const EDGE = [51, 57, 73, 255] // --flux-border-strong
 const CYAN = [76, 194, 255, 255] // --flux-accent
 const VIOLET = [160, 107, 255, 255] // --flux-driver
-const PAPER = [222, 226, 236, 255]
-const PAPER_EDGE = [150, 158, 178, 255]
+/** The turned-over corner of the document icon. */
+const FOLD = [92, 102, 124, 255]
 
 // ── tiny raster ───────────────────────────────────────────────
 
@@ -232,50 +232,56 @@ function drawApp(size) {
 }
 
 /**
- * The document icon: a page with a folded corner carrying the same mark, so a
- * .flux file is recognisably FLUX's without being mistaken for the app itself.
+ * The document icon: the app's own plate with a folded corner.
+ *
+ * Deliberately *not* a white page with a small badge. At 16px in Explorer a
+ * white page reads as "generic file, nothing installed handles this" — which is
+ * exactly the impression a .flux must not give. Carrying the app's dark plate
+ * and mark makes a project instantly recognisable in a folder; the folded
+ * corner is the only thing separating it from the app itself.
  */
 function drawDocument(size) {
   const c = canvas(size)
   const u = size / 100
+  const fold = 24
 
-  const fold = 26
-  fill(
-    c,
-    (x, y) =>
-      roundedRect(16 * u, 6 * u, 84 * u, 94 * u, 7 * u)(x, y) &&
-      // Cut the top-right corner away to make the fold.
-      !polygon([
-        [(84 - fold) * u, 4 * u],
-        [86 * u, 4 * u],
-        [86 * u, (6 + fold) * u],
-      ])(x, y),
-    PAPER,
-  )
-  // The folded flap, a shade darker so it reads as turned over.
+  const plate = roundedRect(12 * u, 5 * u, 88 * u, 95 * u, 12 * u)
+  const inner = roundedRect(14.5 * u, 7.5 * u, 85.5 * u, 92.5 * u, 10 * u)
+  // The corner is cut generously past the edge so the diagonal is clean.
+  const cut = polygon([
+    [(88 - fold) * u, 3 * u],
+    [92 * u, 3 * u],
+    [92 * u, (5 + fold) * u],
+  ])
+
+  fill(c, (x, y) => plate(x, y) && !cut(x, y), EDGE)
+  fill(c, (x, y) => inner(x, y) && !cut(x, y), BG)
+
+  // The turned-over flap, in the accent so the fold is legible when the plate
+  // and the background are both dark.
   fill(
     c,
     polygon([
-      [(84 - fold) * u, 6 * u],
-      [84 * u, (6 + fold) * u],
-      [(84 - fold) * u, (6 + fold) * u],
+      [(88 - fold) * u, 5 * u],
+      [88 * u, (5 + fold) * u],
+      [(88 - fold) * u, (5 + fold) * u],
     ]),
-    PAPER_EDGE,
+    FOLD,
   )
 
   fill(
     c,
     polygon([
-      [34 * u, 42 * u],
-      [54 * u, 62 * u],
-      [34 * u, 82 * u],
-      [34 * u, 70 * u],
-      [42 * u, 62 * u],
-      [34 * u, 54 * u],
+      [30 * u, 34 * u],
+      [54 * u, 58 * u],
+      [30 * u, 82 * u],
+      [30 * u, 68 * u],
+      [39 * u, 58 * u],
+      [30 * u, 48 * u],
     ]),
     CYAN,
   )
-  fill(c, roundedRect(59 * u, 42 * u, 68 * u, 82 * u, 4.5 * u), VIOLET)
+  fill(c, roundedRect(60 * u, 34 * u, 71 * u, 82 * u, 5.5 * u), VIOLET)
   return c
 }
 

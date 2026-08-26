@@ -17,15 +17,15 @@ import path from 'node:path'
 import {
   DOCUMENT_FORMAT,
   PROJECT_DIRS,
-  autosavePath,
   copyIntoImports,
   createProject,
+  documentPath,
   findProjectFile,
   isProject,
   openProject,
   plannedProjectPath,
+  rootForDocument,
   saveProject,
-  writeAutosave,
 } from '../electron/project.js'
 import { makeDocument } from '../shared/projectFormat.js'
 
@@ -76,7 +76,7 @@ try {
     const messy = await createProject(tmp, 'A/B:C*D ', '0.0.1')
     assert.equal(messy.ok, true, `create failed: ${messy.error}`)
     assert.equal(path.basename(messy.project.root), 'ABCD')
-    // The manifest keeps the name the user typed, not the sanitised folder name.
+    // The document keeps the name the user typed, not the sanitised folder name.
     assert.equal(messy.project.name, 'A/B:C*D')
     await fs.access(path.join(messy.project.root, 'imports'))
   })
@@ -93,18 +93,28 @@ try {
     assert.deepEqual(await fs.readdir(path.join(projectA, 'exports')), [])
   })
 
-  await check('the document is named after the project and sits in its root', async () => {
-    const rootEntries = await fs.readdir(projectA)
+  await check('the document is named after the project and lives in project_files', async () => {
     assert.deepEqual(
-      rootEntries.sort(),
-      ['Project A.flux', 'exports', 'imports', 'project_files'],
-      'the .flux document belongs beside the folders, where a user can see it',
+      (await fs.readdir(projectA)).sort(),
+      ['exports', 'imports', 'project_files'],
+      'the project root holds folders only',
     )
-    assert.equal(await findProjectFile(projectA), path.join(projectA, 'Project A.flux'))
+    assert.deepEqual(await fs.readdir(path.join(projectA, 'project_files')), ['Project A.flux'])
+    assert.equal(await findProjectFile(projectA), documentPath(projectA, 'Project A'))
+  })
+
+  await check('a document path resolves back to its project folder', async () => {
+    // Explorer hands over the file; everything else works from the folder.
+    assert.equal(rootForDocument(documentPath(projectA, 'Project A')), projectA)
+    assert.equal(
+      rootForDocument(path.join(projectA, 'Project A.flux')),
+      projectA,
+      'a format-2 document sat in the root, and must still resolve',
+    )
   })
 
   await check('the document records the name, app version and format', async () => {
-    const doc = JSON.parse(await fs.readFile(path.join(projectA, 'Project A.flux'), 'utf8'))
+    const doc = JSON.parse(await fs.readFile(documentPath(projectA, 'Project A'), 'utf8'))
     assert.equal(doc.name, 'Project A')
     assert.equal(doc.flux.version, '0.0.1')
     assert.equal(doc.flux.format, DOCUMENT_FORMAT)
@@ -138,7 +148,7 @@ try {
     assert.equal(await isProject(tmp), false)
   })
 
-  await check('opening a project reads its manifest back', async () => {
+  await check('opening a project reads its document back', async () => {
     const result = await openProject(projectA)
     assert.equal(result.ok, true)
     assert.equal(result.project.name, 'Project A')
@@ -197,7 +207,7 @@ try {
         clips: [{ id: 'c1', assetId: 'a1', trackId: 'V1', start: 0, duration: 4 }],
       },
     })
-    const result = await saveProject(path.join(projectA, 'Project A.flux'), doc)
+    const result = await saveProject(documentPath(projectA, 'Project A'), doc)
     assert.equal(result.ok, true, `save failed: ${result.error}`)
 
     const reopened = await openProject(projectA)
@@ -209,7 +219,7 @@ try {
   })
 
   await check('a project can be opened by its .flux file directly', async () => {
-    const result = await openProject(path.join(projectA, 'Project A.flux'))
+    const result = await openProject(documentPath(projectA, 'Project A'))
     assert.equal(result.ok, true)
     assert.equal(result.project.root, projectA, 'the folder is derived from the file')
     assert.equal(result.project.name, 'Project A')
@@ -218,7 +228,7 @@ try {
   await check('two projects keep separate documents', async () => {
     const b = path.join(tmp, 'Project B')
     const docB = makeDocument({ name: 'Project B', appVersion: '0.0.1', assets: [{ id: 'b1' }] })
-    await saveProject(path.join(b, 'Project B.flux'), docB)
+    await saveProject(documentPath(b, 'Project B'), docB)
 
     const openA = await openProject(projectA)
     const openB = await openProject(b)
@@ -226,39 +236,76 @@ try {
     assert.equal(openB.project.assets[0].id, 'b1')
   })
 
-  await check('an autosave newer than the document wins, and says so', async () => {
-    // Losing whatever happened after the last save is exactly what an autosave
-    // exists to prevent, so the newer file has to be the one that opens.
+  await check('a format-2 document in the root still opens', async () => {
+    // Format 2 wrote the document loose in the project root. Someone's project
+    // from that build has to keep working, not report "not a project".
+    const old = path.join(tmp, 'old-layout', 'Vintage')
+    await fs.mkdir(path.join(old, 'project_files'), { recursive: true })
     const doc = makeDocument({
-      name: 'Project A',
+      name: 'Vintage',
       appVersion: '0.0.1',
-      assets: [{ id: 'later', name: 'unsaved.mp4', kind: 'video' }],
+      assets: [{ id: 'v1', name: 'old.mp4', kind: 'video' }],
     })
-    await new Promise((r) => setTimeout(r, 30))
-    await writeAutosave(projectA, doc)
+    doc.flux.format = 2
+    delete doc.view
+    await fs.writeFile(path.join(old, 'Vintage.flux'), JSON.stringify(doc), 'utf8')
 
-    const result = await openProject(projectA)
-    assert.equal(result.ok, true)
-    assert.equal(result.recovered, true, 'the newer autosave should have been taken')
-    assert.equal(result.dirty, true, 'recovered work is unsaved work')
-    assert.equal(result.project.assets[0].name, 'unsaved.mp4')
+    const result = await openProject(old)
+    assert.equal(result.ok, true, `open failed: ${result.error}`)
+    assert.equal(result.project.assets[0].name, 'old.mp4')
+    assert.equal(result.relocated, true, 'the document is due to move on the next save')
+    assert.equal(result.dirty, true, 'so the user is told there is something to save')
+    assert.equal(
+      result.project.file,
+      documentPath(old, 'Vintage'),
+      'the save target is already the new location',
+    )
   })
 
-  await check('saving clears the autosave, so the next open is clean', async () => {
-    const doc = makeDocument({ name: 'Project A', appVersion: '0.0.1', assets: [] })
-    await saveProject(path.join(projectA, 'Project A.flux'), doc)
-    await assert.rejects(() => fs.access(autosavePath(projectA)), 'autosave should be gone')
+  await check('saving a relocated project removes the stale copy', async () => {
+    // Two documents for one project is a trap: double-clicking the stale one in
+    // the root would open old work with no hint that it is old.
+    const old = path.join(tmp, 'old-layout', 'Vintage')
+    const opened = await openProject(old)
+    const { root, file, ...document } = opened.project
+    const saved = await saveProject(file, {
+      ...document,
+      flux: { format: DOCUMENT_FORMAT, version: '0.0.1' },
+    })
+    assert.equal(saved.ok, true, `save failed: ${saved.error}`)
+    assert.deepEqual(saved.replaced, [path.join(old, 'Vintage.flux')])
 
-    const result = await openProject(projectA)
-    assert.equal(result.dirty, false)
-    assert.equal(result.recovered, false)
+    assert.deepEqual((await fs.readdir(old)).sort(), ['exports', 'imports', 'project_files'])
+    const again = await openProject(old)
+    assert.equal(again.dirty, false, 'once moved, the project opens clean')
+    assert.equal(again.relocated, false)
+    assert.equal(again.project.assets[0].name, 'old.mp4', 'and it still holds the work')
+  })
+
+  await check('saving never deletes a .flux belonging to someone else', async () => {
+    // The cleanup above is matched by createdAt, not by "it is a .flux in the
+    // right folder". Deleting a stranger's file to tidy up is not a trade worth
+    // making, even inside a folder we own.
+    const stranger = path.join(projectA, 'project_files', 'Someone Elses.flux')
+    const other = makeDocument({ name: 'Someone Elses', appVersion: '0.0.1' })
+    other.createdAt = 4242
+    await fs.writeFile(stranger, JSON.stringify(other), 'utf8')
+
+    const doc = makeDocument({ name: 'Project A', appVersion: '0.0.1', assets: [] })
+    const result = await saveProject(documentPath(projectA, 'Project A'), doc)
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.replaced, [], 'nothing should have been removed')
+    await fs.access(stranger)
+    await fs.rm(stranger)
   })
 
   await check('a completed save leaves no temp file behind', async () => {
     // Atomic write: a temp file plus a rename, so a crash mid-write cannot
     // truncate the real document.
-    const file = path.join(projectA, 'Project A.flux')
-    const leftovers = (await fs.readdir(projectA)).filter((n) => n.includes('.tmp-'))
+    const file = documentPath(projectA, 'Project A')
+    const leftovers = (await fs.readdir(path.join(projectA, 'project_files'))).filter((n) =>
+      n.includes('.tmp-'),
+    )
     assert.deepEqual(leftovers, [])
     const text = await fs.readFile(file, 'utf8')
     assert.doesNotThrow(() => JSON.parse(text), 'the document should always be valid JSON')

@@ -32,8 +32,23 @@ contextBridge.exposeInMainWorld('flux', {
     copyIntoImports: (root, sourcePath) =>
       ipcRenderer.invoke('project:copyIntoImports', root, sourcePath),
     save: (file, document) => ipcRenderer.invoke('project:save', file, document),
-    autosave: (root, document) => ipcRenderer.invoke('project:autosave', root, document),
     launchTarget: () => ipcRenderer.invoke('project:launchTarget'),
+    /**
+     * Whether closing would lose work. Pushed, not asked for: main needs the
+     * answer inside a window 'close' handler, where there is no room to wait
+     * for a round trip to the renderer.
+     */
+    setUnsaved: (unsaved) => ipcRenderer.send('project:unsaved', unsaved),
+    onSaveAndClose: (handler) => {
+      ipcRenderer.on('project:save-and-close', async () => {
+        await handler()
+        ipcRenderer.send('project:close-confirmed')
+      })
+    },
+    /** A .flux double-clicked while FLUX was already running. */
+    onOpenTarget: (handler) => {
+      ipcRenderer.on('project:open-target', (_e, file) => handler(file))
+    },
   },
   platform: process.platform,
 })

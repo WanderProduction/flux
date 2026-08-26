@@ -32,6 +32,7 @@ import {
 } from '../kernel/pinned'
 import { copyIntoImports, getProject, subscribeProject } from '../kernel/project'
 import { loadStore, saveStore } from '../kernel/store'
+import { getView, recordView, type BrowserLocation } from '../kernel/view'
 import { mediaKindOf } from '../../shared/mediaTypes.js'
 import { PanelFrame } from './PanelFrame'
 import { AssetThumb } from './AssetThumb'
@@ -54,7 +55,8 @@ import { TreeView, useDiskTree, type TreeRow } from './FolderTree'
 /** The bin's synthetic root. Prefixed so it can never collide with a real path. */
 const ASSETS_ROOT = '::assets'
 
-type Location = { type: 'project' } | { type: 'folder'; path: string }
+/** Shared with the project document, so the browser reopens where it was. */
+type Location = BrowserLocation
 
 /** What the import pipeline accepts, whether it came from the grid or a dialog. */
 interface ImportEntry {
@@ -78,7 +80,7 @@ function folderOf(filePath: string): string {
 
 export function ContentBrowserPanel() {
   const [project, setProjectState] = useState(getProject)
-  const [location, setLocation] = useState<Location>({ type: 'project' })
+  const [location, setLocation] = useState<Location>(() => getView().browser.location)
   const [places, setPlaces] = useState<Places | null>(null)
   const [listing, setListing] = useState<DirectoryListing | null>(null)
   const [status, setStatus] = useState<'idle' | 'loading' | 'denied' | 'unreadable'>('idle')
@@ -96,6 +98,10 @@ export function ContentBrowserPanel() {
   const [copyError, setCopyError] = useState<string | null>(null)
 
   useEffect(() => subscribeProject(() => setProjectState(getProject())), [])
+
+  // Where you were browsing goes into the project document. Recorded rather
+  // than saved: walking a folder tree is not an edit. See kernel/view.ts.
+  useEffect(() => recordView({ browser: { location } }), [location])
 
   useEffect(() => {
     // The project applies the document; the panel only mirrors it.

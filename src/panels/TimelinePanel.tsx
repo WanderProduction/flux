@@ -15,6 +15,7 @@ import {
   type SequenceState,
   type Track,
 } from '../kernel/sequence'
+import { getView, recordView } from '../kernel/view'
 import { PanelFrame } from './PanelFrame'
 import { useThumbnail } from './useThumbnail'
 
@@ -34,6 +35,16 @@ const HEADER_WIDTH = 68
 const MIN_ZOOM = 8
 const MAX_ZOOM = 400
 const DEFAULT_ZOOM = 60 // pixels per second
+
+/**
+ * Keeps a zoom usable. Also guards the value read back from a document: a
+ * hand-edited .flux with zoom 0 would give every clip zero width and an empty
+ * timeline that looks like lost work.
+ */
+function clampZoom(pixelsPerSecond: number): number {
+  if (!Number.isFinite(pixelsPerSecond) || pixelsPerSecond <= 0) return DEFAULT_ZOOM
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, pixelsPerSecond))
+}
 
 /** Tick spacing that keeps labels readable at any zoom. */
 function tickInterval(pixelsPerSecond: number): number {
@@ -57,7 +68,9 @@ interface DropPreview {
 export function TimelinePanel() {
   const [sequence, setSequence] = useState<SequenceState>(getSequence)
   const [assets, setAssets] = useState<Asset[]>(getAssets)
-  const [zoom, setZoom] = useState(DEFAULT_ZOOM)
+  // Restored from the project document, so reopening lands you at the zoom you
+  // were working at rather than snapping back to the default.
+  const [zoom, setZoom] = useState(() => clampZoom(getView().timeline.zoom || DEFAULT_ZOOM))
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [preview, setPreview] = useState<DropPreview | null>(null)
   const lanesRef = useRef<HTMLDivElement>(null)
@@ -68,6 +81,10 @@ export function TimelinePanel() {
   }, [])
 
   useEffect(() => subscribeAssets(() => setAssets([...getAssets()])), [])
+
+  // Recorded, never marked dirty: zooming is not an edit. It is written out
+  // with the next save. See kernel/view.ts.
+  useEffect(() => recordView({ timeline: { zoom } }), [zoom])
 
   const assetById = useMemo(() => {
     const map = new Map<string, Asset>()
@@ -149,13 +166,13 @@ export function TimelinePanel() {
         id: 'timeline.zoomIn',
         title: 'Zoom In',
         category: 'Timeline',
-        run: () => setZoom((z) => Math.min(MAX_ZOOM, z * 1.5)),
+        run: () => setZoom((z) => clampZoom(z * 1.5)),
       },
       {
         id: 'timeline.zoomOut',
         title: 'Zoom Out',
         category: 'Timeline',
-        run: () => setZoom((z) => Math.max(MIN_ZOOM, z / 1.5)),
+        run: () => setZoom((z) => clampZoom(z / 1.5)),
       },
       {
         id: 'timeline.deleteSelected',

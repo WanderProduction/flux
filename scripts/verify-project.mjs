@@ -15,6 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { attach, createChecker, evaluate } from './cdp.mjs'
+import { DOCUMENT_FORMAT } from '../shared/projectFormat.js'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'flux-ui-project-'))
@@ -22,6 +23,9 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'flux-ui-project-'))
 const parent = tmp
 const projectA = path.join(tmp, 'Alpha')
 const projectB = path.join(tmp, 'Beta')
+/** The document is the project, and it lives with the app's bookkeeping. */
+const DOC_A = path.join(projectA, 'project_files', 'Alpha.flux')
+const DOC_B = path.join(projectB, 'project_files', 'Beta.flux')
 
 const js = (value) => JSON.stringify(value)
 
@@ -86,7 +90,7 @@ try {
     )
 
     const entries = await fs.readdir(projectA)
-    assert.deepEqual(entries.sort(), ['Alpha.flux', 'exports', 'imports', 'project_files'])
+    assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files'])
   })
 
   await check('the project root is the named folder', async () => {
@@ -117,17 +121,22 @@ try {
     )
     assert.equal(state.ok, true, `save failed: ${state.error}`)
     assert.equal(state.dirty, false)
-    assert.equal(state.file, path.join(projectA, 'Alpha.flux'))
+    assert.equal(state.file, DOC_A)
 
     const doc = JSON.parse(await fs.readFile(state.file, 'utf8'))
+    assert.equal(doc.flux.format, DOCUMENT_FORMAT, 'a save writes the current format')
     assert.equal(doc.name, 'Alpha')
     assert.equal(doc.assets.length, 1)
     assert.equal(doc.assets[0].name, 'clipA.mp4')
   })
 
-  await check('the document sits in the project root, beside the folders', async () => {
-    const entries = await fs.readdir(projectA)
-    assert.deepEqual(entries.sort(), ['Alpha.flux', 'exports', 'imports', 'project_files'])
+  await check('the document lives in project_files', async () => {
+    assert.deepEqual(await fs.readdir(path.join(projectA, 'project_files')), ['Alpha.flux'])
+    assert.deepEqual(
+      (await fs.readdir(projectA)).sort(),
+      ['exports', 'imports', 'project_files'],
+      'the project root stays folders-only',
+    )
   })
 
   await check('Ctrl S is wired to Save Project', async () => {
@@ -145,8 +154,68 @@ try {
     assert.equal(result.dirtyBefore, true)
     assert.equal(result.dirtyAfter, false)
 
-    const doc = JSON.parse(await fs.readFile(path.join(projectA, 'Alpha.flux'), 'utf8'))
+    const doc = JSON.parse(await fs.readFile(DOC_A, 'utf8'))
     assert.equal(doc.assets.length, 2, 'the second import should be in the saved document')
+  })
+
+  await check('the document carries the workspace, zoom and browsing position', async () => {
+    // "Save the project" has to mean the arrangement too, the way a .prproj
+    // reopens where you left it - not only the assets and the cuts.
+    const written = await evaluate(
+      cdp,
+      `const { view, project } = window.__fluxDev;
+       view.recordView({
+         workspace: 'nodes',
+         timeline: { zoom: 123 },
+         browser: { location: { type: 'folder', path: ${js(MEDIA_DIR)} } },
+       });
+       await new Promise(r => setTimeout(r, 100));
+       const before = project.isDirty();
+       await project.saveProject();
+       return { before, after: project.isDirty() };`,
+    )
+    assert.equal(written.before, false, 'rearranging the app is not unsaved work')
+
+    const doc = JSON.parse(await fs.readFile(DOC_A, 'utf8'))
+    assert.equal(doc.view.workspace, 'nodes')
+    assert.equal(doc.view.timeline.zoom, 123)
+    assert.equal(doc.view.browser.location.path, MEDIA_DIR)
+  })
+
+  await check('reopening restores the workspace, zoom and browsing position', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { project, view, commands } = window.__fluxDev;
+       project.closeProject();
+       for (let i = 0; i < 40 && !document.querySelector('.launcher'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       const whileClosed = view.getView().workspace;
+
+       const r = await project.openProject(${js(projectA)});
+       if (!r.ok) throw new Error(r.error);
+       for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       await new Promise(r => setTimeout(r, 400));
+       const state = { whileClosed, view: view.getView(), dirty: project.isDirty(),
+                       tab: document.querySelector('.ws-tab--active')?.textContent ?? '' };
+
+       // Hand the app back the way it was found, on disk as well as on screen:
+       // the Nodes workspace opens no Content Browser, and every later check in
+       // this suite that reopens Alpha would land in it again.
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 300));
+       await project.saveProject();
+       return state;`,
+    )
+    assert.equal(state.whileClosed, 'edit', 'closing drops back to the default view')
+    assert.equal(state.view.workspace, 'nodes')
+    assert.equal(state.view.timeline.zoom, 123)
+    assert.equal(state.view.browser.location.path, MEDIA_DIR)
+    assert.ok(
+      state.tab.includes('Nodes'),
+      `the restored workspace should be on screen, not just in memory (tab was "${state.tab}")`,
+    )
+    assert.equal(state.dirty, false, 'restoring a view is not unsaved work either')
   })
 
   await check('closing a project returns to the launcher', async () => {
@@ -203,7 +272,7 @@ try {
       `const { project } = window.__fluxDev;
        project.closeProject();
        await new Promise(r => setTimeout(r, 150));
-       const r = await project.openProject(${js(path.join(projectA, 'Alpha.flux'))});
+       const r = await project.openProject(${js(DOC_A)});
        return { ok: r.ok, error: r.error, root: project.getProject()?.root,
                 name: project.getProject()?.name };`,
     )
@@ -225,7 +294,7 @@ try {
   })
 
   await check('Beta was never polluted by Alpha on disk', async () => {
-    const doc = JSON.parse(await fs.readFile(path.join(projectB, 'Beta.flux'), 'utf8'))
+    const doc = JSON.parse(await fs.readFile(DOC_B, 'utf8'))
     assert.deepEqual(doc.assets, [], `Beta's document holds ${JSON.stringify(doc.assets)}`)
   })
 
@@ -427,6 +496,81 @@ try {
        return window.__fluxDev.importMode.getImportMode();`,
     )
     assert.equal(mode, 'ask')
+  })
+
+  await check('an older project opens, and saving moves and upgrades it', async () => {
+    // The whole migration story from the user's side: a project made by the
+    // build that kept the document loose in the root opens, comes back marked
+    // unsaved, and one Ctrl S leaves exactly one document, in the new place,
+    // claiming the new format, with the work intact.
+    const vintage = path.join(tmp, 'Vintage')
+    await fs.mkdir(path.join(vintage, 'project_files'), { recursive: true })
+    await fs.mkdir(path.join(vintage, 'imports'), { recursive: true })
+    await fs.writeFile(
+      path.join(vintage, 'Vintage.flux'),
+      JSON.stringify({
+        flux: { format: 2, version: '0.0.1' },
+        name: 'Vintage',
+        createdAt: 1000,
+        savedAt: 1000,
+        settings: { importMode: 'link' },
+        assets: [
+          {
+            id: 'v1',
+            path: path.join(MEDIA_DIR, 'clipA.mp4'),
+            name: 'clipA.mp4',
+            kind: 'video',
+            size: 1,
+            mtimeMs: 1,
+            addedAt: 1,
+          },
+        ],
+        sequence: {
+          name: 'Sequence 1',
+          frameRate: 24,
+          tracks: [{ id: 'V1', kind: 'video', name: 'V1' }],
+          clips: [{ id: 'c1', assetId: 'v1', trackId: 'V1', start: 0, duration: 4 }],
+        },
+      }),
+      'utf8',
+    )
+
+    const opened = await evaluate(
+      cdp,
+      `const { project, assets, sequence } = window.__fluxDev;
+       const r = await project.openProject(${js(vintage)});
+       if (!r.ok) throw new Error(r.error);
+       await new Promise(r => setTimeout(r, 600));
+       return { dirty: project.isDirty(), file: project.getProject()?.file,
+                assets: assets.getAssets().length,
+                clips: sequence.getSequence().clips.length };`,
+    )
+    assert.equal(opened.assets, 1, 'the old project\'s assets should be there')
+    assert.equal(opened.clips, 1, 'and its clips')
+    assert.equal(opened.dirty, true, 'a project due to be moved has something to save')
+    assert.equal(opened.file, path.join(vintage, 'project_files', 'Vintage.flux'))
+
+    const saved = await evaluate(
+      cdp,
+      `const { project, commands } = window.__fluxDev;
+       await commands.run('project.save');
+       await new Promise(r => setTimeout(r, 500));
+       return project.isDirty();`,
+    )
+    assert.equal(saved, false)
+
+    assert.deepEqual(
+      (await fs.readdir(vintage)).sort(),
+      ['exports', 'imports', 'project_files'],
+      'the stale document in the root should be gone',
+    )
+    const doc = JSON.parse(
+      await fs.readFile(path.join(vintage, 'project_files', 'Vintage.flux'), 'utf8'),
+    )
+    assert.equal(doc.flux.format, DOCUMENT_FORMAT, 'saving should upgrade the format')
+    assert.equal(doc.createdAt, 1000, 'the original creation date survives')
+    assert.equal(doc.assets.length, 1)
+    assert.equal(doc.sequence.clips.length, 1)
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

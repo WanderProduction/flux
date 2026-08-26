@@ -4,7 +4,7 @@ import path from 'node:path'
 import { mediaKindOf } from '../shared/mediaTypes.js'
 import { projectFolderPath, safeFolderName } from '../shared/projectNaming.js'
 import {
-  AUTOSAVE_NAME,
+  DOCUMENT_DIR,
   DOCUMENT_FORMAT,
   documentFileName,
   documentProblem,
@@ -16,17 +16,16 @@ import {
  * Project creation, and reading and writing the project document.
  *
  *   <root>/
- *     <Project Name>.flux    the document — this IS the project
- *     project_files/         the app's bookkeeping: autosave
- *     imports/               media copied into the project
- *     exports/               renders — nothing writes here yet
+ *     project_files/<Project Name>.flux   the document — this IS the project
+ *     imports/                            media copied into the project
+ *     exports/                            renders — nothing writes here yet
  *
  * Kept free of any `electron` import so scripts/verify-project-fs.mjs can
  * exercise it against a real temp directory.
  */
 
 export const PROJECT_DIRS = ['project_files', 'imports', 'exports']
-export const PROJECT_FILES_DIR = 'project_files'
+export const PROJECT_FILES_DIR = DOCUMENT_DIR
 export const IMPORTS_DIR = 'imports'
 
 /** The v1 manifest. Read for migration, never written. */
@@ -36,23 +35,47 @@ export function projectFilesPath(root) {
   return path.join(root, PROJECT_FILES_DIR)
 }
 
-export function autosavePath(root) {
-  return path.join(root, PROJECT_FILES_DIR, AUTOSAVE_NAME)
-}
-
 export function importsPath(root) {
   return path.join(root, IMPORTS_DIR)
 }
 
-/** The document in a project folder, or null. */
-export async function findProjectFile(root) {
+/** Where this project's document belongs, given the project's name. */
+export function documentPath(root, name) {
+  return path.join(root, PROJECT_FILES_DIR, documentFileName(safeFolderName(name)))
+}
+
+async function fluxFilesIn(dir) {
   try {
-    const entries = await fs.readdir(root)
-    const found = entries.filter(isProjectFile).sort()
-    return found.length > 0 ? path.join(root, found[0]) : null
+    const entries = await fs.readdir(dir)
+    return entries.filter(isProjectFile).sort()
   } catch {
-    return null
+    return []
   }
+}
+
+/**
+ * The document in a project folder, or null.
+ *
+ * project_files first, then the root: format 2 wrote the document loose in the
+ * root, and a project made yesterday still has to open today.
+ */
+export async function findProjectFile(root) {
+  const inFiles = await fluxFilesIn(projectFilesPath(root))
+  if (inFiles.length > 0) return path.join(projectFilesPath(root), inFiles[0])
+
+  const inRoot = await fluxFilesIn(root)
+  return inRoot.length > 0 ? path.join(root, inRoot[0]) : null
+}
+
+/**
+ * The project folder a .flux path belongs to.
+ *
+ * The document normally sits one level down in project_files, so the project is
+ * its grandparent; a format-2 document in the root makes the parent the project.
+ */
+export function rootForDocument(file) {
+  const parent = path.dirname(file)
+  return path.basename(parent).toLowerCase() === PROJECT_FILES_DIR ? path.dirname(parent) : parent
 }
 
 /** True when `root` holds a project — a .flux document, or a v1 manifest. */
@@ -118,7 +141,7 @@ export async function createProject(parent, name, appVersion) {
     assets: [],
     sequence: null,
   })
-  const file = path.join(root, documentFileName(folder))
+  const file = documentPath(root, folder)
 
   try {
     for (const dir of PROJECT_DIRS) {
@@ -141,8 +164,8 @@ export function plannedProjectPath(parent, name) {
 }
 
 /**
- * Reads a v1 project (project.json + assets.json + sequence.json) into a v2
- * document, so folders made before the format existed still open.
+ * Reads a v1 project (project.json + assets.json + sequence.json) into a
+ * current document, so folders made before the format existed still open.
  */
 async function readLegacyProject(root) {
   const manifest = await readJson(path.join(root, PROJECT_FILES_DIR, LEGACY_MANIFEST))
@@ -167,10 +190,8 @@ async function readLegacyProject(root) {
 /**
  * Opens a project folder, or a .flux file directly.
  *
- * When an autosave is newer than the saved document, the autosave wins and the
- * project comes back marked unsaved. Preferring the older file would silently
- * discard whatever happened after the last save — which is exactly the work an
- * autosave exists to protect.
+ * Both are entry points that matter: the launcher hands over a folder, and
+ * double-clicking a document in Explorer hands over the file.
  */
 export async function openProject(target) {
   const resolved = path.resolve(target)
@@ -180,7 +201,7 @@ export async function openProject(target) {
 
   if (isProjectFile(resolved)) {
     file = resolved
-    root = path.dirname(resolved)
+    root = rootForDocument(resolved)
   } else {
     file = await findProjectFile(resolved)
   }
@@ -199,7 +220,7 @@ export async function openProject(target) {
     try {
       document = await readLegacyProject(root)
       migrated = true
-      file = path.join(root, documentFileName(safeFolderName(document.name)))
+      file = documentPath(root, document.name)
     } catch (err) {
       return { ok: false, error: err.code === 'ENOENT' ? 'not-a-project' : 'unreadable' }
     }
@@ -207,6 +228,11 @@ export async function openProject(target) {
 
   const problem = documentProblem(document)
   if (problem) return { ok: false, error: problem }
+
+  // A format-2 document sat loose in the root. Opening it is fine; the next
+  // save moves it, so the target is computed now rather than at save time.
+  const relocating = !migrated && path.dirname(file) === root
+  if (relocating) file = documentPath(root, document.name ?? path.basename(root))
 
   // A folder can lose a directory to a sync client or a careless cleanup;
   // recreate rather than fail, since the document is what defines the project.
@@ -218,57 +244,53 @@ export async function openProject(target) {
     // Non-fatal: opening read-only media still beats refusing to open at all.
   }
 
-  let recovered = false
-  try {
-    const [autosaveStat, fileStat] = await Promise.all([
-      fs.stat(autosavePath(root)),
-      fs.stat(file).catch(() => null),
-    ])
-    if (!fileStat || autosaveStat.mtimeMs > fileStat.mtimeMs) {
-      const autosaved = await readJson(autosavePath(root))
-      if (!documentProblem(autosaved)) {
-        document = autosaved
-        recovered = true
-      }
-    }
-  } catch {
-    // No autosave, or it is unreadable. The saved document stands.
-  }
-
   return {
     ok: true,
     project: { root, file, ...document },
-    // `dirty` on open: migrated and recovered projects both hold something the
-    // document on disk does not, so the user is told there is work to save.
-    dirty: migrated || recovered,
-    recovered,
+    // `dirty` on open: a migrated or relocated project holds something the
+    // document at its new path does not, so the user is told to save.
+    dirty: migrated || relocating,
     migrated,
+    relocated: relocating,
   }
 }
 
-/** Writes the document. `file` is the target so Save As can pass a new path. */
+/**
+ * Writes the document. `file` is the target so Save As can pass a new path.
+ *
+ * An older copy of *this same document* is removed once the new one is safely
+ * on disk: a project created before the document moved keeps a stale .flux in
+ * its root, and double-clicking that copy would silently open old work.
+ *
+ * "This same document" is decided by createdAt, not by being a .flux in the
+ * right folder. Deleting someone's file because it shares an extension is not a
+ * risk worth taking to tidy up.
+ */
 export async function saveProject(file, document) {
   try {
     await writeJsonAtomic(file, document)
-    // The autosave has served its purpose; leaving it behind would make the
-    // next open think there is unsaved work.
-    await fs.rm(autosavePath(path.dirname(file)), { force: true })
-    return { ok: true, savedAt: document.savedAt }
   } catch (err) {
     return {
       ok: false,
       error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'write-failed',
     }
   }
-}
 
-export async function writeAutosave(root, document) {
-  try {
-    await writeJsonAtomic(autosavePath(root), document)
-    return { ok: true }
-  } catch {
-    return { ok: false }
+  const root = rootForDocument(file)
+  const replaced = []
+  for (const dir of [root, projectFilesPath(root)]) {
+    for (const name of await fluxFilesIn(dir)) {
+      const candidate = path.join(dir, name)
+      if (candidate === file) continue
+      const older = await readJson(candidate).catch(() => null)
+      if (!older || older.createdAt !== document.createdAt) continue
+      if (await fs.rm(candidate, { force: true }).then(() => true, () => false)) {
+        replaced.push(candidate)
+      }
+    }
   }
+
+  return { ok: true, savedAt: document.savedAt, replaced }
 }
 
 /** Splits `clip.mp4` into `['clip', '.mp4']`, handling dotfiles and no-extension names. */

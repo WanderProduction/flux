@@ -174,6 +174,24 @@ try {
     ])
   })
 
+  await check('preload bridge exposes the project API', async () => {
+    // Pinned because the surface is the whole contract with the OS side, and a
+    // rename here fails silently: the renderer calls undefined and the project
+    // simply never saves.
+    const api = await evaluate(cdp, `return Object.keys(window.flux?.project ?? {}).sort();`)
+    assert.deepEqual(api, [
+      'copyIntoImports',
+      'create',
+      'is',
+      'launchTarget',
+      'onOpenTarget',
+      'onSaveAndClose',
+      'open',
+      'save',
+      'setUnsaved',
+    ])
+  })
+
   await check('fs:places returns real folders and drives over IPC', async () => {
     const places = await evaluate(cdp, `return await window.flux.fs.places();`)
     assert.ok(places.places.length > 0, 'expected named places')
@@ -479,18 +497,13 @@ try {
     assert.deepEqual(names, ['clipA.mp4', 'still.jpg'])
   })
 
-  await check('assets survive a reload (persisted to the Electron store)', async () => {
-    // Flush pending writes before reloading. saveStore is fire-and-forget so
-    // the UI never blocks on disk, which means a reload can outrun the write.
-    await evaluate(
-      cdp,
-      `await window.__fluxDev.store.flushStores(); location.reload(); return true;`,
-    )
+  /** Reopen the verification project and read back what the document held. */
+  async function namesAfterReload() {
     await new Promise((r) => setTimeout(r, 2500))
     // A reload lands on the launcher, since FLUX does not silently reopen the
     // last project. Persistence is only observable once it is opened again.
     await ensureProject(cdp, VERIFY_PROJECT)
-    const names = await evaluate(
+    return evaluate(
       cdp,
       `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
          await new Promise(r => setTimeout(r, 250));
@@ -498,7 +511,57 @@ try {
        for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
        return assets.getAssets().map(a => a.name).sort();`,
     )
-    assert.deepEqual(names, ['clipA.mp4', 'still.jpg'], 'assets should reload from disk')
+  }
+
+  await check('an unsaved import does not come back after a reload', async () => {
+    // There is no autosave, and this pins down what that costs rather than
+    // leaving it to be discovered: work that was never saved is gone when the
+    // app goes away. It is why closing over unsaved work has to ask first --
+    // see the close guard in electron/main.js.
+    await evaluate(
+      cdp,
+      `const { assets, project, store } = window.__fluxDev;
+       // Baseline: an empty document on disk, so this measures the import and
+       // not whatever a previous suite happened to leave saved.
+       assets.removeAssets(assets.getAssets().map(a => a.id));
+       await new Promise(r => setTimeout(r, 150));
+       const cleared = await project.saveProject();
+       if (!cleared.ok) throw new Error('save failed: ' + cleared.error);
+
+       assets.importAssets([
+         { path: ${dir} + '\\\\clipA.mp4', kind: 'video' },
+         { path: ${dir} + '\\\\still.jpg', kind: 'image' },
+       ]);
+       await new Promise(r => setTimeout(r, 150));
+       if (!project.isDirty()) throw new Error('the import should have been unsaved work');
+
+       await store.flushStores();
+       location.reload();
+       return true;`,
+    )
+    assert.deepEqual(await namesAfterReload(), [], 'unsaved imports must not reappear')
+  })
+
+  await check('saved assets survive a reload', async () => {
+    await evaluate(
+      cdp,
+      `const { assets, project, store } = window.__fluxDev;
+       assets.importAssets([
+         { path: ${dir} + '\\\\clipA.mp4', kind: 'video' },
+         { path: ${dir} + '\\\\still.jpg', kind: 'image' },
+       ]);
+       await new Promise(r => setTimeout(r, 150));
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+       location.reload();
+       return true;`,
+    )
+    assert.deepEqual(
+      await namesAfterReload(),
+      ['clipA.mp4', 'still.jpg'],
+      'assets should reload from the document',
+    )
   })
 
   await check('a deleted original is flagged missing, not silently broken', async () => {

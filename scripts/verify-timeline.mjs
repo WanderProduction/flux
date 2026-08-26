@@ -323,7 +323,9 @@ try {
     assert.equal(result.sameStarts, true, 'zoom must not alter clip times')
   })
 
-  await check('the sequence survives a reload', async () => {
+  await check('a saved sequence survives a reload', async () => {
+    // Saved, explicitly. There is no autosave: clips only reach the document
+    // when the user asks, so a reload is exactly as forgiving as the last Ctrl S.
     const before = await evaluate(
       cdp,
       `const seq = window.__fluxDev.sequence;
@@ -331,7 +333,12 @@ try {
     )
     await evaluate(
       cdp,
-      `await window.__fluxDev.store.flushStores(); location.reload(); return true;`,
+      `const { store, project } = window.__fluxDev;
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+       location.reload();
+       return true;`,
     )
     await new Promise((r) => setTimeout(r, 2500))
     // A reload lands on the launcher; reopen before asserting persistence.
@@ -417,6 +424,45 @@ try {
     assert.ok(result.before.length > 0, 'fixture should have clips to persist')
     assert.deepEqual(result.after, result.before)
     assert.equal(result.dirty, false)
+  })
+
+  await check('the timeline reopens at the zoom it was saved at', async () => {
+    // Through the panel, not the store: the zoom is React state initialised at
+    // mount, so a value that round-trips through the document but never reaches
+    // the component would look saved and behave as though it never was.
+    const result = await evaluate(
+      cdp,
+      `const { project, commands, view } = window.__fluxDev;
+       const widthOf = () => document.querySelector('.tl-lane .clip')?.getBoundingClientRect().width;
+       const before = widthOf();
+       if (!before) throw new Error('no clip on screen to measure');
+
+       await commands.run('timeline.zoomIn');
+       await commands.run('timeline.zoomIn');
+       await new Promise(r => setTimeout(r, 300));
+       const zoomed = widthOf();
+       const savedZoom = view.getView().timeline.zoom;
+       await project.saveProject();
+
+       const root = project.getProject().root;
+       project.closeProject();
+       for (let i = 0; i < 40 && !document.querySelector('.launcher'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       const r = await project.openProject(root);
+       if (!r.ok) throw new Error(r.error);
+       for (let i = 0; i < 40 && !document.querySelector('.tl-lane .clip'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       await new Promise(r => setTimeout(r, 300));
+
+       return { before, zoomed, savedZoom, after: widthOf(),
+                restoredZoom: view.getView().timeline.zoom };`,
+    )
+    assert.ok(result.zoomed > result.before, 'zooming in should have widened the block')
+    assert.equal(result.restoredZoom, result.savedZoom)
+    assert.ok(
+      Math.abs(result.after - result.zoomed) < 1,
+      `the block came back ${result.after}px wide, not the ${result.zoomed}px it was saved at`,
+    )
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

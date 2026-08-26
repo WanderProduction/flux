@@ -1,10 +1,15 @@
 /**
  * The FLUX project document — the one file that *is* the project.
  *
- * `<root>/<Project Name>.flux` holds everything the project knows: its name,
- * its assets and its sequence. It sits in the project root rather than inside
- * project_files because it is the user's document, not the app's bookkeeping —
- * it is the thing they back up, copy and double-click.
+ *   <root>/
+ *     project_files/<Project Name>.flux   the document
+ *     imports/                            media copied into the project
+ *     exports/                            renders
+ *
+ * The document holds everything the project knows: its name, its assets, its
+ * sequence, its settings and where the user had the app arranged. Opening it is
+ * the whole project coming back — that is what a .prproj does, and it is the
+ * bar this has to clear.
  *
  * The format is plain JSON on purpose. VISION.md promises open, inspectable
  * project files; a media app that can lose someone's edit to an opaque binary
@@ -17,17 +22,22 @@
 
 export const PROJECT_EXTENSION = '.flux'
 
+/** The document lives with the app's bookkeeping, not loose in the root. */
+export const DOCUMENT_DIR = 'project_files'
+
 /**
  * Bumped when the document shape changes incompatibly.
  *
  *   1 — folder-only: a project.json manifest with assets.json / sequence.json
  *       beside it. Opened and migrated, never written.
- *   2 — a single .flux document.
+ *   2 — a single .flux document, in the project root.
+ *   3 — the document moved into project_files/ and gained `view`, so reopening
+ *       restores the workspace and where you were, not just the edit.
+ *
+ * Older documents are read and upgraded. A *newer* one is refused outright —
+ * see documentProblem.
  */
-export const DOCUMENT_FORMAT = 2
-
-/** Autosave lives in project_files: it is the app's safety net, not a document. */
-export const AUTOSAVE_NAME = 'autosave.flux'
+export const DOCUMENT_FORMAT = 3
 
 /**
  * @param {string} fileName
@@ -46,16 +56,47 @@ export function documentFileName(safeName) {
 }
 
 /**
+ * Where the app arranged itself for this project: the active workspace, the
+ * timeline's zoom, the folder the Content Browser was showing.
+ *
+ * This is saved but it is deliberately *not* unsaved work — zooming the
+ * timeline must never light the dirty dot. It rides along with the next real
+ * save. See kernel/view.ts.
+ */
+export function makeView(view) {
+  return {
+    workspace: typeof view?.workspace === 'string' ? view.workspace : 'edit',
+    timeline: { zoom: Number(view?.timeline?.zoom) || 0 },
+    browser: {
+      location:
+        view?.browser?.location?.type === 'folder' &&
+        typeof view.browser.location.path === 'string'
+          ? { type: 'folder', path: view.browser.location.path }
+          : { type: 'project' },
+    },
+  }
+}
+
+/**
  * Builds a document from the parts the renderer holds.
  * @returns {object}
  */
-export function makeDocument({ name, createdAt, appVersion, assets, sequence, settings }) {
+export function makeDocument({
+  name,
+  createdAt,
+  appVersion,
+  assets,
+  sequence,
+  settings,
+  view,
+}) {
   return {
     flux: { format: DOCUMENT_FORMAT, version: appVersion },
     name,
     createdAt: createdAt ?? Date.now(),
     savedAt: Date.now(),
     settings: settings ?? {},
+    view: makeView(view),
     assets: assets ?? [],
     sequence: sequence ?? null,
   }
