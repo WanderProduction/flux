@@ -25,6 +25,7 @@ export const defaultKeymap: Keymap = {
   'ctrl+6': 'panel.focus.mixer',
   'ctrl+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
+  delete: 'timeline.deleteSelected',
 }
 
 /** Normalise a KeyboardEvent into a stable chord string like `ctrl+shift+p`. */

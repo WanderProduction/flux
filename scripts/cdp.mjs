@@ -1,0 +1,158 @@
+/**
+ * Minimal Chrome DevTools Protocol client, shared by the verification scripts.
+ *
+ * The parts of FLUX that matter most only exist inside Electron — IPC, the
+ * flux-asset protocol, real decoding, and now drag and drop between panels.
+ * None of it can be reached from a browser tab or a Node script, so the
+ * harnesses attach to the running app and drive it in place.
+ *
+ * Uses Node's built-in WebSocket (Node 22+); no dependencies.
+ */
+
+const DEFAULT_PORT = 9222
+
+export async function findPageTarget(port = DEFAULT_PORT) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/json/list`)
+      const targets = await res.json()
+      const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl)
+      if (page) return page
+    } catch {
+      // app still booting
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  throw new Error(
+    `no page target on :${port} — start the app with "npm run dev:debug" first`,
+  )
+}
+
+export function connect(url) {
+  const ws = new WebSocket(url)
+  let nextId = 0
+  const pending = new Map()
+  /** Console errors the page emits, collected so a run can fail on them. */
+  const consoleErrors = []
+
+  ws.addEventListener('message', (event) => {
+    const message = JSON.parse(event.data)
+
+    // Events carry no id. Console errors are worth failing over: a React key
+    // warning or an unhandled rejection is exactly what a green suite hides.
+    if (!message.id) {
+      if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
+        consoleErrors.push(
+          message.params.args.map((a) => a.description ?? a.value ?? '?').join(' '),
+        )
+      }
+      if (message.method === 'Runtime.exceptionThrown') {
+        consoleErrors.push(
+          message.params.exceptionDetails.exception?.description ??
+            message.params.exceptionDetails.text,
+        )
+      }
+      return
+    }
+
+    const waiter = pending.get(message.id)
+    if (!waiter) return
+    pending.delete(message.id)
+    if (message.error) waiter.reject(new Error(message.error.message))
+    else waiter.resolve(message.result)
+  })
+
+  const ready = new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true })
+    ws.addEventListener('error', () => reject(new Error('CDP socket failed')), { once: true })
+  })
+
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const id = ++nextId
+      pending.set(id, { resolve, reject })
+      ws.send(JSON.stringify({ id, method, params }))
+    })
+
+  return { ready, send, consoleErrors, close: () => ws.close() }
+}
+
+/** Evaluate an async expression in the page and return its JSON value. */
+export async function evaluate(cdp, expression) {
+  const result = await cdp.send('Runtime.evaluate', {
+    expression: `(async () => { ${expression} })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  })
+  if (result.exceptionDetails) {
+    const text = result.exceptionDetails.exception?.description ?? result.exceptionDetails.text
+    throw new Error(`page threw: ${text}`)
+  }
+  return result.result.value
+}
+
+/**
+ * Attach, enable Runtime events, and wait for the app to have rendered.
+ *
+ * Also asserts `window.__fluxDev` is present. Harnesses MUST reach kernel state
+ * through it rather than by dynamic import: importing '/src/kernel/x.ts' from
+ * here yields a *different module instance* than the app is running once Vite
+ * has appended an HMR cache-busting query, and that instance's state reads as
+ * empty. Checks then pass or fail for reasons unrelated to the app.
+ */
+export async function attach(port = DEFAULT_PORT) {
+  const target = await findPageTarget(port)
+  const cdp = connect(target.webSocketDebuggerUrl)
+  await cdp.ready
+  await cdp.send('Runtime.enable')
+  await evaluate(
+    cdp,
+    `for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
+       await new Promise(r => setTimeout(r, 250));
+     return true;`,
+  )
+
+  const hasHandle = await evaluate(cdp, `return !!window.__fluxDev;`)
+  if (!hasHandle) {
+    cdp.close()
+    throw new Error(
+      'window.__fluxDev missing — is the app running a dev build? (see src/main.tsx)',
+    )
+  }
+  return cdp
+}
+
+/**
+ * Waits for the app's asset and sequence stores to finish loading, then resets
+ * both, so a run starts from a known state.
+ */
+export async function resetProject(cdp) {
+  return evaluate(
+    cdp,
+    `const { assets, sequence } = window.__fluxDev;
+     for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+     if (!sequence.isSequenceLoaded()) await sequence.loadSequence();
+     assets.removeAssets(assets.getAssets().map(a => a.id));
+     sequence.clearSequence();
+     await new Promise(r => setTimeout(r, 200));
+     return true;`,
+  )
+}
+
+export function createChecker() {
+  const state = { passed: 0 }
+  const check = async (name, fn) => {
+    try {
+      await fn()
+      console.log(`  ok   ${name}`)
+      state.passed++
+    } catch (err) {
+      console.error(`  FAIL ${name}`)
+      console.error(`       ${err.message}`)
+      process.exitCode = 1
+    }
+  }
+  const report = () =>
+    console.log(`\n${state.passed} checks passed${process.exitCode ? ' (with failures)' : ''}`)
+  return { check, report }
+}

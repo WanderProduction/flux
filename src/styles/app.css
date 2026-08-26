@@ -261,76 +261,87 @@ kbd {
 
 /* ── Timeline ──────────────────────────────────────────────── */
 
-.timeline {
+.tl {
   position: absolute;
   inset: 0;
+  display: flex;
   overflow: hidden;
 }
 
-.timeline-ruler {
-  display: flex;
+.tl-headers {
+  flex: 0 0 auto;
+  border-right: 1px solid var(--flux-border);
+  background: var(--flux-bg);
+  z-index: 2;
+}
+.tl-header-spacer {
   height: 22px;
   border-bottom: 1px solid var(--flux-border);
-  background: var(--flux-bg);
 }
-.timeline-gutter {
-  flex: 0 0 76px;
-  border-right: 1px solid var(--flux-border);
-}
-.timeline-ticks {
-  position: relative;
-  flex: 1;
-  display: flex;
-}
-.tick {
-  flex: 1;
-  border-left: 1px solid var(--flux-border);
-  padding-left: 4px;
-  font-family: var(--flux-font-mono);
-  font-size: 9px;
-  color: var(--flux-text-faint);
-  line-height: 22px;
-}
-
-.timeline-tracks {
-  display: flex;
-  flex-direction: column;
-}
-.track {
-  display: flex;
-  height: 40px;
-  border-bottom: 1px solid var(--flux-border);
-}
-.track-head {
-  flex: 0 0 76px;
+.tl-header {
   display: flex;
   align-items: center;
   padding: 0 10px;
-  border-right: 1px solid var(--flux-border);
-  background: var(--flux-bg);
+  border-bottom: 1px solid var(--flux-border);
+  box-sizing: border-box;
 }
 .track-name {
   font-family: var(--flux-font-mono);
   font-size: var(--flux-text-sm);
   color: var(--flux-text-dim);
 }
-.track-lane {
-  position: relative;
+
+.tl-scroll {
   flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+}
+.tl-content {
+  position: relative;
+  min-height: 100%;
+}
+
+.tl-ruler {
+  position: relative;
+  height: 22px;
+  border-bottom: 1px solid var(--flux-border);
+  background: var(--flux-bg);
+}
+.tl-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--flux-border);
+  padding-left: 4px;
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+  color: var(--flux-text-faint);
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.tl-lane {
+  position: relative;
+  border-bottom: 1px solid var(--flux-border);
+  background: var(--flux-bg-panel);
+  box-sizing: border-box;
 }
 
 .clip {
   position: absolute;
-  top: 5px;
-  bottom: 5px;
+  top: 4px;
+  bottom: 4px;
   display: flex;
   align-items: center;
-  padding: 0 8px;
+  gap: 5px;
   border-radius: 3px;
   border: 1px solid;
   font-size: var(--flux-text-sm);
   overflow: hidden;
   white-space: nowrap;
+  cursor: pointer;
+  box-sizing: border-box;
 }
 .clip--video {
   background: color-mix(in srgb, var(--flux-accent) 20%, var(--flux-bg-elevated));
@@ -342,23 +353,62 @@ kbd {
   border-color: color-mix(in srgb, var(--flux-audio) 45%, transparent);
   color: #c8f3e0;
 }
+/* An asset removed from the bin leaves its clips behind rather than deleting
+   editing work — they read as hazard-striped and clearly unplayable. */
+.clip--orphan {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--flux-warn) 12%, var(--flux-bg-elevated)),
+    color-mix(in srgb, var(--flux-warn) 12%, var(--flux-bg-elevated)) 6px,
+    var(--flux-bg-elevated) 6px,
+    var(--flux-bg-elevated) 12px
+  );
+  border-color: var(--flux-warn);
+  color: var(--flux-warn);
+}
+.clip--selected {
+  border-color: var(--flux-text);
+  box-shadow: 0 0 0 1px var(--flux-text) inset;
+}
 
-.timeline-playhead {
+.clip-thumb {
+  height: 100%;
+  width: 30px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.clip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 6px;
+}
+.clip:not(:has(.clip-thumb)) .clip-label {
+  padding-left: 6px;
+}
+
+.tl-drop-preview {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--flux-accent);
+  top: 4px;
+  bottom: 4px;
+  border: 1px dashed var(--flux-accent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--flux-accent) 12%, transparent);
   pointer-events: none;
 }
-.timeline-playhead::before {
-  content: '';
+
+.tl-hint {
   position: absolute;
-  top: 0;
-  left: -4px;
-  border-left: 4.5px solid transparent;
-  border-right: 4.5px solid transparent;
-  border-top: 7px solid var(--flux-accent);
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  border: 1px solid var(--flux-border);
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  pointer-events: none;
 }
 
 /* ── Node Map ──────────────────────────────────────────────── */

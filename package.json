@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "dev:debug": "wait-on tcp:127.0.0.1:5273 && electron . --remote-debugging-port=9222",
     "verify:fs": "node scripts/verify-filesystem.mjs",
-    "verify:app": "node scripts/verify-renderer.mjs"
+    "verify:app": "node scripts/verify-renderer.mjs",
+    "verify:timeline": "node scripts/verify-timeline.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",

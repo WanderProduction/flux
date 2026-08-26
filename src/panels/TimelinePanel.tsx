@@ -1,74 +1,327 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+import { commands } from '../kernel/commands'
+import { ensureProbed, getAssets, subscribeAssets, type Asset } from '../kernel/assets'
+import { isAssetDrag, readAssetDragPayload } from '../kernel/dragAssets'
+import { cachedThumbnail } from '../kernel/thumbnails'
+import {
+  addClip,
+  findFreeStart,
+  getSequence,
+  isSequenceLoaded,
+  loadSequence,
+  removeClips,
+  sequenceDuration,
+  snapToFrame,
+  subscribeSequence,
+  type Clip,
+  type SequenceState,
+  type Track,
+} from '../kernel/sequence'
 import { PanelFrame } from './PanelFrame'
 
 /**
- * Timeline — the time-occupying subset of the current scope's graph.
+ * Timeline — the time-occupying nodes of the current scope.
  *
- * Per docs/INTERACTION-MODEL.md this is a *lens*, not a separate document: the
- * clips drawn here are the same nodes the Node Map shows. Ambient nodes (an LFO,
- * a driver) own no time and so never appear here — that asymmetry is the whole
- * point and is why this panel can't just render "the graph".
+ * Per docs/INTERACTION-MODEL.md this is a lens, not a document: a clip drawn
+ * here is a reference to a project asset placed in time, and ambient nodes
+ * (a driver, an LFO) will never appear because they own no time.
+ *
+ * Video only for now, and blocks are solid — no waveform, because there is no
+ * audio pipeline to draw one from.
  */
 
-const TRACKS = [
-  { id: 'V2', kind: 'video', clips: [{ label: 'title', start: 22, width: 18 }] },
-  {
-    id: 'V1',
-    kind: 'video',
-    clips: [
-      { label: 'clipA', start: 2, width: 34 },
-      { label: 'clipB', start: 38, width: 26 },
-    ],
-  },
-  { id: 'A1', kind: 'audio', clips: [{ label: 'music.wav', start: 2, width: 62 }] },
-]
+const TRACK_HEIGHT = 46
+const HEADER_WIDTH = 68
+const MIN_ZOOM = 8
+const MAX_ZOOM = 400
+const DEFAULT_ZOOM = 60 // pixels per second
+
+/** Tick spacing that keeps labels readable at any zoom. */
+function tickInterval(pixelsPerSecond: number): number {
+  const candidates = [1 / 4, 1 / 2, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+  return candidates.find((step) => step * pixelsPerSecond >= 64) ?? 900
+}
+
+function formatTime(seconds: number): string {
+  const whole = Math.floor(seconds)
+  const m = Math.floor(whole / 60)
+  const s = whole % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+interface DropPreview {
+  trackId: string
+  start: number
+  duration: number
+}
 
 export function TimelinePanel() {
+  const [sequence, setSequence] = useState<SequenceState>(getSequence)
+  const [assets, setAssets] = useState<Asset[]>(getAssets)
+  const [zoom, setZoom] = useState(DEFAULT_ZOOM)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [preview, setPreview] = useState<DropPreview | null>(null)
+  const lanesRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const unsubscribe = subscribeSequence(() => setSequence({ ...getSequence() }))
+    if (!isSequenceLoaded()) void loadSequence()
+    else setSequence({ ...getSequence() })
+    return unsubscribe
+  }, [])
+
+  useEffect(() => subscribeAssets(() => setAssets([...getAssets()])), [])
+
+  const assetById = useMemo(() => {
+    const map = new Map<string, Asset>()
+    assets.forEach((asset) => map.set(asset.id, asset))
+    return map
+  }, [assets])
+
+  const duration = sequenceDuration()
+  const contentWidth = Math.max((duration + 4) * zoom, 600)
+
+  /** Pointer x -> seconds, accounting for the lane's scroll offset. */
+  const timeAt = useCallback(
+    (clientX: number): number => {
+      const lanes = lanesRef.current
+      if (!lanes) return 0
+      const rect = lanes.getBoundingClientRect()
+      return Math.max(0, (clientX - rect.left + lanes.scrollLeft) / zoom)
+    },
+    [zoom],
+  )
+
+  // ── drop from the Content Browser ─────────────────────────────
+
+  const onDragOver = useCallback(
+    (event: React.DragEvent, track: Track) => {
+      if (!isAssetDrag(event)) return
+      // Without preventDefault the browser refuses the drop entirely.
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+
+      // The payload is unreadable during dragover (browsers only expose types),
+      // so the preview shows a nominal block; the real length lands on drop.
+      const start = snapToFrame(timeAt(event.clientX))
+      setPreview({ trackId: track.id, start, duration: 2 })
+    },
+    [timeAt],
+  )
+
+  const onDrop = useCallback(
+    async (event: React.DragEvent, track: Track) => {
+      if (!isAssetDrag(event)) return
+      event.preventDefault()
+      setPreview(null)
+
+      const ids = readAssetDragPayload(event)
+      if (ids.length === 0) return
+      const dropTime = timeAt(event.clientX)
+
+      // Sequential so several assets dropped together land end to end rather
+      // than all resolving against the same free slot.
+      let cursor = dropTime
+      for (const assetId of ids) {
+        const asset = await ensureProbed(assetId)
+        if (!asset || asset.missing || asset.unreadable || !asset.duration) continue
+
+        const clip = addClip({
+          assetId,
+          trackId: track.id,
+          start: cursor,
+          duration: asset.duration,
+        })
+        if (clip) cursor = clip.start + clip.duration
+      }
+    },
+    [timeAt],
+  )
+
+  // ── commands ──────────────────────────────────────────────────
+
+  const deleteSelected = useCallback(() => {
+    if (selected.size === 0) return
+    removeClips([...selected])
+    setSelected(new Set())
+  }, [selected])
+
+  useEffect(() => {
+    const handle = commands.registerAll([
+      {
+        id: 'timeline.zoomIn',
+        title: 'Zoom In',
+        category: 'Timeline',
+        run: () => setZoom((z) => Math.min(MAX_ZOOM, z * 1.5)),
+      },
+      {
+        id: 'timeline.zoomOut',
+        title: 'Zoom Out',
+        category: 'Timeline',
+        run: () => setZoom((z) => Math.max(MIN_ZOOM, z / 1.5)),
+      },
+      {
+        id: 'timeline.deleteSelected',
+        title: 'Delete Selected Clips',
+        category: 'Timeline',
+        detail: 'Removes clips from the sequence; assets and files are untouched',
+        enabled: () => selected.size > 0,
+        run: deleteSelected,
+      },
+    ])
+    return () => handle.dispose()
+  }, [deleteSelected, selected.size])
+
+  // ── rendering ─────────────────────────────────────────────────
+
+  const step = tickInterval(zoom)
+  const tickCount = Math.ceil(contentWidth / (step * zoom)) + 1
+
   return (
     <PanelFrame
       scroll={false}
       toolbar={
         <>
-          <span className="tool-label">Sequence 1</span>
+          <span className="tool-label">{sequence.name}</span>
+          <span className="tool-value tool-value--dim">{sequence.frameRate} fps</span>
           <span className="tool-sep" />
-          <span className="tool-value tool-value--dim">24 fps</span>
+          <span className="tool-value tool-value--dim">
+            {sequence.clips.length} clip{sequence.clips.length === 1 ? '' : 's'}
+          </span>
+          <span className="cb-toolbar-end">
+            {selected.size > 0 && (
+              <button className="cb-btn" onClick={deleteSelected}>
+                Delete {selected.size}
+              </button>
+            )}
+            <button
+              className="cb-btn"
+              onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z / 1.5))}
+              title="Zoom out"
+            >
+              −
+            </button>
+            <button
+              className="cb-btn"
+              onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * 1.5))}
+              title="Zoom in"
+            >
+              +
+            </button>
+          </span>
         </>
       }
     >
-      <div className="timeline">
-        <div className="timeline-ruler">
-          <div className="timeline-gutter" />
-          <div className="timeline-ticks">
-            {Array.from({ length: 11 }, (_, i) => (
-              <div className="tick" key={i}>
-                <span>{`${i}s`}</span>
+      <div className="tl">
+        <div className="tl-headers" style={{ width: HEADER_WIDTH }}>
+          <div className="tl-header-spacer" />
+          {sequence.tracks.map((track) => (
+            <div className="tl-header" key={track.id} style={{ height: TRACK_HEIGHT }}>
+              <span className="track-name">{track.name}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="tl-scroll" ref={lanesRef}>
+          <div className="tl-content" style={{ width: contentWidth }}>
+            <div className="tl-ruler">
+              {Array.from({ length: tickCount }, (_, i) => {
+                const seconds = i * step
+                return (
+                  <div className="tl-tick" key={i} style={{ left: seconds * zoom }}>
+                    <span>{formatTime(seconds)}</span>
+                  </div>
+                )
+              })}
+            </div>
+
+            {sequence.tracks.map((track) => (
+              <div
+                className="tl-lane"
+                key={track.id}
+                style={{ height: TRACK_HEIGHT }}
+                onDragOver={(e) => onDragOver(e, track)}
+                onDragLeave={() => setPreview(null)}
+                onDrop={(e) => void onDrop(e, track)}
+              >
+                {sequence.clips
+                  .filter((clip) => clip.trackId === track.id)
+                  .map((clip) => (
+                    <ClipBlock
+                      key={clip.id}
+                      clip={clip}
+                      asset={assetById.get(clip.assetId)}
+                      zoom={zoom}
+                      selected={selected.has(clip.id)}
+                      onSelect={(additive) =>
+                        setSelected((current) => {
+                          const next = additive ? new Set(current) : new Set<string>()
+                          if (additive && current.has(clip.id)) next.delete(clip.id)
+                          else next.add(clip.id)
+                          return next
+                        })
+                      }
+                    />
+                  ))}
+
+                {preview?.trackId === track.id && (
+                  <div
+                    className="tl-drop-preview"
+                    style={{
+                      left: findFreeStart(track.id, preview.start, preview.duration) * zoom,
+                      width: Math.max(2, preview.duration * zoom),
+                    }}
+                  />
+                )}
               </div>
             ))}
           </div>
         </div>
 
-        <div className="timeline-tracks">
-          {TRACKS.map((track) => (
-            <div className="track" key={track.id}>
-              <div className="track-head">
-                <span className="track-name">{track.id}</span>
-              </div>
-              <div className="track-lane">
-                {track.clips.map((clip) => (
-                  <div
-                    key={clip.label}
-                    className={`clip clip--${track.kind}`}
-                    style={{ left: `${clip.start}%`, width: `${clip.width}%` }}
-                  >
-                    <span>{clip.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="timeline-playhead" style={{ left: 'calc(76px + 2%)' }} />
+        {sequence.clips.length === 0 && (
+          <div className="tl-hint">Drag a video from the Content Browser onto a track</div>
+        )}
       </div>
     </PanelFrame>
+  )
+}
+
+function ClipBlock({
+  clip,
+  asset,
+  zoom,
+  selected,
+  onSelect,
+}: {
+  clip: Clip
+  asset: Asset | undefined
+  zoom: number
+  selected: boolean
+  onSelect: (additive: boolean) => void
+}) {
+  const width = Math.max(2, clip.duration * zoom)
+
+  // The asset can be gone while the clip remains: removing something from the
+  // bin must not silently delete the editing work that used it.
+  const orphaned = !asset
+  const thumbnail = asset && !asset.missing ? cachedThumbnail(asset.path) : null
+
+  const label = orphaned ? 'missing asset' : asset.name
+  const state = orphaned || asset.missing ? ' clip--orphan' : ''
+
+  return (
+    <div
+      className={`clip clip--video${state}${selected ? ' clip--selected' : ''}`}
+      style={{ left: clip.start * zoom, width }}
+      title={`${label} · ${clip.duration.toFixed(2)}s`}
+      onClick={(e) => {
+        e.stopPropagation()
+        onSelect(e.ctrlKey || e.metaKey || e.shiftKey)
+      }}
+    >
+      {thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />}
+      <span className="clip-label">{label}</span>
+    </div>
   )
 }

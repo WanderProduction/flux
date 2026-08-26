@@ -22,6 +22,7 @@ import {
   subscribeAssets,
   type Asset,
 } from '../kernel/assets'
+import { setAssetDragPayload } from '../kernel/dragAssets'
 import { mediaKindOf } from '../../shared/mediaTypes.js'
 import { PanelFrame } from './PanelFrame'
 import { AssetThumb } from './AssetThumb'
@@ -330,6 +331,10 @@ function ProjectGrid({
           key={asset.id}
           className={`card${asset.missing ? ' card--missing' : ''}`}
           title={asset.path}
+          // Only a resolvable asset is draggable — dropping a card whose file is
+          // gone could only ever produce a clip that cannot play.
+          draggable={!asset.missing}
+          onDragStart={(e) => setAssetDragPayload(e, [asset.id])}
           onDoubleClick={() => onReveal(folderOf(asset.path))}
         >
           <AssetThumb path={asset.path} kind={asset.kind} missing={asset.missing} />

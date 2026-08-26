@@ -47,9 +47,10 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 6`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the machine, import image and video by reference, thumbnails on cards. |
+| **Timeline** | Drag assets from the Content Browser onto a track. Select, delete, zoom. |
 
-Six built-in panels: Viewer, Timeline, Node Map, **Content Browser**, Inspector, Mixer. Only the
-Content Browser does real work; the other five are still scaffolding.
+Six built-in panels: Viewer, Timeline, Node Map, **Content Browser**, Inspector, Mixer. The Content
+Browser and Timeline do real work; the other four are still scaffolding.
 
 ### The Content Browser
 
@@ -73,6 +74,30 @@ an event that never fires, is exactly the stall FLUX exists to avoid.
 Local files reach the renderer over a `flux-asset://` protocol rather than `file://` (which CSP
 blocks), which also gets range requests so video can seek without loading whole. The handler serves
 **only** paths matching the shared media allowlist.
+
+### The Timeline
+
+Drag a card from the Content Browser onto a track and it becomes a clip, as long as its source and
+starting where you dropped it. Click to select, `Delete` to remove, `+`/`−` to zoom. Video and
+stills only — blocks are solid, with no waveform, because there is no audio pipeline to draw one
+from.
+
+A clip is the first thing in FLUX that **owns time**, which in
+[`docs/INTERACTION-MODEL.md`](docs/INTERACTION-MODEL.md) is exactly what separates a
+Timeline-visible node from an ambient one. So a clip *references* an asset rather than containing
+it, and carries only its placement — when the signal graph lands, a clip becomes an element node
+and this stays its time placement, not a second competing source of truth.
+
+Two behaviours worth knowing:
+
+- **Dropping onto an occupied span slides right** to the first free slot. Overlap has to resolve
+  somehow, and the alternatives are real editing decisions: overwrite destroys work, insert shifts
+  everything downstream. Neither should happen by accident on a drag.
+- **Removing an asset from the bin does not delete its clips.** They stay, hazard-striped and
+  marked unplayable. Silently deleting editing work because someone tidied the bin is not a
+  trade this project makes.
+
+Not yet: moving or trimming clips once placed, and audio tracks.
 
 ---
 
@@ -148,10 +173,23 @@ npm run dev:debug
 npm run verify:app
 ```
 
-`verify:app` expects fixture media in `~/flux-media-test`. Generate it with ffmpeg — two H.264
-mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be listed, and a
-deliberately corrupt `.mp4` that must resolve to "no preview" rather than hang. It clears the
-project's asset list so runs are repeatable.
+```bash
+npm run verify:timeline
+```
+
+`verify:app` and `verify:timeline` expect fixture media in `~/flux-media-test`. Generate it with
+ffmpeg — two H.264 mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be
+listed, and a deliberately corrupt `.mp4` that must resolve to "no preview" rather than hang. Both
+clear the project's asset list and sequence so runs are repeatable.
+
+`verify:timeline` synthesises drag and drop with a real `DataTransfer` and real `DragEvent`s
+dispatched at the actual DOM nodes, so the app's own handlers run as they do under a mouse.
+
+> **Harnesses must reach kernel state through `window.__fluxDev`** (defined in `src/main.tsx`,
+> stripped from production builds), never by dynamic import. Importing `/src/kernel/x.ts` from
+> outside does *not* get the instance the app is running once Vite has appended an HMR
+> cache-busting query — it silently creates a second module with its own empty state, and checks
+> then pass or fail for reasons unrelated to the app. `attach()` refuses to run without the handle.
 
 ---
 

@@ -141,7 +141,7 @@ try {
   // real asset store — fine for a dev fixture app, and the header says so.
   await evaluate(
     cdp,
-    `const assets = await import('/src/kernel/assets.ts');
+    `const assets = window.__fluxDev.assets;
      for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
      assets.removeAssets(assets.getAssets().map(a => a.id));
      return true;`,
@@ -223,7 +223,7 @@ try {
   await check('image thumbnail decodes to a real JPEG data URL', async () => {
     const result = await evaluate(
       cdp,
-      `const t = await import('/src/kernel/thumbnails.ts');
+      `const t = window.__fluxDev.thumbnails;
        const p = ${dir} + '\\\\still.jpg';
        const thumb = await t.requestThumbnail(p, 'image', window.flux.fs.assetUrl(p));
        return { ok: typeof thumb === 'string', prefix: thumb?.slice(0, 22), length: thumb?.length };`,
@@ -236,7 +236,7 @@ try {
   await check('video thumbnail decodes a frame from an mp4', async () => {
     const result = await evaluate(
       cdp,
-      `const t = await import('/src/kernel/thumbnails.ts');
+      `const t = window.__fluxDev.thumbnails;
        const p = ${dir} + '\\\\clipA.mp4';
        const thumb = await t.requestThumbnail(p, 'video', window.flux.fs.assetUrl(p));
        return { ok: typeof thumb === 'string', prefix: thumb?.slice(0, 22), length: thumb?.length };`,
@@ -249,7 +249,7 @@ try {
   await check('video thumbnail decodes a vp9 webm', async () => {
     const ok = await evaluate(
       cdp,
-      `const t = await import('/src/kernel/thumbnails.ts');
+      `const t = window.__fluxDev.thumbnails;
        const p = ${dir} + '\\\\render.webm';
        return typeof (await t.requestThumbnail(p, 'video', window.flux.fs.assetUrl(p))) === 'string';`,
     )
@@ -259,7 +259,7 @@ try {
   await check('an undecodable file resolves to null instead of hanging', async () => {
     const result = await evaluate(
       cdp,
-      `const t = await import('/src/kernel/thumbnails.ts');
+      `const t = window.__fluxDev.thumbnails;
        const p = ${dir} + '\\\\corrupt.mp4';
        const started = performance.now();
        const thumb = await t.requestThumbnail(p, 'video', window.flux.fs.assetUrl(p));
@@ -272,7 +272,7 @@ try {
   await check('a failed decode is cached, so it is not retried forever', async () => {
     const ms = await evaluate(
       cdp,
-      `const t = await import('/src/kernel/thumbnails.ts');
+      `const t = window.__fluxDev.thumbnails;
        const p = ${dir} + '\\\\corrupt.mp4';
        const started = performance.now();
        await t.requestThumbnail(p, 'video', window.flux.fs.assetUrl(p));
@@ -284,7 +284,7 @@ try {
   await check('concurrent requests are queued, not stampeded', async () => {
     const result = await evaluate(
       cdp,
-      `const t = await import('/src/kernel/thumbnails.ts');
+      `const t = window.__fluxDev.thumbnails;
        const files = ['clipA.mp4','shot_B.mp4','render.webm','still.jpg','photo.png'];
        files.forEach(f => t.invalidateThumbnail(${dir} + '\\\\' + f));
        const results = await Promise.all(files.map(f => {
@@ -390,7 +390,7 @@ try {
        const label = btn?.textContent;
        btn?.click();
        await new Promise(r => setTimeout(r, 300));
-       const assets = await import('/src/kernel/assets.ts');
+       const assets = window.__fluxDev.assets;
        return { label, names: assets.getAssets().map(a => a.name).sort() };`,
     )
     assert.equal(result.label, 'Import 2', `button read "${result.label}"`)
@@ -400,7 +400,7 @@ try {
   await check('imported assets keep the original path — nothing is copied', async () => {
     const paths = await evaluate(
       cdp,
-      `const assets = await import('/src/kernel/assets.ts');
+      `const assets = window.__fluxDev.assets;
        return assets.getAssets().map(a => a.path);`,
     )
     assert.ok(paths.length > 0)
@@ -413,7 +413,7 @@ try {
   await check('re-importing the same file does not duplicate the card', async () => {
     const count = await evaluate(
       cdp,
-      `const assets = await import('/src/kernel/assets.ts');
+      `const assets = window.__fluxDev.assets;
        const before = assets.getAssets().length;
        assets.importAssets([{ path: ${dir} + '\\\\clipA.mp4', kind: 'video' }]);
        return { before, after: assets.getAssets().length };`,
@@ -438,7 +438,7 @@ try {
       cdp,
       `for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
          await new Promise(r => setTimeout(r, 250));
-       const assets = await import('/src/kernel/assets.ts');
+       const assets = window.__fluxDev.assets;
        for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
        return assets.getAssets().map(a => a.name).sort();`,
     )
@@ -448,7 +448,7 @@ try {
   await check('a deleted original is flagged missing, not silently broken', async () => {
     const result = await evaluate(
       cdp,
-      `const assets = await import('/src/kernel/assets.ts');
+      `const assets = window.__fluxDev.assets;
        assets.importAssets([{ path: ${dir} + '\\\\ghost.mp4', kind: 'video', name: 'ghost.mp4' }]);
        await assets.recheckMissing();
        const ghost = assets.getAssets().find(a => a.name === 'ghost.mp4');
@@ -461,7 +461,7 @@ try {
   await check('removing an asset clears it from the project', async () => {
     const remaining = await evaluate(
       cdp,
-      `const assets = await import('/src/kernel/assets.ts');
+      `const assets = window.__fluxDev.assets;
        const ghost = assets.getAssets().find(a => a.name === 'ghost.mp4');
        assets.removeAssets([ghost.id]);
        return assets.getAssets().map(a => a.name).sort();`,

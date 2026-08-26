@@ -9,7 +9,8 @@
  * is how an NLE loses someone's footage without telling them.
  */
 
-import { existsMany, hasFilesystem, type MediaKind } from './fsBridge'
+import { assetUrl, existsMany, hasFilesystem, type MediaKind } from './fsBridge'
+import { probeMedia } from './mediaProbe'
 import { loadStore, saveStore } from './store'
 
 export interface Asset {
@@ -22,6 +23,13 @@ export interface Asset {
   addedAt: number
   /** True when the path did not resolve at the last check. */
   missing?: boolean
+  /** Filled in by a probe after import; absent until then. */
+  width?: number
+  height?: number
+  /** Seconds. Images carry the still-image default rather than nothing. */
+  duration?: number
+  /** True once probed and found undecodable — stops the timeline retrying forever. */
+  unreadable?: boolean
 }
 
 const STORE = 'assets'
@@ -66,7 +74,14 @@ function nextId(): string {
 
 export async function loadAssets(): Promise<void> {
   const stored = await loadStore<Asset[]>(STORE, [])
-  assets = Array.isArray(stored) ? stored : []
+  const fromDisk = Array.isArray(stored) ? stored : []
+
+  // Anything imported while this read was in flight has to survive it. Assigning
+  // the stored array wholesale would drop those imports without a trace — a
+  // narrow race, but the failure is silent and the user's work is what is lost.
+  // Paths are the identity, and the in-memory copy wins.
+  const alreadyHeld = new Set(assets.map((asset) => asset.path))
+  assets = [...fromDisk.filter((asset) => !alreadyHeld.has(asset.path)), ...assets]
 
   // Re-check on every load, because anything could have happened to these files
   // while FLUX was closed.
@@ -113,8 +128,47 @@ export function importAssets(candidates: ImportCandidate[]): Asset[] {
   if (added.length > 0) {
     assets = [...assets, ...added]
     emit()
+    // Probing is fire-and-forget: the cards appear immediately and fill in
+    // their duration when it arrives, rather than the grid waiting on decode.
+    added.forEach((asset) => void ensureProbed(asset.id))
   }
   return added
+}
+
+export function getAsset(id: string): Asset | undefined {
+  return assets.find((asset) => asset.id === id)
+}
+
+function patchAsset(id: string, patch: Partial<Asset>) {
+  let changed = false
+  assets = assets.map((asset) => {
+    if (asset.id !== id) return asset
+    changed = true
+    return { ...asset, ...patch }
+  })
+  if (changed) emit()
+}
+
+/**
+ * Guarantees an asset knows its duration, probing if needed.
+ *
+ * Anything that places a clip needs this: a block on the timeline has to be as
+ * long as its source, and an asset imported a moment ago may not have finished
+ * probing yet.
+ */
+export async function ensureProbed(id: string): Promise<Asset | undefined> {
+  const asset = getAsset(id)
+  if (!asset || !hasFilesystem) return asset
+  if (asset.duration !== undefined || asset.unreadable) return asset
+
+  const info = await probeMedia(asset.path, asset.kind, assetUrl(asset.path))
+  if (!info) {
+    patchAsset(id, { unreadable: true })
+    return getAsset(id)
+  }
+
+  patchAsset(id, { width: info.width, height: info.height, duration: info.duration })
+  return getAsset(id)
 }
 
 /** Removes from the project only. The file on disk is never touched. */
