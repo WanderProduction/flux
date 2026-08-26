@@ -409,6 +409,24 @@ kbd {
 .tl-playhead--live {
   box-shadow: 0 0 6px color-mix(in srgb, var(--flux-accent) 60%, transparent);
 }
+/*
+ * The only part of the playhead you can grab.
+ *
+ * The line itself stays inert: it lies over every lane, and a line that
+ * swallowed clicks would make the clip beneath it unselectable and block drops
+ * at exactly the time you are looking at. Six pixels is enough to hit and
+ * little enough to lose off a clip.
+ */
+.tl-playhead-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+
 .tl-playhead-grip {
   position: absolute;
   top: 0;
@@ -451,8 +469,26 @@ kbd {
   font-size: var(--flux-text-sm);
   overflow: hidden;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: grab;
   box-sizing: border-box;
+  /* The block is the drag handle, so the browser's own image-drag and text
+     selection have to be out of the way. */
+  touch-action: none;
+  user-select: none;
+}
+
+/*
+ * Follows the pointer without being committed.
+ *
+ * A transform rather than a new `left`: the clip is still where it was in the
+ * sequence until the pointer comes up, and moving the real thing early would
+ * mean every abandoned drag had to be undone.
+ */
+.clip--dragging {
+  cursor: grabbing;
+  z-index: 4;
+  opacity: 0.85;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
 }
 .clip--video {
   background: color-mix(in srgb, var(--flux-accent) 20%, var(--flux-bg-elevated));

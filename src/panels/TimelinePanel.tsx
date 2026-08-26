@@ -24,6 +24,8 @@ import {
   addClip,
   addTrack,
   findFreeStart,
+  moveClips,
+  snapDelta,
   getSequence,
   removeClips,
   sequenceDuration,
@@ -115,6 +117,27 @@ interface DropPreview {
   duration: number
 }
 
+/**
+ * How far the pointer travels before a press on a clip becomes a drag.
+ *
+ * Without it, selecting a clip is a coin toss: a click always carries a pixel
+ * or two of movement, and every one of them would nudge the edit.
+ */
+const DRAG_THRESHOLD_PX = 3
+
+/** How close, in pixels, an edge has to be before a drag snaps to it. */
+const SNAP_PX = 8
+
+/** What the panel needs to *draw* a drag in progress. The rest lives in the
+    handler's own closure — see beginClipDrag. */
+interface ClipDrag {
+  ids: string[]
+  /** False until the pointer has travelled past the threshold. */
+  moved: boolean
+  deltaTime: number
+  deltaTracks: number
+}
+
 export function TimelinePanel() {
   const [sequence, setSequence] = useState<SequenceState>(getSequence)
   const [assets, setAssets] = useState<Asset[]>(getAssets)
@@ -125,11 +148,21 @@ export function TimelinePanel() {
   const [preview, setPreview] = useState<DropPreview | null>(null)
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
+  const [drag, setDrag] = useState<ClipDrag | null>(null)
   const lanesRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const headersRef = useRef<HTMLDivElement>(null)
   /** Set by a zoom, read once the new scale has rendered. See zoomBy. */
   const zoomAnchor = useRef<{ time: number; clientX: number } | null>(null)
+  /**
+   * The selection as it is *now*, not as it was when this render's handlers
+   * were made. Two presses in quick succession both run against the same render
+   * — React has not re-rendered in between — so a handler reading the state
+   * variable would build the second selection from the first one's starting
+   * point and silently drop a shift-click.
+   */
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
 
   useEffect(
     () =>
@@ -192,6 +225,136 @@ export function TimelinePanel() {
       return Math.max(0, (clientX - rect.left + lanes.scrollLeft) / zoom)
     },
     [zoom],
+  )
+
+  // ── moving clips ──────────────────────────────────────────────
+
+  /**
+   * Times a drag should land exactly on: the start of the sequence, the
+   * playhead, and every edge of every clip that is *not* moving.
+   *
+   * Overlap already butts a clip against its neighbour when you overshoot;
+   * snapping is for the other half, where you stop three frames short and leave
+   * a gap you cannot see and cannot close by hand.
+   */
+  const snapTargets = useCallback(
+    (movingIds: Set<string>): number[] => {
+      const targets = [0, time]
+      for (const clip of sequence.clips) {
+        if (movingIds.has(clip.id)) continue
+        targets.push(clip.start, clip.start + clip.duration)
+      }
+      return targets
+    },
+    [sequence, time],
+  )
+
+  /**
+   * Nudges a delta so a moving edge lands on a nearby target.
+   *
+   * Both edges of the group are offered, and the closest wins: butting the head
+   * of a clip against the tail of another is the same gesture as butting its
+   * tail against the next one's head, and the hand does not distinguish them.
+   */
+  const snapDeltaToEdges = useCallback(
+    (rawDelta: number, movingIds: Set<string>): number => {
+      const moving = sequence.clips.filter((clip) => movingIds.has(clip.id))
+      if (moving.length === 0) return rawDelta
+
+      const head = Math.min(...moving.map((clip) => clip.start)) + rawDelta
+      const tail = Math.max(...moving.map((clip) => clip.start + clip.duration)) + rawDelta
+      const tolerance = SNAP_PX / zoom
+
+      let best = rawDelta
+      let bestGap = tolerance
+      for (const target of snapTargets(movingIds)) {
+        for (const edge of [head, tail]) {
+          const gap = Math.abs(target - edge)
+          if (gap < bestGap) {
+            bestGap = gap
+            best = rawDelta + (target - edge)
+          }
+        }
+      }
+      return best
+    },
+    [sequence, zoom, snapTargets],
+  )
+
+  /**
+   * Press, move, release — on the window, not on the clip.
+   *
+   * setPointerCapture would be the tidier way to keep receiving moves once the
+   * pointer leaves the block, and it is not used here for two reasons. It
+   * throws outright if the pointer is already gone by the time React dispatches
+   * the press, which turns a fast click into an uncaught error. And it cannot
+   * be driven at all by a synthesised pointer, so the harness would have to
+   * exercise a different code path from the one people actually get — a check
+   * passing for the wrong reason is worse than no check. Window listeners are
+   * the same mechanism the ruler's scrub already uses.
+   */
+  const beginClipDrag = useCallback(
+    (event: React.PointerEvent, clip: Clip) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+
+      // Selection settles on press, not on release: the drag has to move what
+      // the user can see is selected, and pressing an unselected clip means
+      // "this one".
+      const current = selectedRef.current
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey
+      let chosen: Set<string>
+      if (additive) {
+        chosen = new Set(current)
+        if (chosen.has(clip.id)) chosen.delete(clip.id)
+        else chosen.add(clip.id)
+      } else {
+        chosen = current.has(clip.id) ? new Set(current) : new Set([clip.id])
+      }
+      setSelected(chosen)
+      // Immediately, not on the next render: a second press can arrive in the
+      // same tick, and it has to build on this selection rather than the one
+      // this render was made with.
+      selectedRef.current = chosen
+      if (chosen.size === 0) return
+
+      const ids = [...chosen]
+      const startX = event.clientX
+      const startY = event.clientY
+      let moved = false
+      let deltaTime = 0
+      let deltaTracks = 0
+      setDrag({ ids, moved, deltaTime, deltaTracks })
+
+      const onMove = (move: PointerEvent) => {
+        const dx = move.clientX - startX
+        const dy = move.clientY - startY
+        if (!moved && Math.abs(dx) < DRAG_THRESHOLD_PX && Math.abs(dy) < DRAG_THRESHOLD_PX) return
+        moved = true
+
+        // Alt turns snapping off, for when the gap is the point.
+        const raw = dx / zoom
+        deltaTime = snapDelta(move.altKey ? raw : snapDeltaToEdges(raw, chosen))
+        deltaTracks = Math.round(dy / TRACK_HEIGHT)
+        setDrag({ ids, moved, deltaTime, deltaTracks })
+      }
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+        // Committed here and nowhere else: until the pointer comes up the clip
+        // is still where it was, so an abandoned drag needs no undoing.
+        if (moved) moveClips(ids, deltaTime, deltaTracks)
+        setDrag(null)
+      }
+
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+    },
+    [zoom, snapDeltaToEdges],
   )
 
   // ── zoom ──────────────────────────────────────────────────────
@@ -511,23 +674,25 @@ export function TimelinePanel() {
               >
                 {sequence.clips
                   .filter((clip) => clip.trackId === track.id)
-                  .map((clip) => (
-                    <ClipBlock
-                      key={clip.id}
-                      clip={clip}
-                      asset={assetById.get(clip.assetId)}
-                      zoom={zoom}
-                      selected={selected.has(clip.id)}
-                      onSelect={(additive) =>
-                        setSelected((current) => {
-                          const next = additive ? new Set(current) : new Set<string>()
-                          if (additive && current.has(clip.id)) next.delete(clip.id)
-                          else next.add(clip.id)
-                          return next
-                        })
-                      }
-                    />
-                  ))}
+                  .map((clip) => {
+                    const dragging = drag?.moved === true && drag.ids.includes(clip.id)
+                    return (
+                      <ClipBlock
+                        key={clip.id}
+                        clip={clip}
+                        asset={assetById.get(clip.assetId)}
+                        zoom={zoom}
+                        selected={selected.has(clip.id)}
+                        dragging={dragging}
+                        // Offset rather than re-placed: the move is not
+                        // committed until the pointer comes up, so the clip in
+                        // the sequence is still where it was.
+                        offsetX={dragging ? drag.deltaTime * zoom : 0}
+                        offsetY={dragging ? drag.deltaTracks * TRACK_HEIGHT : 0}
+                        onPointerDown={(event) => beginClipDrag(event, clip)}
+                      />
+                    )
+                  })}
 
                 {preview?.trackId === track.id && (
                   <div
@@ -545,7 +710,11 @@ export function TimelinePanel() {
             <div
               className={`tl-playhead${playing ? ' tl-playhead--live' : ''}`}
               style={{ left: time * zoom }}
-            />
+            >
+              {/* The line itself stays inert so it never swallows a click meant
+                  for the clip underneath it; only this narrow handle grabs. */}
+              <span className="tl-playhead-handle" onPointerDown={beginScrub} />
+            </div>
           </div>
         </div>
 
@@ -562,13 +731,19 @@ function ClipBlock({
   asset,
   zoom,
   selected,
-  onSelect,
+  dragging,
+  offsetX,
+  offsetY,
+  onPointerDown,
 }: {
   clip: Clip
   asset: Asset | undefined
   zoom: number
   selected: boolean
-  onSelect: (additive: boolean) => void
+  dragging: boolean
+  offsetX: number
+  offsetY: number
+  onPointerDown: (event: React.PointerEvent) => void
 }) {
   const width = Math.max(2, clip.duration * zoom)
 
@@ -585,13 +760,16 @@ function ClipBlock({
 
   return (
     <div
-      className={`clip clip--video${state}${selected ? ' clip--selected' : ''}`}
-      style={{ left: clip.start * zoom, width }}
-      title={`${label} · ${clip.duration.toFixed(2)}s`}
-      onClick={(e) => {
-        e.stopPropagation()
-        onSelect(e.ctrlKey || e.metaKey || e.shiftKey)
+      className={`clip clip--video${state}${selected ? ' clip--selected' : ''}${
+        dragging ? ' clip--dragging' : ''
+      }`}
+      style={{
+        left: clip.start * zoom,
+        width,
+        transform: dragging ? `translate(${offsetX}px, ${offsetY}px)` : undefined,
       }}
+      title={`${label} · ${clip.duration.toFixed(2)}s`}
+      onPointerDown={onPointerDown}
     >
       {thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />}
       <span className="clip-label">{label}</span>

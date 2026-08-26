@@ -98,6 +98,17 @@ export function snapToFrame(seconds: number, frameRate = sequence.frameRate): nu
   return Math.max(0, Math.round(seconds * frameRate) / frameRate)
 }
 
+/**
+ * Frame-quantise a *distance*, which unlike a position may be negative.
+ *
+ * snapToFrame clamps at zero because no clip starts before the sequence does.
+ * Running a drag delta through it would silently turn every leftward move into
+ * a move to zero.
+ */
+export function snapDelta(seconds: number, frameRate = sequence.frameRate): number {
+  return Math.round(seconds * frameRate) / frameRate
+}
+
 function clipsOnTrack(trackId: string): Clip[] {
   return sequence.clips
     .filter((clip) => clip.trackId === trackId)
@@ -113,16 +124,57 @@ function clipsOnTrack(trackId: string): Clip[] {
  * are wrong to pick by accident on a drag. Sliding right is the only one that
  * neither loses a frame nor moves anything the user already placed.
  */
-export function findFreeStart(trackId: string, desired: number, duration: number): number {
+function freeStartAmong(obstacles: Clip[], desired: number, duration: number): number {
   let start = snapToFrame(desired)
-  const existing = clipsOnTrack(trackId)
-
-  for (const clip of existing) {
+  for (const clip of [...obstacles].sort((a, b) => a.start - b.start)) {
     const clipEnd = clip.start + clip.duration
     const overlaps = start < clipEnd && clip.start < start + duration
     if (overlaps) start = snapToFrame(clipEnd)
   }
   return start
+}
+
+export function findFreeStart(trackId: string, desired: number, duration: number): number {
+  return freeStartAmong(clipsOnTrack(trackId), desired, duration)
+}
+
+/** Floating-point slack. Two edges this close are the same edge. */
+const EPS = 1e-9
+
+/**
+ * Where a clip *being moved* should land, given what is already there.
+ *
+ * Deliberately not the same rule as a drop. A drop has no history — the clip is
+ * new, nothing about it says "before" or "after", and sliding right to the
+ * first free slot is as good an answer as any. A move does have a history: the
+ * clip came from somewhere, and how far you dragged it across its neighbour is
+ * the whole of what you meant.
+ *
+ * So: past the neighbour's midpoint goes after it, short of the midpoint butts
+ * up before it. That is the behaviour of every reorderable list, and it makes
+ * both gestures work — a nudge closes a gap instead of catapulting the clip to
+ * the far side of the track, and a decisive drag reorders instead of refusing.
+ */
+function resolvePlacement(obstacles: Clip[], desired: number, duration: number): number {
+  const sorted = [...obstacles].sort((a, b) => a.start - b.start)
+  let start = Math.max(0, desired)
+
+  // Bounded: two obstacles can bounce a clip between them, and a timeline that
+  // hangs on a drag is worse than one that places a clip imperfectly.
+  for (let pass = 0; pass <= sorted.length; pass++) {
+    const hit = sorted.find(
+      (other) => start < other.start + other.duration - EPS && other.start < start + duration - EPS,
+    )
+    if (!hit) return start
+
+    const past = start + duration / 2 > hit.start + hit.duration / 2
+    const before = hit.start - duration
+    start = past || before < 0 ? hit.start + hit.duration : before
+  }
+
+  // Gave up choosing a side. Fall back to the rule that cannot overlap, because
+  // committing an overlap is the one outcome that must never happen.
+  return freeStartAmong(sorted, desired, duration)
 }
 
 export interface NewClip {
@@ -183,6 +235,72 @@ export function removeTrack(trackId: string): boolean {
     tracks: sequence.tracks.filter((track) => track.id !== trackId),
     clips: sequence.clips.filter((clip) => clip.trackId !== trackId),
   }
+  emit()
+  return true
+}
+
+/**
+ * Moves clips in time and across tracks, keeping their shape.
+ *
+ * A delta rather than absolute positions, so a group of clips travels as a
+ * group: the relative gaps between them are part of the edit, and a move that
+ * silently closed them would be a different edit than the one the hand asked
+ * for.
+ *
+ * Two clamps, both applied to the *whole* group rather than clip by clip. The
+ * earliest clip cannot go before zero and the outermost clips cannot leave the
+ * track list — clamping individually would squash the group's shape against the
+ * boundary instead of simply stopping it there.
+ *
+ * Overlap resolves by the midpoint rule in resolvePlacement, not by the drop
+ * rule: dragging a clip a little way into its neighbour should close the gap
+ * between them, and dragging it decisively across should reorder them. Neither
+ * overwrites, and neither shifts anything downstream.
+ *
+ * @returns true when anything actually moved.
+ */
+export function moveClips(ids: string[], deltaSeconds: number, deltaTracks: number): boolean {
+  const moving = new Set(ids)
+  const chosen = sequence.clips.filter((clip) => moving.has(clip.id))
+  if (chosen.length === 0) return false
+
+  const trackIndex = (trackId: string) => sequence.tracks.findIndex((t) => t.id === trackId)
+  const indices = chosen.map((clip) => trackIndex(clip.trackId))
+  if (indices.some((index) => index < 0)) return false // a clip orphaned by a removed track
+
+  const shift = Math.min(
+    Math.max(deltaTracks, -Math.min(...indices)),
+    sequence.tracks.length - 1 - Math.max(...indices),
+  )
+  const earliest = Math.min(...chosen.map((clip) => clip.start))
+  const delta = Math.max(snapDelta(deltaSeconds), -earliest)
+
+  if (shift === 0 && delta === 0) return false
+
+  const others = sequence.clips.filter((clip) => !moving.has(clip.id))
+  const placed: Clip[] = []
+
+  // Ascending, and already-placed siblings count as obstacles: if one of them
+  // is slid right out of an occupied span it must not then land on top of the
+  // clip that was travelling behind it.
+  for (const clip of [...chosen].sort((a, b) => a.start - b.start)) {
+    const trackId = sequence.tracks[trackIndex(clip.trackId) + shift].id
+    const obstacles = [...others, ...placed].filter((other) => other.trackId === trackId)
+    placed.push({
+      ...clip,
+      trackId,
+      start: resolvePlacement(obstacles, clip.start + delta, clip.duration),
+    })
+  }
+
+  const byId = new Map(placed.map((clip) => [clip.id, clip]))
+  const next = sequence.clips.map((clip) => byId.get(clip.id) ?? clip)
+  const changed = next.some(
+    (clip, i) => clip.start !== sequence.clips[i].start || clip.trackId !== sequence.clips[i].trackId,
+  )
+  if (!changed) return false
+
+  sequence = { ...sequence, clips: next }
   emit()
   return true
 }

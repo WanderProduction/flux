@@ -49,7 +49,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 3`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
-| **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Select, delete, scrub. |
+| **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 
@@ -257,7 +257,10 @@ Two behaviours worth knowing:
 | scroll | travel time |
 | `Ctrl` + scroll | travel tracks |
 | `Alt` + scroll | zoom, anchored on the pointer |
-| drag the ruler | scrub |
+| drag the ruler, or the playhead | scrub |
+| drag a clip | move it in time, and between tracks |
+| `Alt` while dragging a clip | ignore snapping |
+| `Shift` / `Ctrl` click | add to the selection |
 | `Space` | play / pause |
 
 The bare gesture is **horizontal** because a timeline is overwhelmingly a horizontal surface — the
@@ -283,8 +286,41 @@ has drifted out of step with its tracks is worse than no name column at all.
 and the first covers the others, so a track added underneath would be invisible the moment anything
 is on V1.
 
-Not yet: moving or trimming clips once placed, audio tracks, and any UI for removing a track (the
-kernel refuses to remove the last one, since a sequence with none has nowhere to drop).
+#### Moving clips
+
+Press a clip and drag: sideways moves it in time, up and down moves it between tracks. A selection
+of several travels together and keeps its shape, because the gaps between clips are part of the edit
+and a move that silently closed them would be a different edit than the one the hand asked for.
+
+A press only becomes a drag after **three pixels**. Without a threshold, selecting a clip is a coin
+toss — a click always carries a pixel or two, and every one of them would nudge the edit.
+
+**Overlap resolves by where you dragged, not by a fixed rule.** Short of the neighbour's midpoint
+butts up against it; past the midpoint goes after it. That is the behaviour of every reorderable
+list, and it is what makes both gestures work: a nudge closes a gap instead of catapulting the clip
+to the far side of the track, and a decisive drag reorders instead of refusing.
+
+This is deliberately *not* the same rule as a drop. A drop has no history — the clip is new, nothing
+about it says "before" or "after", and sliding right to the first free slot is as good an answer as
+any. A move has a history, and how far you dragged it across its neighbour is the whole of what you
+meant. Neither rule overwrites, and neither shifts anything downstream.
+
+Dragging also **snaps** — to the start of the sequence, the playhead, and the edges of clips that
+are not moving, within eight pixels. Hold `Alt` to turn it off. The overlap rule already butts a
+clip against its neighbour when you overshoot; snapping is for the other half, where you stop three
+frames short and leave a gap you cannot see and cannot close by hand.
+
+Nothing is committed until the pointer comes up: the block follows the cursor as a transform while
+the clip is still where it was, so an abandoned drag needs no undoing.
+
+#### Moving the playhead
+
+Drag the ruler, or the playhead itself — it carries a narrow handle down the length of the line. The
+line is otherwise inert, because it lies over every lane and one that swallowed clicks would make
+the clip underneath it unselectable at exactly the time you are looking at.
+
+Not yet: trimming clips, audio tracks, and any UI for removing a track (the kernel refuses to remove
+the last one, since a sequence with none has nowhere to drop).
 
 ### Playback
 

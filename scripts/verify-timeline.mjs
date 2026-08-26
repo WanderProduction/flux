@@ -274,8 +274,14 @@ try {
       cdp,
       `const seq = window.__fluxDev.sequence;
        const before = seq.getSequence().clips.length;
-       document.querySelector('.tl-lane .clip').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-       await new Promise(r => setTimeout(r, 150));
+       // Press and release, not a synthesised 'click': selection settles on
+       // pointerdown now, because a drag has to move what is already selected.
+       const el = document.querySelector('.tl-lane .clip');
+       const box = el.getBoundingClientRect();
+       const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 };
+       el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, ...at }));
+       el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 1, ...at }));
+       await new Promise(r => setTimeout(r, 200));
        const selected = !!document.querySelector('.clip--selected');
        const cmds = window.__fluxDev.commands;
        await cmds.run('timeline.deleteSelected');
@@ -846,6 +852,293 @@ try {
     )
     assert.equal(state.refused, false)
     assert.equal(state.tracks, 1)
+  })
+
+  // ── moving clips ──────────────────────────────────────────────
+
+  /**
+   * Two clips on V1 at a known scale: A at 0 for 4s, B `gap` seconds after it.
+   *
+   * The gap is a parameter because the checks below need two very different
+   * ones. A wide gap leaves room to measure a plain move without the overlap
+   * rule intervening. A narrow one — wider than a frame, narrower than the snap
+   * tolerance — is the only window in which snapping is distinguishable from
+   * the overlap rule producing the same answer by accident.
+   */
+  const seedClips = (gap) => `
+    const { assets, sequence, view } = window.__fluxDev;
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 60 } });
+    const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    const b = assets.getAssets().find(x => x.name === 'shot_B.mp4');
+    if (!a || !b) throw new Error('fixtures not imported');
+    const pa = await assets.ensureProbed(a.id), pb = await assets.ensureProbed(b.id);
+    sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: pa.duration });
+    sequence.addClip({ assetId: b.id, trackId: 'V1', start: pa.duration + ${gap}, duration: pb.duration });
+    await new Promise(r => setTimeout(r, 400));
+  `
+
+  await evaluate(
+    cdp,
+    `window.__clips = () => window.__fluxDev.sequence.getSequence().clips
+       .slice().sort((p, q) => p.start - q.start)
+       .map(c => [c.trackId, Math.round(c.start * 1000) / 1000]);
+
+     /** Press a clip, travel, release — on the window, as a real pointer does. */
+     window.__dragClip = async (index, dx, dy, opts = {}) => {
+       const el = [...document.querySelectorAll('.tl-lane .clip')][index];
+       if (!el) throw new Error('no clip at index ' + index);
+       const box = el.getBoundingClientRect();
+       const x = box.left + Math.min(24, box.width / 2), y = box.top + box.height / 2;
+       const mk = (type, px, py) => new PointerEvent(type, {
+         bubbles: true, cancelable: true, button: 0, pointerId: 7,
+         clientX: px, clientY: py, altKey: !!opts.altKey, shiftKey: !!opts.shiftKey,
+       });
+       el.dispatchEvent(mk('pointerdown', x, y));
+       for (let i = 1; i <= 4; i++) {
+         window.dispatchEvent(mk('pointermove', x + (dx * i) / 4, y + (dy * i) / 4));
+         await new Promise(r => setTimeout(r, 25));
+       }
+       window.dispatchEvent(mk('pointerup', x + dx, y + dy));
+       await new Promise(r => setTimeout(r, 300));
+       return window.__clips();
+     };
+     return true;`,
+  )
+
+  await check('dragging a clip sideways moves it in time', async () => {
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `const before = window.__clips();
+         // Alt off the snapping, so this measures the drag and nothing else.
+         const after = await window.__dragClip(0, 60, 0, { altKey: true });
+         return { before, after };`,
+    )
+    assert.deepEqual(state.before[0], ['V1', 0])
+    assert.deepEqual(state.after[0], ['V1', 1], 'a 60px drag at 60px/s is one second')
+    assert.deepEqual(state.after[1], state.before[1], 'the other clip should not have moved')
+  })
+
+  await check('dragging a clip up and down moves it between tracks', async () => {
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `const up = await window.__dragClip(0, 0, -46, { altKey: true });
+         const down = await window.__dragClip(0, 0, 46, { altKey: true });
+         return { up, down, tracks: window.__fluxDev.sequence.getSequence().tracks.map(t => t.id) };`,
+    )
+    // V1 is the lower of the two, so "up" is V2.
+    assert.deepEqual(state.tracks, ['V2', 'V1'])
+    assert.equal(state.up[0][0], 'V2', 'dragging up should have changed track')
+    assert.equal(state.down[0][0], 'V1', 'and dragging back down should undo it')
+  })
+
+  await check('a clip cannot be dragged off the end of the track list', async () => {
+    // Clamped, not refused: the drag should still do the part of itself that
+    // can be done rather than snapping back for a reason nothing on screen
+    // explains.
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `const down = await window.__dragClip(0, 60, 300, { altKey: true });
+         return down;`,
+    )
+    assert.equal(state[0][0], 'V1', 'V1 is the last track, so it stays there')
+    assert.equal(state[0][1], 1, 'and the horizontal part of the drag still happened')
+  })
+
+  await check('a clip cannot be dragged before the start of the sequence', async () => {
+    const state = await evaluate(
+      cdp,
+      seedClips(4) + `return await window.__dragClip(0, -600, 0, { altKey: true });`,
+    )
+    assert.equal(state[0][1], 0, 'the sequence starts at zero and so does the clip')
+  })
+
+  await check('a press that barely moves selects instead of dragging', async () => {
+    // Without a threshold, selecting a clip is a coin toss: a click always
+    // carries a pixel or two, and every one of them would nudge the edit.
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `const before = window.__clips();
+         const after = await window.__dragClip(0, 2, 1);
+         return { before, after, selected: document.querySelectorAll('.clip--selected').length };`,
+    )
+    assert.deepEqual(state.after, state.before, 'nothing should have moved')
+    assert.equal(state.selected, 1, 'but the clip should be selected')
+  })
+
+  await check('dragging into a neighbour closes the gap rather than leaping past it', async () => {
+    // The midpoint rule. Short of the neighbour's centre butts up against it;
+    // a nudge must not catapult the clip to the far side of the track.
+    const state = await evaluate(
+      cdp,
+      seedClips(0.2) +
+        `const seq = window.__fluxDev.sequence;
+         const dragged = seq.getSequence().clips.slice().sort((p, q) => p.start - q.start)[0];
+         await window.__dragClip(0, 120, 0, { altKey: true });
+         const now = seq.getSequence().clips.slice().sort((p, q) => p.start - q.start);
+         const moved = now.find(c => c.id === dragged.id);
+         const neighbour = now.find(c => c.id !== dragged.id);
+         return {
+           // Identity, not order. Sliding right lands the clip flush against
+           // its neighbour too — on the far side of it — so "they are touching"
+           // is true under both rules and tells us nothing.
+           stayedBefore: moved.start < neighbour.start,
+           flush: Math.abs(moved.start + moved.duration - neighbour.start) < 1e-6,
+           movedForward: moved.start > 0,
+         };`,
+    )
+    assert.equal(state.stayedBefore, true, 'a nudge must not catapult the clip past its neighbour')
+    assert.equal(state.flush, true, 'it should end up flush against it')
+    assert.equal(state.movedForward, true, 'and it should have moved toward it, not stayed put')
+  })
+
+  await check('dragging decisively across a neighbour reorders them', async () => {
+    // The other half of the midpoint rule, and the whole point of being able to
+    // drag at all: past the centre means past the clip.
+    const state = await evaluate(
+      cdp,
+      seedClips(0.2) +
+        `const clips = window.__fluxDev.sequence.getSequence().clips
+           .slice().sort((p, q) => p.start - q.start);
+         const target = clips[1].start + clips[1].duration - 0.5;
+         const after = await window.__dragClip(0, Math.round(target * 60), 0, { altKey: true });
+         const now = window.__fluxDev.sequence.getSequence().clips
+           .slice().sort((p, q) => p.start - q.start);
+         const byName = now.map(c => c.assetId);
+         return { after, first: byName[0] === clips[1].assetId,
+                  overlap: now[1].start < now[0].start + now[0].duration - 1e-9 };`,
+    )
+    assert.equal(state.first, true, 'the clip that was second should now be first')
+    assert.equal(state.overlap, false, 'and they must not be sitting on top of each other')
+  })
+
+  await check('a move never leaves two clips overlapping', async () => {
+    const overlaps = await evaluate(
+      cdp,
+      `const byTrack = {};
+       for (const c of window.__fluxDev.sequence.getSequence().clips) (byTrack[c.trackId] ??= []).push(c);
+       let bad = 0;
+       for (const list of Object.values(byTrack)) {
+         list.sort((a, b) => a.start - b.start);
+         for (let i = 1; i < list.length; i++) {
+           if (list[i].start < list[i - 1].start + list[i - 1].duration - 1e-9) bad++;
+         }
+       }
+       return bad;`,
+    )
+    assert.equal(overlaps, 0)
+  })
+
+  await check('snapping closes a gap too small to close by hand', async () => {
+    const state = await evaluate(
+      cdp,
+      seedClips(0.2) +
+        `// A fifth of a second of gap; nudge the second clip 6px left, which
+         // lands it short. Snapping should take it the rest of the way.
+         await window.__dragClip(1, -6, 0);
+         const now = window.__fluxDev.sequence.getSequence().clips
+           .slice().sort((p, q) => p.start - q.start);
+         return { gap: now[1].start - (now[0].start + now[0].duration) };`,
+    )
+    assert.ok(Math.abs(state.gap) < 1e-6, `left a gap of ${state.gap}s`)
+  })
+
+  await check('holding Alt leaves the gap exactly where it was put', async () => {
+    const state = await evaluate(
+      cdp,
+      seedClips(0.2) +
+        `await window.__dragClip(1, -6, 0, { altKey: true });
+         const now = window.__fluxDev.sequence.getSequence().clips
+           .slice().sort((p, q) => p.start - q.start);
+         return { gapFrames: (now[1].start - (now[0].start + now[0].duration)) * 24 };`,
+    )
+    assert.ok(state.gapFrames > 1, `Alt should have left a gap, got ${state.gapFrames} frames`)
+  })
+
+  await check('a multi-selection travels together, keeping its shape', async () => {
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `const els = [...document.querySelectorAll('.tl-lane .clip')];
+         const press = (el, opts) => {
+           const b = el.getBoundingClientRect();
+           const at = { clientX: b.left + 5, clientY: b.top + 5 };
+           el.dispatchEvent(new PointerEvent('pointerdown',
+             { bubbles: true, cancelable: true, button: 0, pointerId: 3, ...at, ...opts }));
+           window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 3, ...at }));
+         };
+         press(els[0], {});
+         press(els[1], { shiftKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const selected = document.querySelectorAll('.clip--selected').length;
+         const before = window.__clips();
+         const after = await window.__dragClip(0, 120, 0, { altKey: true });
+         return { selected, before, after };`,
+    )
+    assert.equal(state.selected, 2, 'shift should have added the second clip to the selection')
+    assert.equal(state.after[0][1] - state.before[0][1], 2, 'the first clip moved two seconds')
+    assert.equal(
+      state.after[1][1] - state.before[1][1],
+      2,
+      'and so did the second — the gap between them is part of the edit',
+    )
+  })
+
+  await check('the playhead can be dragged by its handle', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       playback.seek(1);
+       await new Promise(r => setTimeout(r, 250));
+       const handle = document.querySelector('.tl-playhead-handle');
+       if (!handle) throw new Error('the playhead has no handle to grab');
+       const box = handle.getBoundingClientRect();
+       const y = box.top + 60;
+       handle.dispatchEvent(new PointerEvent('pointerdown',
+         { bubbles: true, cancelable: true, clientX: box.left + 3, clientY: y }));
+       window.dispatchEvent(new PointerEvent('pointermove',
+         { bubbles: true, clientX: box.left + 123, clientY: y }));
+       window.dispatchEvent(new PointerEvent('pointerup',
+         { bubbles: true, clientX: box.left + 123, clientY: y }));
+       await new Promise(r => setTimeout(r, 250));
+       return { time: playback.getTime() };`,
+    )
+    assert.ok(
+      Math.abs(state.time - 3) < 0.05,
+      `dragging 120px at 60px/s from 1s should reach 3s, reached ${state.time}s`,
+    )
+  })
+
+  await check('the playhead line does not swallow clicks meant for a clip', async () => {
+    // It lies over every lane. If the whole line were grabbable, the clip
+    // underneath it would be unselectable at exactly the time you are looking
+    // at.
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `const { playback } = window.__fluxDev;
+         const el = [...document.querySelectorAll('.tl-lane .clip')][0];
+         const box = el.getBoundingClientRect();
+         // Park the playhead over the middle of the clip, then press there.
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 250));
+         const head = document.querySelector('.tl-playhead').getBoundingClientRect();
+         const x = head.left + 40;
+         el.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 5,
+             clientX: x, clientY: box.top + box.height / 2 }));
+         window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 5 }));
+         await new Promise(r => setTimeout(r, 200));
+         return { selected: document.querySelectorAll('.clip--selected').length,
+                  time: playback.getTime() };`,
+    )
+    assert.equal(state.selected, 1, 'pressing beside the playhead should select the clip')
+    assert.equal(state.time, 2, 'and must not have scrubbed')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {
