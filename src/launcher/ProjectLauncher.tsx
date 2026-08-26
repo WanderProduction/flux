@@ -13,6 +13,7 @@ import {
   type ProjectError,
   type RecentProject,
 } from '../kernel/project'
+import { projectFolderPath } from '../../shared/projectNaming.js'
 
 /**
  * The first screen: create a project, or open one.
@@ -22,8 +23,6 @@ import {
  * should never be a question you answer by looking at the timeline — the same
  * reason Premiere and Resolve both start at a chooser.
  */
-
-const PROJECT_DIRS_BLURB = 'project_files · imports · exports'
 
 export function ProjectLauncher() {
   const [name, setName] = useState('')
@@ -44,15 +43,31 @@ export function ProjectLauncher() {
 
   const fail = (err: ProjectError) => setError(describeProjectError(err))
 
+  /** Where the project will actually land: <chosen folder>/<name>. */
+  const plannedPath = directory ? projectFolderPath(directory, name) : null
+
   const chooseDirectory = useCallback(async () => {
     setError(null)
     const chosen = await pickDirectory()
-    if (!chosen) return
-    setDirectory(chosen)
-    // Check straight away rather than on submit: telling someone the folder is
-    // taken *after* they hit Create wastes the trip.
-    setOccupied(await isProjectFolder(chosen))
+    if (chosen) setDirectory(chosen)
   }, [])
+
+  // The target depends on the name too, so this re-checks as it is typed rather
+  // than only when the folder is picked. Telling someone the name is taken
+  // *after* they hit Create wastes the trip.
+  useEffect(() => {
+    if (!plannedPath) {
+      setOccupied(false)
+      return
+    }
+    let cancelled = false
+    void isProjectFolder(plannedPath).then((taken) => {
+      if (!cancelled) setOccupied(taken)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [plannedPath])
 
   const create = useCallback(async () => {
     if (!directory || busy) return
@@ -118,16 +133,18 @@ export function ProjectLauncher() {
               </button>
             </label>
 
-            {directory && !occupied && (
+            {plannedPath && !occupied && (
               <p className="launcher-note">
-                FLUX will create <code>{PROJECT_DIRS_BLURB}</code> here.
+                Creates <code>{plannedPath}</code>
+                <br />
+                holding <code>project_files</code>, <code>imports</code> and <code>exports</code>.
               </p>
             )}
 
-            {occupied && (
+            {occupied && plannedPath && (
               <p className="launcher-warn">
-                There is already a project in that folder.{' '}
-                <button className="link-button" onClick={() => void open(directory!)}>
+                There is already a project at <code>{plannedPath}</code>.{' '}
+                <button className="link-button" onClick={() => void open(plannedPath)}>
                   Open it instead
                 </button>
               </p>

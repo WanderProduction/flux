@@ -50,12 +50,21 @@ const cdp = await attach()
 const HELPERS = String.raw`
   window.__tree = {
     sectionOf(title) {
+      const wanted = title === 'Project Folders' ? 'Project' : title;
       const el = [...document.querySelectorAll('.cb-tree-section')]
-        .find(s => s.querySelector('.cb-rail-title')?.textContent === title);
+        .find(s => s.querySelector('.cb-rail-title')?.textContent === wanted);
       if (!el) throw new Error('no rail section ' + title);
       return el;
     },
     rowsIn(title) {
+      // The Project section holds two trees - the project's real folders and
+      // the Assets bin - so 'Project' means the bin specifically.
+      if (title === 'Project') {
+        return [...this.sectionOf(title).querySelectorAll('.cb-subtree--assets .tree-row')];
+      }
+      if (title === 'Project Folders') {
+        return [...this.sectionOf('Project').querySelectorAll('.cb-subtree--folders .tree-row')];
+      }
       return [...this.sectionOf(title).querySelectorAll('.tree-row')];
     },
     describe(title) {
@@ -135,13 +144,33 @@ try {
 
   // ── local disk tree ───────────────────────────────────────────
 
-  await check('the rail shows a Project tree and a This PC tree', async () => {
+  await check('the rail sections are ordered Project, Pinned, This PC, Quick', async () => {
     const titles = await evaluate(
       cdp,
       `return [...document.querySelectorAll('.cb-rail-title')].map(e => e.textContent);`,
     )
-    assert.ok(titles.includes('Project'), `got ${JSON.stringify(titles)}`)
-    assert.ok(titles.includes('This PC'), `got ${JSON.stringify(titles)}`)
+    assert.deepEqual(
+      titles,
+      ['Project', 'Pinned', 'This PC', 'Quick'],
+      'the rail sections should read Project, Pinned, This PC, Quick in that order',
+    )
+  })
+
+  await check('the Project section shows the project folder and its three folders', async () => {
+    const rows = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       const root = t.rowsIn('Project Folders')[0];
+       // It opens itself, so the three folders are visible without a click.
+       await t.until(() => t.rowsIn('Project Folders').length > 1);
+       return t.rowsIn('Project Folders').map(r => ({
+         label: r.querySelector('.tree-label')?.textContent,
+         depth: Math.round((parseInt(r.style.paddingLeft) - 6) / 12),
+       }));`,
+    )
+    assert.equal(rows[0].depth, 0, 'the project folder is the root')
+    const children = rows.filter((r) => r.depth === 1).map((r) => r.label).sort()
+    assert.deepEqual(children, ['exports', 'imports', 'project_files'])
   })
 
   await check('every mounted drive is its own collapsed root', async () => {
@@ -330,7 +359,7 @@ try {
     const labels = await evaluate(
       cdp,
       `const t = window.__tree;
-       await t.toggleByPath('Project', '::project');
+       await t.toggleByPath('Project', '::assets');
        return t.describe('Project').map(r => r.label);`,
     )
     assert.deepEqual(labels, ['Assets'])
@@ -340,17 +369,19 @@ try {
     const result = await evaluate(
       cdp,
       `const t = window.__tree;
-       await t.toggleByPath('Project', '::project');
+       await t.toggleByPath('Project', '::assets');
        const leaf = await t.until(() => t.byLabel('Project', 'still.jpg'));
        leaf.click();
        await t.until(() => document.querySelector('.card--selected'));
        return {
          card: document.querySelector('.card--selected .card-name')?.textContent,
-         inProject: !document.querySelector('.cb-crumb'),
+         // The path bar is always present now, so "in the project" is told by
+         // what the trailing crumb says, not by crumbs being absent.
+         current: document.querySelector('.cb-crumb--current')?.textContent,
        };`,
     )
     assert.equal(result.card, 'still.jpg', 'the matching card should be highlighted')
-    assert.equal(result.inProject, true, 'the grid should have switched to the project')
+    assert.equal(result.current, 'Assets', 'the grid should have switched to the project')
   })
 
   await check('an asset leaf can be dragged from the tree to the timeline', async () => {
@@ -425,6 +456,135 @@ try {
       Math.abs(result.stored - result.wide) < 2,
       `stored width ${result.stored} should match the final ${result.wide}`,
     )
+  })
+
+  // ── pinning ───────────────────────────────────────────────────
+
+  await check('pinning the open folder puts it in the Pinned section', async () => {
+    const result = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       const { pinned } = window.__fluxDev;
+       // Start clean so the assertion is about this pin, not a leftover.
+       pinned.getPinned().forEach(p => pinned.unpinFolder(p.path));
+
+       const target = ${dir};
+       const home = [...document.querySelectorAll('.cb-quick-item')].find(b => b.textContent === 'Home');
+       home.click();
+       const card = await t.until(() => [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'flux-media-test'));
+       card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+       await t.until(() => document.querySelector('.cb-crumb--current')?.textContent === 'flux-media-test');
+
+       const pinBtn = await t.until(() =>
+         [...document.querySelectorAll('.cb-btn')].find(b => b.textContent === 'Pin'));
+       pinBtn.click();
+
+       const row = await t.waitForPath('Pinned', target);
+       return {
+         inSection: !!row,
+         label: row?.querySelector('.tree-label')?.textContent,
+         buttonNow: [...document.querySelectorAll('.cb-btn')].some(b => b.textContent === 'Pinned'),
+         stored: pinned.getPinned().map(p => p.path),
+       };`,
+    )
+    assert.equal(result.inSection, true, 'the folder should appear under Pinned')
+    assert.equal(result.label, 'flux-media-test')
+    assert.equal(result.buttonNow, true, 'the button should flip to "Pinned"')
+    assert.deepEqual(result.stored, [MEDIA_DIR])
+  })
+
+  await check('a pinned folder expands like any other', async () => {
+    const rows = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       await t.toggleByPath('Pinned', ${dir});
+       return t.describe('Pinned').map(r => r.label);`,
+    )
+    assert.ok(rows.includes('Nested'), `expected the subfolder, got ${JSON.stringify(rows)}`)
+  })
+
+  await check('unpinning removes it again', async () => {
+    const result = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       const unpin = [...document.querySelectorAll('.cb-btn')].find(b => b.textContent === 'Pinned');
+       unpin.click();
+       await t.until(() => !t.byPath('Pinned', ${dir}));
+       return {
+         gone: !t.byPath('Pinned', ${dir}),
+         stored: window.__fluxDev.pinned.getPinned().length,
+       };`,
+    )
+    assert.equal(result.gone, true)
+    assert.equal(result.stored, 0)
+  })
+
+  // ── import split button ───────────────────────────────────────
+
+  await check('the import button offers Import Copy and Import Origin', async () => {
+    const items = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       document.querySelector('.split-button-caret').click();
+       const menu = await t.until(() => document.querySelector('.split-menu'));
+       const labels = [...menu.querySelectorAll('.split-menu-item > span:first-child')]
+         .map(e => e.textContent);
+       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+       return labels;`,
+    )
+    assert.deepEqual(items, ['Import Copy', 'Import Origin'])
+  })
+
+  await check('Import Origin imports without copying, skipping the question', async () => {
+    const result = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       const { assets, importMode } = window.__fluxDev;
+       assets.removeAssets(assets.getAssets().map(a => a.id));
+       // 'ask' would normally raise the dialog; the explicit menu item must not.
+       importMode.setImportMode('ask');
+
+       const card = await t.until(() => [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'clipA.mp4'));
+       card.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+       document.querySelector('.split-button-caret').click();
+       const menu = await t.until(() => document.querySelector('.split-menu'));
+       [...menu.querySelectorAll('.split-menu-item')]
+         .find(b => b.textContent.startsWith('Import Origin')).click();
+
+       await t.until(() => assets.getAssets().length > 0);
+       return {
+         dialogShown: !!document.querySelector('.dialog'),
+         paths: assets.getAssets().map(a => ({ path: a.path, inProject: a.inProject })),
+       };`,
+    )
+    assert.equal(result.dialogShown, false, 'an explicit choice must not ask again')
+    assert.equal(result.paths.length, 1)
+    assert.ok(
+      result.paths[0].path.startsWith(MEDIA_DIR),
+      `should point at the original, got ${result.paths[0].path}`,
+    )
+    assert.ok(!result.paths[0].inProject)
+  })
+
+  await check('an asset leaf shows a media icon, not a folder icon', async () => {
+    const kinds = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       const row = await t.until(() => t.byLabel('Project', 'clipA.mp4'));
+       const icon = row.querySelector('.tree-icon');
+       const folderRow = t.rowsIn('Project Folders').find(
+         r => r.querySelector('.tree-label')?.textContent === 'imports');
+       return {
+         asset: icon?.getAttribute('class'),
+         folder: folderRow?.querySelector('.tree-icon')?.getAttribute('class'),
+       };`,
+    )
+    assert.ok(kinds.asset?.includes('tree-icon--video'), `asset icon was ${kinds.asset}`)
+    assert.ok(kinds.folder?.includes('tree-icon--folder'), `folder icon was ${kinds.folder}`)
+    assert.notEqual(kinds.asset, kinds.folder, 'an asset must not look like a folder')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

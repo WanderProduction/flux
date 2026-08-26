@@ -18,10 +18,10 @@ import { attach, createChecker, evaluate } from './cdp.mjs'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'flux-ui-project-'))
+// The parent the user would pick; FLUX creates <parent>/<name> inside it.
+const parent = tmp
 const projectA = path.join(tmp, 'Alpha')
 const projectB = path.join(tmp, 'Beta')
-await fs.mkdir(projectA)
-await fs.mkdir(projectB)
 
 const js = (value) => JSON.stringify(value)
 
@@ -59,7 +59,7 @@ try {
   await check('creating a project enters the app and shows its name', async () => {
     const state = await evaluate(
       cdp,
-      `const r = await window.__fluxDev.project.createProject(${js(projectA)}, 'Alpha');
+      `const r = await window.__fluxDev.project.createProject(${js(parent)}, 'Alpha');
        if (!r.ok) throw new Error(r.error);
        for (let i = 0; i < 60 && !document.querySelector('.dock-host'); i++)
          await new Promise(res => setTimeout(res, 100));
@@ -74,9 +74,24 @@ try {
     assert.equal(state.chip, 'Alpha')
   })
 
-  await check('the three folders exist on disk', async () => {
+  await check('a folder named after the project holds the three folders', async () => {
+    // The parent must contain the project folder, not the project's contents:
+    // without this, picking Downloads once would scatter project_files /
+    // imports / exports straight into Downloads.
+    const inParent = await fs.readdir(parent)
+    assert.ok(inParent.includes('Alpha'), `expected an Alpha folder, got ${inParent.join(', ')}`)
+    assert.ok(
+      !inParent.includes('project_files'),
+      'project folders leaked into the parent directory',
+    )
+
     const entries = await fs.readdir(projectA)
     assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files'])
+  })
+
+  await check('the project root is the named folder', async () => {
+    const root = await evaluate(cdp, `return window.__fluxDev.project.getProject()?.root;`)
+    assert.equal(root, projectA)
   })
 
   await check('project state is written into the project, not userData', async () => {
@@ -116,7 +131,7 @@ try {
     const names = await evaluate(
       cdp,
       `const { project, assets } = window.__fluxDev;
-       const r = await project.createProject(${js(projectB)}, 'Beta');
+       const r = await project.createProject(${js(parent)}, 'Beta');
        if (!r.ok) throw new Error(r.error);
        for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(res => setTimeout(res, 100));
        return assets.getAssets().map(a => a.name);`,
@@ -159,7 +174,7 @@ try {
   await check('creating over an existing project is refused in the app too', async () => {
     const error = await evaluate(
       cdp,
-      `const r = await window.__fluxDev.project.createProject(${js(projectA)}, 'Dup');
+      `const r = await window.__fluxDev.project.createProject(${js(parent)}, 'Alpha');
        return r.ok ? null : r.error;`,
     )
     assert.equal(error, 'already-a-project')

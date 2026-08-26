@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { mediaKindOf } from '../shared/mediaTypes.js'
+import { projectFolderPath, safeFolderName } from '../shared/projectNaming.js'
 
 /**
  * Project creation and on-disk layout.
@@ -54,22 +55,28 @@ export async function isProject(root) {
 }
 
 /**
- * Creates the folder layout and the manifest.
+ * Creates a project folder named after the project inside `parent`, then the
+ * layout and manifest inside it.
  *
- * Refuses rather than merges when a project is already present: silently
- * adopting an existing project would make "create" and "open" the same button,
- * and the user would have no way to tell which one just happened.
+ * The named folder matters: without it, choosing Downloads once would scatter
+ * project_files / imports / exports directly into Downloads, and a second
+ * project could never live beside the first.
+ *
+ * Refuses rather than merges when a project is already present at the target:
+ * silently adopting one would make "create" and "open" the same button, and the
+ * user would have no way to tell which just happened.
  */
-export async function createProject(root, name, appVersion) {
-  const resolved = path.resolve(root)
+export async function createProject(parent, name, appVersion) {
+  const resolvedParent = path.resolve(parent)
 
   try {
-    await fs.access(resolved)
+    await fs.access(resolvedParent)
   } catch {
     return { ok: false, error: 'no-such-directory' }
   }
 
-  if (await isProject(resolved)) return { ok: false, error: 'already-a-project' }
+  const root = path.join(resolvedParent, safeFolderName(name))
+  if (await isProject(root)) return { ok: false, error: 'already-a-project' }
 
   const manifest = {
     flux: { version: appVersion, format: PROJECT_FORMAT },
@@ -79,15 +86,25 @@ export async function createProject(root, name, appVersion) {
   }
 
   try {
+    // recursive: true also makes the project folder itself, and is a no-op when
+    // the user picked a folder that already exists but holds no project.
     for (const dir of PROJECT_DIRS) {
-      await fs.mkdir(path.join(resolved, dir), { recursive: true })
+      await fs.mkdir(path.join(root, dir), { recursive: true })
     }
-    await fs.writeFile(manifestPath(resolved), JSON.stringify(manifest, null, 2), 'utf8')
+    await fs.writeFile(manifestPath(root), JSON.stringify(manifest, null, 2), 'utf8')
   } catch (err) {
-    return { ok: false, error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'write-failed' }
+    return {
+      ok: false,
+      error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'write-failed',
+    }
   }
 
-  return { ok: true, project: { root: resolved, ...manifest } }
+  return { ok: true, project: { root, ...manifest } }
+}
+
+/** Where `createProject` would put a project — used by the launcher's preview. */
+export function plannedProjectPath(parent, name) {
+  return projectFolderPath(path.resolve(parent), name)
 }
 
 export async function openProject(root) {

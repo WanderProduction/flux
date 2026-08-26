@@ -16,6 +16,7 @@ import path from 'node:path'
 
 import {
   PROJECT_DIRS,
+  plannedProjectPath,
   PROJECT_FORMAT,
   copyIntoImports,
   createProject,
@@ -43,17 +44,47 @@ async function check(name, fn) {
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'flux-project-'))
 
 try {
+  // `tmp` is the folder a user would pick; FLUX creates the project inside it.
   const projectA = path.join(tmp, 'Project A')
-  await fs.mkdir(projectA)
 
-  await check('creating a project makes the three folders', async () => {
-    const result = await createProject(projectA, 'Project A', '0.0.1')
+  await check('creating a project makes a folder named after it', async () => {
+    const result = await createProject(tmp, 'Project A', '0.0.1')
     assert.equal(result.ok, true, `create failed: ${result.error}`)
+    assert.equal(result.project.root, projectA, 'root should be <parent>/<name>')
 
     for (const dir of PROJECT_DIRS) {
       const stat = await fs.stat(path.join(projectA, dir))
       assert.ok(stat.isDirectory(), `${dir} is not a directory`)
     }
+  })
+
+  await check('the parent keeps the project folder, not its contents', async () => {
+    const inParent = await fs.readdir(tmp)
+    assert.ok(inParent.includes('Project A'))
+    assert.ok(!inParent.includes('imports'), 'project contents leaked into the parent')
+  })
+
+  await check('two projects can sit side by side in one folder', async () => {
+    const second = await createProject(tmp, 'Project B', '0.0.1')
+    assert.equal(second.ok, true, `create failed: ${second.error}`)
+    assert.equal(second.project.root, path.join(tmp, 'Project B'))
+    assert.equal(await isProject(projectA), true, 'the first project should be untouched')
+  })
+
+  await check('an unsafe name still produces a usable folder', async () => {
+    const messy = await createProject(tmp, 'A/B:C*D ', '0.0.1')
+    assert.equal(messy.ok, true, `create failed: ${messy.error}`)
+    assert.equal(path.basename(messy.project.root), 'ABCD')
+    // The manifest keeps the name the user typed, not the sanitised folder name.
+    assert.equal(messy.project.name, 'A/B:C*D')
+    await fs.access(path.join(messy.project.root, 'imports'))
+  })
+
+  await check('plannedProjectPath agrees with where creation actually lands', async () => {
+    const planned = plannedProjectPath(tmp, 'Preview Me')
+    const made = await createProject(tmp, 'Preview Me', '0.0.1')
+    assert.equal(made.ok, true)
+    assert.equal(made.project.root, planned, 'the launcher would have shown the wrong path')
   })
 
   await check('imports and exports start empty', async () => {
@@ -75,15 +106,16 @@ try {
   })
 
   await check('an empty name falls back rather than producing a blank project', async () => {
-    const blank = path.join(tmp, 'blank')
+    const blank = path.join(tmp, 'blank-parent')
     await fs.mkdir(blank)
     const result = await createProject(blank, '   ', '0.0.1')
     assert.equal(result.ok, true)
     assert.equal(result.project.name, 'Untitled')
+    assert.equal(path.basename(result.project.root), 'Untitled')
   })
 
-  await check('creating over an existing project is refused', async () => {
-    const result = await createProject(projectA, 'Again', '0.0.1')
+  await check('creating the same project name twice in one folder is refused', async () => {
+    const result = await createProject(tmp, 'Project A', '0.0.1')
     assert.equal(result.ok, false)
     assert.equal(result.error, 'already-a-project')
   })
@@ -113,9 +145,9 @@ try {
   })
 
   await check('a project from a newer format is refused, not misread', async () => {
-    const future = path.join(tmp, 'future')
-    await fs.mkdir(future)
-    await createProject(future, 'Future', '0.0.1')
+    const futureParent = path.join(tmp, 'future-parent')
+    await fs.mkdir(futureParent)
+    const future = (await createProject(futureParent, 'Future', '0.0.1')).project.root
     const manifest = JSON.parse(await fs.readFile(manifestPath(future), 'utf8'))
     manifest.flux.format = PROJECT_FORMAT + 1
     await fs.writeFile(manifestPath(future), JSON.stringify(manifest), 'utf8')
@@ -126,9 +158,9 @@ try {
   })
 
   await check('a corrupt manifest is reported rather than throwing', async () => {
-    const broken = path.join(tmp, 'broken')
-    await fs.mkdir(broken)
-    await createProject(broken, 'Broken', '0.0.1')
+    const brokenParent = path.join(tmp, 'broken-parent')
+    await fs.mkdir(brokenParent)
+    const broken = (await createProject(brokenParent, 'Broken', '0.0.1')).project.root
     await fs.writeFile(manifestPath(broken), 'not json at all', 'utf8')
 
     const result = await openProject(broken)
@@ -155,9 +187,6 @@ try {
 
   await check('two projects keep separate state', async () => {
     const projectB = path.join(tmp, 'Project B')
-    await fs.mkdir(projectB)
-    await createProject(projectB, 'Project B', '0.0.1')
-
     await writeProjectStore(projectB, 'assets', [{ id: 'b1' }])
     assert.deepEqual(await readProjectStore(projectA, 'assets'), [{ id: 'a1' }])
     assert.deepEqual(await readProjectStore(projectB, 'assets'), [{ id: 'b1' }])

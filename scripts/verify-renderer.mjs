@@ -331,10 +331,25 @@ try {
     const ids = await evaluate(
       cdp,
       `document.querySelector('.palette-hint').click();
-       await new Promise(r => setTimeout(r, 120));
-       const rows = [...document.querySelectorAll('.palette-row')]
-         .map(r => r.querySelector('.palette-title')?.textContent);
-       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+       // Poll for the rows rather than sampling once: the palette reads the
+       // registry on open, and a cold first render can land after a fixed wait.
+       let rows = [];
+       for (let i = 0; i < 60; i++) {
+         rows = [...document.querySelectorAll('.palette-row')]
+           .map(r => r.querySelector('.palette-title')?.textContent);
+         if (rows.includes('Import Media…')) break;
+         await new Promise(r => setTimeout(r, 100));
+       }
+
+       // Close it through the app's own path. Escape is handled on the palette
+       // element, so dispatching at document left it open, and the next check
+       // used to paper over that by deleting the scrim node - which React then
+       // re-created on its next render.
+       document.querySelector('.palette')
+         ?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+       for (let i = 0; i < 40 && document.querySelector('.palette'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       if (document.querySelector('.palette')) throw new Error('palette would not close');
        return rows;`,
     )
     assert.ok(ids.includes('Import Media…'), 'Import command missing from palette')
@@ -344,11 +359,22 @@ try {
   await check('clicking Home in the rail lists that folder as cards', async () => {
     const result = await evaluate(
       cdp,
-      `document.querySelector('.palette-scrim')?.remove();
+      `const crumbNow = () => document.querySelector('.cb-crumb--current')?.textContent ?? null;
+       // Compared against where we already were. An earlier suite can leave the
+       // browser parked in some other folder, and any condition that does not
+       // reference the starting point is satisfied before the click lands -
+       // returning the previous folder's contents.
+       const before = crumbNow();
+
        const home = [...document.querySelectorAll('.cb-quick-item')].find(b => b.textContent === 'Home');
+       if (!home) throw new Error('no Home quick link');
        home.click();
-       for (let i = 0; i < 40 && !document.querySelector('.card'); i++)
+
+       for (let i = 0; i < 80; i++) {
+         if (crumbNow() !== before && document.querySelector('.card')) break;
          await new Promise(r => setTimeout(r, 250));
+       }
+       if (crumbNow() === before) throw new Error('navigation to Home never happened');
        return [...document.querySelectorAll('.card-name')].map(e => e.textContent);`,
     )
     assert.ok(result.includes('flux-media-test'), 'test folder should appear in Home')

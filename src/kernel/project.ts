@@ -9,6 +9,7 @@
  */
 
 import { resetAssets } from './assets'
+import { resetImportMode } from './importMode'
 import { resetSequence } from './sequence'
 import { loadStore, saveStore, setProjectRoot } from './store'
 
@@ -141,6 +142,7 @@ export function forgetRecent(root: string) {
 function adopt(project: Project) {
   resetAssets()
   resetSequence()
+  resetImportMode()
   current = project
   setProjectRoot(project.root)
   rememberRecent(project)
@@ -168,6 +170,7 @@ export async function openProject(root: string): Promise<ProjectResult> {
 export function closeProject() {
   resetAssets()
   resetSequence()
+  resetImportMode()
   current = null
   setProjectRoot(null)
   emit()

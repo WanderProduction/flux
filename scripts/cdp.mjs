@@ -10,6 +10,9 @@
  */
 
 import fs from 'node:fs/promises'
+import path from 'node:path'
+
+import { safeFolderName } from '../shared/projectNaming.js'
 
 const DEFAULT_PORT = 9222
 
@@ -135,29 +138,45 @@ export async function attach(port = DEFAULT_PORT) {
  * dialog does not appear mid-suite and swallow a click — the copy path has its
  * own checks in verify-project.
  */
-export async function ensureProject(cdp, root, name = 'Verification') {
-  // createProject refuses a folder that is not there, so the harness owns
-  // making it — the same thing the launcher's directory picker does for a user.
-  await fs.mkdir(root, { recursive: true })
+export async function ensureProject(cdp, parent, name = 'Verification') {
+  // Projects now live in a folder named after them inside the chosen parent, so
+  // the harness makes the parent and lets FLUX make the project folder — the
+  // same split as the launcher's directory picker.
+  await fs.mkdir(parent, { recursive: true })
+
+  // Resolved here rather than inside the evaluated page source: composing a
+  // Windows path through a template literal means escaping backslashes twice,
+  // which is exactly the kind of quiet breakage this harness keeps hitting.
+  const target = path.join(parent, safeFolderName(name))
 
   const result = await evaluate(
     cdp,
     `const { project, importMode } = window.__fluxDev;
-     const root = ${JSON.stringify(root)};
-     importMode.setImportMode('link');
+     const parent = ${JSON.stringify(parent)};
+     const target = ${JSON.stringify(target)};
+     const name = ${JSON.stringify(name)};
 
      const open = project.getProject();
-     if (open && open.root === root) return { ok: true, reused: true };
+     if (open && open.root === target) {
+       importMode.setImportMode('link');
+       return { ok: true, root: open.root, reused: true };
+     }
 
-     const existing = await project.isProjectFolder(root);
-     const r = existing ? await project.openProject(root) : await project.createProject(root, ${JSON.stringify(name)});
+     const existing = await project.isProjectFolder(target);
+     const r = existing
+       ? await project.openProject(target)
+       : await project.createProject(parent, name);
      if (!r.ok) return { ok: false, error: r.error };
+
+     // Set AFTER opening: a project open resets the mode, so one project's
+     // habit cannot leak into the next.
+     importMode.setImportMode('link');
 
      for (let i = 0; i < 60 && !document.querySelector('.dock-host'); i++)
        await new Promise(res => setTimeout(res, 250));
-     return { ok: true, reused: false };`,
+     return { ok: true, root: r.project.root, reused: false };`,
   )
-  if (!result.ok) throw new Error(`could not open a project at ${root}: ${result.error}`)
+  if (!result.ok) throw new Error(`could not open a project under ${parent}: ${result.error}`)
   return result
 }
 

@@ -7,9 +7,10 @@
  *   link — the asset points at the original where it already lives. Instant and
  *          costs no space, but the project depends on that path surviving.
  *
- * Neither is right for everyone, so the default is to ask. The preference is
- * app-scoped rather than project-scoped: it is a habit of the person using
- * FLUX, not a property of any one project.
+ * Neither is right for everyone, so the default is to ask. The answer is
+ * remembered PER PROJECT: an archive-everything job and a scratch edit off a
+ * fast drive want opposite things, and one global setting would force the same
+ * habit on both.
  */
 
 import { loadStore, saveStore } from './store'
@@ -22,7 +23,7 @@ let mode: ImportMode = 'ask'
 let loaded = false
 
 export async function loadImportMode(): Promise<ImportMode> {
-  const stored = await loadStore<ImportMode>(STORE, 'ask')
+  const stored = await loadStore<ImportMode>(STORE, 'ask', 'project')
   mode = stored === 'copy' || stored === 'link' ? stored : 'ask'
   loaded = true
   return mode
@@ -38,5 +39,15 @@ export function isImportModeLoaded(): boolean {
 
 export function setImportMode(next: ImportMode): void {
   mode = next
-  void saveStore(STORE, next)
+  void saveStore(STORE, next, 'project')
+}
+
+/**
+ * Drops the remembered answer without writing, for a project open or close.
+ * Carrying one project's choice into the next is exactly what per-project
+ * memory is supposed to prevent.
+ */
+export function resetImportMode(): void {
+  mode = 'ask'
+  loaded = false
 }

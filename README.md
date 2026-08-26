@@ -55,14 +55,21 @@ Browser and Timeline do real work; the other four are still scaffolding.
 
 ### Projects
 
-FLUX opens on a launcher: name a project, choose a folder, and it creates
+FLUX opens on a launcher: name a project, choose a folder, and it creates a folder named after the
+project inside it:
 
 ```
 <your folder>/
-  project_files/    the manifest, and the project's own state
-  imports/          media copied into the project
-  exports/          renders — nothing writes here yet
+  <Project Name>/
+    project_files/    the manifest, and the project's own state
+    imports/          media copied into the project
+    exports/          renders — nothing writes here yet
 ```
+
+The named folder matters: without it, choosing Downloads once would scatter those three folders
+straight into Downloads, and a second project could never live beside the first. The launcher shows
+the exact path before you commit, and the name is sanitised for the filesystem while the manifest
+keeps what you typed.
 
 `project_files` is the part FLUX owns — the manifest (name, app version, format
 number) and the project's assets and sequence. `imports` and `exports` are yours.
@@ -84,17 +91,22 @@ question you answer by looking at the timeline.
 
 ### The Content Browser
 
-The rail holds **two separate trees**:
+The rail is ordered by how often it is reached for:
 
-- **Project** — the imported assets. Leaves drag to the timeline exactly like cards do.
-- **This PC** — every mounted drive as its own root, expanding lazily as you open branches.
+- **Project** — the project's own folders (`imports`, `exports`, `project_files`) as they really are
+  on disk, opened for you, plus the **Assets** bin. These are not the same list: a linked asset
+  lives wherever you left it and appears in the bin without ever appearing under the project folder.
+  Asset rows carry a media icon, never a folder icon.
+- **Pinned** — folders you marked to keep. Open any folder and hit **Pin**; pins are app-scoped, so
+  a footage drive stays pinned across projects.
+- **This PC** — every mounted drive as its own root, expanding lazily.
+- **Quick** — the OS's named folders, as a fallback.
 
-They are separate on purpose. A project asset is a *reference* to a file, not the file's location,
-so folding them into one tree would imply the project mirrors the disk — and it does not. Project
-folders, when they arrive, will be the project's own structure with no relationship to where the
-files actually live.
+All of them drive the same grid.
 
-Both trees drive the same grid. Arrow keys work throughout: Left/Right collapse and expand, Up/Down
+The **path bar sits above the grid**, aligned with the files it describes rather than starting over
+at the rail: an up arrow, the full directory path as clickable crumbs, the pin toggle and the import
+control. Arrow keys work throughout: Left/Right collapse and expand, Up/Down
 move, Enter selects. Descending into a folder from the grid reveals and selects that path in the
 tree, so the two panes never disagree about where you are. The rail is resizable and remembers its
 width — deep trees need it.
@@ -115,8 +127,10 @@ the file — but you choose where that path points:
 - **Leave the files where they are** — the asset points at the original. Instant and costs no space,
   but the project depends on that path surviving.
 
-Neither is right for everyone, so FLUX asks, with a *Always do this* option; *Ask Again How To
-Import* in the palette puts the question back. Either way the original is never moved or altered,
+Neither is right for everyone, so FLUX asks, with a **Remember for this project** option — an
+archive-everything job and a scratch edit off a fast drive want opposite things, so the answer is
+stored per project, and *Ask Again How To Import* in the palette puts the question back. The import
+button's caret offers **Import Copy** and **Import Origin** directly for when you already know. Either way the original is never moved or altered,
 and a copy never overwrites: a name collision suffixes instead, because two cards both starting at
 `C0001.MP4` is routine and overwriting would destroy the first import.
 
@@ -206,7 +220,7 @@ src/
   panels/       the six built-in panels, registered via the SDK
   shell/        command palette
   styles/       theme tokens + app styles
-shared/         media type definitions — imported by BOTH main and renderer
+shared/         media types and project naming — imported by BOTH main and renderer
 electron/       main process · preload bridge · filesystem reads · project layout
 scripts/        verification harnesses
 ```

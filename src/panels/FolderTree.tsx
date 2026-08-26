@@ -6,6 +6,7 @@ import {
   type FolderEntry,
   type SubfolderResult,
 } from '../kernel/fsBridge'
+import { TreeIcon, type TreeIconKind } from './TreeIcon'
 
 /**
  * Tree rendering and navigation, shared by the local-disk tree and the project
@@ -18,14 +19,12 @@ import {
  * promise cheap to keep.
  */
 
-export type TreeIcon = 'drive' | 'folder' | 'root' | 'video' | 'image'
-
 export interface TreeRow {
   /** Stable identity: a path for folders, an asset id for project leaves. */
   id: string
   label: string
   depth: number
-  icon: TreeIcon
+  icon: TreeIconKind
   expandable: boolean
   expanded: boolean
   loading?: boolean
@@ -161,7 +160,7 @@ export function TreeView({
           ) : (
             <span className="tree-chevron tree-chevron--leaf" />
           )}
-          <i className={`tree-icon tree-icon--${row.icon}`} />
+          <TreeIcon kind={row.icon} />
           <span className="tree-label">{row.label}</span>
           {row.loading && <span className="tree-note">…</span>}
           {row.error && <span className="tree-note">{row.error}</span>}
@@ -228,6 +227,9 @@ export function useDiskTree(roots: FolderEntry[]) {
   /** Closes every branch. The loaded-children cache is kept, so reopening is instant. */
   const collapseAll = useCallback(() => setExpanded(new Set()), [])
 
+  /** Opens one branch without touching the rest. */
+  const expand = useCallback((dirPath: string) => setExpansion(dirPath, true), [setExpansion])
+
   /**
    * Opens every ancestor so `target` becomes visible in the tree.
    *
@@ -249,7 +251,7 @@ export function useDiskTree(roots: FolderEntry[]) {
   const rows = useMemo(() => {
     const out: TreeRow[] = []
 
-    const walk = (entry: FolderEntry, depth: number, icon: TreeIcon) => {
+    const walk = (entry: FolderEntry, depth: number, icon: TreeIconKind) => {
       const isOpen = expanded.has(entry.path)
       const state = children.get(entry.path)
       const failed = isOpen && state?.status === 'done' && !state.result.ok
@@ -288,5 +290,5 @@ export function useDiskTree(roots: FolderEntry[]) {
     return out
   }, [roots, expanded, children])
 
-  return { rows, toggle, collapseAll, reveal, expanded }
+  return { rows, toggle, expand, collapseAll, reveal, expanded }
 }

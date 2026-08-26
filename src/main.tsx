@@ -15,6 +15,7 @@ import { panels } from './kernel/panels'
 import * as store from './kernel/store'
 import * as project from './kernel/project'
 import * as importMode from './kernel/importMode'
+import * as pinned from './kernel/pinned'
 
 // Panels register before the first render so the dock's component map is
 // complete on mount. Plugins will hook in here later, ahead of this call.
@@ -36,7 +37,7 @@ if (!container) throw new Error('#root missing from index.html')
  */
 if (import.meta.env.DEV) {
   Object.assign(window, {
-    __fluxDev: { assets, sequence, thumbnails, commands, panels, store, project, importMode },
+    __fluxDev: { assets, sequence, thumbnails, commands, panels, store, project, importMode, pinned },
   })
 }
 

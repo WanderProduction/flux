@@ -646,31 +646,45 @@ kbd {
 
 .tree-icon {
   flex: 0 0 auto;
-  width: 11px;
-  height: 9px;
-  border-radius: 1.5px;
-  background: var(--flux-bg-active);
-  border: 1px solid var(--flux-border-strong);
+  /* Body of the glyph; the mark inside is what tells the kinds apart. */
+  fill: var(--flux-bg-active);
+  stroke: var(--flux-text-faint);
+  stroke-width: 1;
 }
-.tree-icon--drive {
-  background: var(--flux-bg-hover);
-  border-color: var(--flux-text-faint);
+.tree-icon .tree-icon-mark {
+  stroke: none;
 }
-.tree-icon--folder {
-  border-top-width: 3px;
-  border-top-color: var(--flux-text-faint);
+.tree-icon--folder,
+.tree-icon--project {
+  fill: color-mix(in srgb, var(--flux-text-faint) 30%, var(--flux-bg-active));
 }
-.tree-icon--root {
-  background: color-mix(in srgb, var(--flux-accent) 45%, var(--flux-bg-active));
-  border-color: var(--flux-accent-dim);
+.tree-icon--project .tree-icon-mark {
+  fill: var(--flux-accent);
+}
+.tree-icon--drive .tree-icon-mark {
+  fill: var(--flux-audio);
 }
 .tree-icon--video {
-  background: color-mix(in srgb, var(--flux-accent) 45%, var(--flux-bg-active));
-  border-color: transparent;
+  fill: color-mix(in srgb, var(--flux-accent) 26%, var(--flux-bg-active));
+  stroke: var(--flux-accent-dim);
+}
+.tree-icon--video .tree-icon-mark {
+  fill: var(--flux-accent);
 }
 .tree-icon--image {
-  background: color-mix(in srgb, var(--flux-driver) 45%, var(--flux-bg-active));
-  border-color: transparent;
+  fill: color-mix(in srgb, var(--flux-driver) 26%, var(--flux-bg-active));
+  stroke: color-mix(in srgb, var(--flux-driver) 60%, transparent);
+}
+.tree-icon--image .tree-icon-mark {
+  fill: var(--flux-driver);
+}
+.tree-icon--audio {
+  fill: color-mix(in srgb, var(--flux-audio) 26%, var(--flux-bg-active));
+  stroke: color-mix(in srgb, var(--flux-audio) 60%, transparent);
+}
+.tree-icon--audio .tree-icon-mark {
+  stroke: var(--flux-audio);
+  fill: none;
 }
 
 .tree-label {
@@ -686,8 +700,127 @@ kbd {
 }
 
 .cb-main {
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+.cb-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The path bar lives inside the main column so the path lines up with the
+   files it describes, instead of starting over at the rail. */
+.cb-pathbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 30px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--flux-border);
+  background: var(--flux-bg);
+  min-width: 0;
+}
+.cb-pathbar-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.cb-icon-button {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-panel);
+  color: var(--flux-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cb-icon-button:hover:not(:disabled) {
+  background: var(--flux-bg-hover);
+  color: var(--flux-text);
+}
+.cb-icon-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.cb-crumb--current {
+  color: var(--flux-text);
+}
+
+/* Split import button */
+.split-button {
+  position: relative;
+  display: flex;
+}
+.split-button-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-button-caret {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 0;
+  padding: 3px 6px;
+}
+.split-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+.split-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--flux-radius);
+  background: none;
+  text-align: left;
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  cursor: pointer;
+}
+.split-menu-item:hover,
+.split-menu-item:focus-visible {
+  background: var(--flux-bg-hover);
+  outline: none;
+}
+.split-menu-detail {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+}
+
+/* Marks an asset whose file lives inside the project. */
+.card-badge {
+  position: absolute;
+  bottom: 34px;
+  left: 5px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--flux-audio) 28%, rgba(0, 0, 0, 0.65));
+  color: #cdf5e4;
 }
 
 .cb-btn {
@@ -1466,4 +1599,11 @@ kbd {
   border-color: var(--flux-warn);
   color: var(--flux-warn);
   cursor: pointer;
+}
+
+/* The two trees in the Project section, kept visually distinct. */
+.cb-subtree--assets {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--flux-border);
 }

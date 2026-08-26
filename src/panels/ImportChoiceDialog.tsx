@@ -11,16 +11,18 @@ export interface ImportChoice {
  * Asks whether an import should be copied into the project or linked in place.
  *
  * Both options are legitimate, so neither is styled as the dangerous one — the
- * text says what each costs and lets the user decide. "Remember" writes the
- * answer to the app preference so this stops appearing once someone knows which
- * way they work.
+ * text says what each costs and lets the user decide. "Remember" stores the
+ * answer on THIS project, so a job that wants everything archived and a scratch
+ * edit off a fast drive can each keep their own habit.
  */
 export function ImportChoiceDialog({
   count,
+  projectName,
   onChoose,
   onCancel,
 }: {
   count: number
+  projectName?: string
   onChoose: (choice: ImportChoice) => void
   onCancel: () => void
 }) {
@@ -73,7 +75,10 @@ export function ImportChoiceDialog({
             checked={remember}
             onChange={(e) => setRemember(e.target.checked)}
           />
-          <span>Always do this (change it later from the command palette)</span>
+          <span>
+            Remember for {projectName ? <strong>{projectName}</strong> : 'this project'} (undo it
+            from the command palette)
+          </span>
         </label>
       </div>
     </div>
