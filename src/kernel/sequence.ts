@@ -148,6 +148,45 @@ export function addClip({ assetId, trackId, start, duration }: NewClip): Clip | 
   return clip
 }
 
+/**
+ * Adds a track above the rest.
+ *
+ * Above, not below: tracks are stored in the order they are drawn and the first
+ * one covers the others, so a new video track landing *under* everything would
+ * be invisible the moment anything is on V1 — which reads as the command having
+ * done nothing.
+ */
+export function addTrack(kind: TrackKind = 'video'): Track {
+  const prefix = kind === 'video' ? 'V' : 'A'
+  const taken = new Set(sequence.tracks.map((track) => track.id))
+  let index = sequence.tracks.filter((track) => track.kind === kind).length + 1
+  while (taken.has(`${prefix}${index}`)) index += 1
+
+  const track: Track = { id: `${prefix}${index}`, kind, name: `${prefix}${index}` }
+  sequence = { ...sequence, tracks: [track, ...sequence.tracks] }
+  emit()
+  return track
+}
+
+/**
+ * Removes a track and every clip on it.
+ *
+ * Refuses the last one: a sequence with no tracks has nowhere to drop, and the
+ * timeline would be a panel you cannot use with no way back.
+ */
+export function removeTrack(trackId: string): boolean {
+  if (sequence.tracks.length <= 1) return false
+  if (!sequence.tracks.some((track) => track.id === trackId)) return false
+
+  sequence = {
+    ...sequence,
+    tracks: sequence.tracks.filter((track) => track.id !== trackId),
+    clips: sequence.clips.filter((clip) => clip.trackId !== trackId),
+  }
+  emit()
+  return true
+}
+
 export function removeClips(ids: string[]): number {
   const doomed = new Set(ids)
   const before = sequence.clips.length

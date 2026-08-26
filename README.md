@@ -49,7 +49,8 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 3`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
-| **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Select, delete, zoom, scrub. |
+| **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Select, delete, scrub. |
+| **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
@@ -249,7 +250,41 @@ Two behaviours worth knowing:
   marked unplayable. Silently deleting editing work because someone tidied the bin is not a
   trade this project makes.
 
-Not yet: moving or trimming clips once placed, and audio tracks.
+#### Driving it
+
+| | |
+|---|---|
+| scroll | travel time |
+| `Ctrl` + scroll | travel tracks |
+| `Alt` + scroll | zoom, anchored on the pointer |
+| drag the ruler | scrub |
+| `Space` | play / pause |
+
+The bare gesture is **horizontal** because a timeline is overwhelmingly a horizontal surface — the
+axis you move along all day should not need a modifier held down to reach. That inverts the usual
+`Ctrl`-to-zoom convention on purpose.
+
+Two things about this are less obvious than they look:
+
+- The wheel listener is attached **natively, not through React's `onWheel`**, because React
+  registers wheel listeners as *passive*, where `preventDefault` silently does nothing. That matters
+  twice over: the page would scroll as well as the timeline, and `Ctrl` + wheel is Chromium's own
+  page-zoom gesture, which would zoom the entire application instead of the ruler.
+- **Zoom is anchored on the pointer.** Without that the timeline slides out from under the cursor on
+  every notch and zooming in on a cut becomes zoom-then-hunt. The `+`/`−` buttons and the commands
+  anchor on the middle of the view for the same reason — a control that jumps differently depending
+  on how you invoked it is worse than one that always jumps.
+
+Scrolling down through tracks keeps the **ruler** in place and drags the **track headers** along
+with the lanes. A timeline you cannot read the time off is not a timeline, and a name column that
+has drifted out of step with its tracks is worse than no name column at all.
+
+*Add Video Track* in the palette adds one above the rest — above, because tracks are drawn in order
+and the first covers the others, so a track added underneath would be invisible the moment anything
+is on V1.
+
+Not yet: moving or trimming clips once placed, audio tracks, and any UI for removing a track (the
+kernel refuses to remove the last one, since a sequence with none has nowhere to drop).
 
 ### Playback
 
@@ -276,6 +311,14 @@ it into empty space, so the picture stays up; pressing play at the end **starts 
 nothing happening is not what a finger expects from a player; and deleting the clip under the
 playhead **pulls the playhead back** rather than leaving it floating past the end of everything,
 where play would then refuse to move it.
+
+**FLUX keeps rendering when it is not in front.** Chromium stops producing frames for a window that
+is backgrounded *or* merely covered by another window, which for an ordinary app is a battery win
+and for this one is wrong: the playhead is driven by `requestAnimationFrame`, so alt-tabbing away
+would silently freeze playback mid-take. `backgroundThrottling: false` plus
+`--disable-backgrounding-occluded-windows` turn both off. It also has a second effect that is easy
+to be caught out by — a frozen window fires no `scroll` events at all, so anything following a
+scroll position quietly stops following it.
 
 This is a *player*, not a renderer — it shows the source directly, because there is no compositor
 yet to composite anything. When the engine lands, the Viewer becomes the surface it draws into and

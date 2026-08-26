@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { commands } from '../kernel/commands'
 import { ensureProbed, getAssets, subscribeAssets, type Asset } from '../kernel/assets'
@@ -22,6 +22,7 @@ import {
 } from '../kernel/playback'
 import {
   addClip,
+  addTrack,
   findFreeStart,
   getSequence,
   removeClips,
@@ -53,6 +54,29 @@ const HEADER_WIDTH = 68
 const MIN_ZOOM = 8
 const MAX_ZOOM = 400
 const DEFAULT_ZOOM = 60 // pixels per second
+
+/**
+ * How hard a wheel notch zooms.
+ *
+ * Exponential rather than a fixed step, so a mouse wheel (one big delta) and a
+ * trackpad (a stream of small ones) end up at the same place for the same
+ * gesture instead of one of them being unusable.
+ */
+const ZOOM_PER_WHEEL_PIXEL = 1.0015
+
+/**
+ * Wheel deltas in CSS pixels, whatever the device reported.
+ *
+ * deltaMode is 0 for most mice and trackpads, but Firefox and some drivers
+ * report lines or pages, and a raw `deltaY` of 3 would then move the timeline
+ * three pixels instead of a notch. deltaX matters for trackpads, where a
+ * two-finger sideways swipe is the natural way to travel a timeline.
+ */
+function wheelPixels(event: WheelEvent): number {
+  const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1
+  const raw = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+  return raw * scale
+}
 
 /**
  * Keeps a zoom usable. Also guards the value read back from a document: a
@@ -102,6 +126,10 @@ export function TimelinePanel() {
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
   const lanesRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const headersRef = useRef<HTMLDivElement>(null)
+  /** Set by a zoom, read once the new scale has rendered. See zoomBy. */
+  const zoomAnchor = useRef<{ time: number; clientX: number } | null>(null)
 
   useEffect(
     () =>
@@ -165,6 +193,103 @@ export function TimelinePanel() {
     },
     [zoom],
   )
+
+  // ── zoom ──────────────────────────────────────────────────────
+
+  /**
+   * Zooms, keeping one point on screen fixed.
+   *
+   * Without an anchor the timeline slides out from under the pointer on every
+   * notch, and zooming in on a specific cut turns into zoom-then-hunt. The
+   * anchor defaults to the middle of the view so the buttons and the keyboard
+   * behave the same way as the wheel — a control that jumps differently
+   * depending on how you invoked it is worse than one that always jumps.
+   */
+  const zoomBy = useCallback(
+    (factor: number, clientX?: number) => {
+      const lanes = lanesRef.current
+      if (lanes) {
+        const rect = lanes.getBoundingClientRect()
+        const x = clientX ?? rect.left + rect.width / 2
+        zoomAnchor.current = {
+          time: (x - rect.left + lanes.scrollLeft) / zoom,
+          clientX: x,
+        }
+      }
+      setZoom((current) => clampZoom(current * factor))
+    },
+    [zoom],
+  )
+
+  // Applied after the new scale has been laid out, not during the event: the
+  // content is only its new width once React has rendered it.
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current
+    const lanes = lanesRef.current
+    if (!anchor || !lanes) return
+    zoomAnchor.current = null
+    const rect = lanes.getBoundingClientRect()
+    lanes.scrollLeft = Math.max(0, anchor.time * zoom - (anchor.clientX - rect.left))
+  }, [zoom])
+
+  // ── the wheel ─────────────────────────────────────────────────
+
+  /**
+   * Scroll travels time. Ctrl travels tracks. Alt zooms.
+   *
+   * The bare gesture is horizontal because a timeline is overwhelmingly a
+   * horizontal surface — the axis you move along all day should not need a
+   * modifier held down to reach.
+   *
+   * Attached natively rather than through onWheel because React registers wheel
+   * listeners as *passive*, where preventDefault silently does nothing. That
+   * matters twice over: the page would scroll as well as the timeline, and
+   * Ctrl+wheel is Chromium's own page-zoom gesture, which would zoom the entire
+   * application instead of the ruler.
+   */
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+
+    const onWheel = (event: WheelEvent) => {
+      const lanes = lanesRef.current
+      if (!lanes) return
+      const delta = wheelPixels(event)
+      if (delta === 0) return
+      event.preventDefault()
+
+      if (event.altKey) {
+        zoomBy(Math.pow(ZOOM_PER_WHEEL_PIXEL, -delta), event.clientX)
+      } else if (event.ctrlKey || event.metaKey) {
+        lanes.scrollTop += delta
+      } else {
+        lanes.scrollLeft += delta
+      }
+    }
+
+    root.addEventListener('wheel', onWheel, { passive: false })
+    return () => root.removeEventListener('wheel', onWheel)
+  }, [zoomBy])
+
+  /**
+   * The track headers ride along with the lanes.
+   *
+   * They are a separate column so they stay put while time scrolls sideways,
+   * which means nothing moves them vertically unless it is done by hand — and a
+   * name column that has drifted out of step with its tracks is worse than no
+   * name column at all.
+   */
+  useEffect(() => {
+    const lanes = lanesRef.current
+    const headers = headersRef.current
+    if (!lanes || !headers) return
+    const sync = () => {
+      headers.style.transform = `translateY(${-lanes.scrollTop}px)`
+    }
+    sync()
+    lanes.addEventListener('scroll', sync, { passive: true })
+    return () => lanes.removeEventListener('scroll', sync)
+  }, [])
 
   // ── drop from the Content Browser ─────────────────────────────
 
@@ -273,13 +398,22 @@ export function TimelinePanel() {
         id: 'timeline.zoomIn',
         title: 'Zoom In',
         category: 'Timeline',
-        run: () => setZoom((z) => clampZoom(z * 1.5)),
+        run: () => zoomBy(1.5),
       },
       {
         id: 'timeline.zoomOut',
         title: 'Zoom Out',
         category: 'Timeline',
-        run: () => setZoom((z) => clampZoom(z / 1.5)),
+        run: () => zoomBy(1 / 1.5),
+      },
+      {
+        id: 'timeline.addTrack',
+        title: 'Add Video Track',
+        category: 'Timeline',
+        detail: 'Adds a track above the others',
+        run: () => {
+          addTrack('video')
+        },
       },
       {
         id: 'timeline.deleteSelected',
@@ -291,7 +425,7 @@ export function TimelinePanel() {
       },
     ])
     return () => handle.dispose()
-  }, [deleteSelected, selected.size])
+  }, [deleteSelected, selected.size, zoomBy])
 
   // ── rendering ─────────────────────────────────────────────────
 
@@ -321,15 +455,15 @@ export function TimelinePanel() {
             )}
             <button
               className="cb-btn"
-              onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z / 1.5))}
-              title="Zoom out"
+              onClick={() => zoomBy(1 / 1.5)}
+              title="Zoom out (Alt + scroll)"
             >
               −
             </button>
             <button
               className="cb-btn"
-              onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * 1.5))}
-              title="Zoom in"
+              onClick={() => zoomBy(1.5)}
+              title="Zoom in (Alt + scroll)"
             >
               +
             </button>
@@ -337,14 +471,16 @@ export function TimelinePanel() {
         </>
       }
     >
-      <div className="tl">
+      <div className="tl" ref={rootRef}>
         <div className="tl-headers" style={{ width: HEADER_WIDTH }}>
           <div className="tl-header-spacer" />
-          {sequence.tracks.map((track) => (
-            <div className="tl-header" key={track.id} style={{ height: TRACK_HEIGHT }}>
-              <span className="track-name">{track.name}</span>
-            </div>
-          ))}
+          <div className="tl-header-list" ref={headersRef}>
+            {sequence.tracks.map((track) => (
+              <div className="tl-header" key={track.id} style={{ height: TRACK_HEIGHT }}>
+                <span className="track-name">{track.name}</span>
+              </div>
+            ))}
+          </div>
         </div>
 
         <div className="tl-scroll" ref={lanesRef}>
@@ -358,6 +494,10 @@ export function TimelinePanel() {
                   </div>
                 )
               })}
+              {/* The grip lives in the ruler, not on the playhead line: the
+                  ruler stays put while the tracks scroll under it, and a grip
+                  that slid away from its own ruler would read as broken. */}
+              <span className="tl-playhead-grip" style={{ left: time * zoom }} />
             </div>
 
             {sequence.tracks.map((track) => (
@@ -405,9 +545,7 @@ export function TimelinePanel() {
             <div
               className={`tl-playhead${playing ? ' tl-playhead--live' : ''}`}
               style={{ left: time * zoom }}
-            >
-              <span className="tl-playhead-grip" />
-            </div>
+            />
           </div>
         </div>
 

@@ -36,6 +36,17 @@ function argvProjectFile(argv) {
  * instance already running instead, which is also how a project gets opened
  * from Explorer while FLUX is up.
  */
+/*
+ * Occluded windows keep rendering too.
+ *
+ * backgroundThrottling covers a window that is minimised or backgrounded;
+ * Chromium separately stops painting one that is merely *covered* by another
+ * window, which is the common case while working — FLUX behind a browser. Same
+ * reasoning: a media app must not stop playing because something is on top of
+ * it.
+ */
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) app.quit()
 
@@ -145,6 +156,17 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      /**
+       * Keep rendering when the window is not in front.
+       *
+       * Chromium stops producing frames for a backgrounded or occluded window,
+       * which for an ordinary app is a battery win and for this one is wrong:
+       * the playhead is driven by requestAnimationFrame, so alt-tabbing away
+       * would silently freeze playback mid-take. It also stops `scroll` events
+       * from firing at all, which is a strange thing to discover only when a
+       * panel that follows a scroll position quietly stops following it.
+       */
+      backgroundThrottling: false,
     },
   })
 

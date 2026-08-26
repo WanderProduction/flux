@@ -51,11 +51,21 @@ const DRAG_HELPER = `
 
     const rect = lane.getBoundingClientRect();
     const clientX = rect.left + atSeconds * zoom;
+    const before = window.__fluxDev.sequence.getSequence().clips.length;
     lane.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, clientX }));
     lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX }));
 
-    await new Promise(r => setTimeout(r, 700));
-    return true;
+    // Wait for the clip, not for a duration. A drop has to learn the asset's
+    // length before it can place anything, and that is a real decode competing
+    // with whatever else is decoding - the Viewer now holds a <video> of its
+    // own. A fixed sleep here passed for months and then started losing that
+    // race, which is exactly the failure mode the rule about conditions exists
+    // to prevent.
+    for (let i = 0; i < 150; i++) {
+      if (window.__fluxDev.sequence.getSequence().clips.length > before) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    throw new Error('dropping ' + assetName + ' never produced a clip');
   };
   return true;
 `
@@ -536,17 +546,30 @@ try {
          .find(b => /leave the files|origin|link/i.test(b.textContent));
        if (!link) throw new Error('no link choice in the dialog');
        link.click();
-       for (let i = 0; i < 80 && sequence.getSequence().clips.length === 0; i++)
+
+       // Two separate waits, reported separately. The import is immediate; the
+       // clip needs the asset's duration, which is a real decode and can be
+       // slow behind whatever else has been decoding. Collapsing them into one
+       // timeout makes a slow probe look like a failed import.
+       const found = (n) => assets.getAssets().find(a => a.name === n);
+       for (let i = 0; i < 100 && !found('shot_B.mp4'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       const asset = found('shot_B.mp4');
+
+       for (let i = 0; i < 200 && sequence.getSequence().clips.length === 0; i++)
          await new Promise(r => setTimeout(r, 100));
        const clip = sequence.getSequence().clips[0];
-       const asset = clip && assets.getAssets().find(a => a.id === clip.assetId);
+
        return { imported: !!asset, name: asset?.name, inProject: asset?.inProject ?? false,
+                placed: !!clip, sameAsset: clip ? clip.assetId === asset?.id : null,
                 duration: clip ? Math.round(clip.duration * 100) / 100 : null,
                 dialogGone: !document.querySelector('.dialog') };`,
     )
     assert.equal(state.imported, true, 'the dropped file should now be a project asset')
     assert.equal(state.name, 'shot_B.mp4')
     assert.equal(state.inProject, false, 'Origin leaves the file where it was')
+    assert.equal(state.placed, true, 'and the drop should have placed a clip')
+    assert.equal(state.sameAsset, true, 'the clip should play the file that was dropped')
     assert.ok(state.duration > 0, 'the clip should be as long as the media, not a guess')
     assert.equal(state.dialogGone, true)
   })
@@ -620,6 +643,209 @@ try {
        return { before, after: sequence.getSequence().clips.length };`,
     )
     assert.equal(clips.after, clips.before, 'a plain-text drag is not an import')
+  })
+
+  // ── the wheel ─────────────────────────────────────────────────
+
+  // Enough tracks to scroll past, and enough zoom to scroll along.
+  await evaluate(
+    cdp,
+    `const { sequence, view } = window.__fluxDev;
+     while (sequence.getSequence().tracks.length < 12) sequence.addTrack('video');
+     // An absolute scale, not three zoomIn calls: relative steps from whatever
+     // the last check left behind can land on MAX_ZOOM, where a zoom-in check
+     // passes by doing nothing.
+     view.recordView({ timeline: { zoom: 150 } });
+     await new Promise(r => setTimeout(r, 400));
+
+     // Dispatched at the panel root, cancelable, the way a real wheel arrives.
+     window.__wheel = (opts) => {
+       const root = document.querySelector('.tl');
+       const box = root.getBoundingClientRect();
+       const event = new WheelEvent('wheel', {
+         bubbles: true, cancelable: true,
+         clientX: opts.clientX ?? box.left + box.width / 2,
+         clientY: box.top + box.height / 2,
+         deltaY: opts.deltaY ?? 0, deltaX: opts.deltaX ?? 0,
+         ctrlKey: !!opts.ctrlKey, altKey: !!opts.altKey,
+       });
+       return { defaultPrevented: !root.dispatchEvent(event) };
+     };
+     window.__lanes = () => document.querySelector('.tl-scroll');
+     return true;`,
+  )
+
+  await check('the timeline has room to scroll in both directions', async () => {
+    // The checks below are meaningless against content that fits: a scroll that
+    // cannot move looks exactly like a handler that does not work.
+    const box = await evaluate(
+      cdp,
+      `const l = window.__lanes();
+       return { scrollW: l.scrollWidth, clientW: l.clientWidth,
+                scrollH: l.scrollHeight, clientH: l.clientHeight };`,
+    )
+    assert.ok(box.scrollW > box.clientW, `no horizontal overflow: ${JSON.stringify(box)}`)
+    assert.ok(box.scrollH > box.clientH, `no vertical overflow: ${JSON.stringify(box)}`)
+  })
+
+  await check('scrolling with no modifier travels time, not tracks', async () => {
+    // The bare gesture is horizontal because a timeline is a horizontal
+    // surface — the axis you move along all day should not need a modifier.
+    const state = await evaluate(
+      cdp,
+      `const l = window.__lanes();
+       l.scrollLeft = 0; l.scrollTop = 0;
+       await new Promise(r => setTimeout(r, 100));
+       const r = window.__wheel({ deltaY: 300 });
+       await new Promise(r => setTimeout(r, 200));
+       return { ...r, left: l.scrollLeft, top: l.scrollTop };`,
+    )
+    assert.ok(state.left > 0, 'the wheel should have moved the timeline sideways')
+    assert.equal(state.top, 0, 'and must not have moved it vertically')
+    assert.equal(
+      state.defaultPrevented,
+      true,
+      'unhandled, the page would scroll underneath the timeline as well',
+    )
+  })
+
+  await check('a trackpad sideways swipe travels time too', async () => {
+    const left = await evaluate(
+      cdp,
+      `const l = window.__lanes();
+       l.scrollLeft = 0;
+       await new Promise(r => setTimeout(r, 100));
+       window.__wheel({ deltaX: 240 });
+       await new Promise(r => setTimeout(r, 200));
+       return l.scrollLeft;`,
+    )
+    assert.ok(left > 0, 'deltaX is the only signal a two-finger swipe gives')
+  })
+
+  await check('Ctrl and scroll travels tracks, and the names come with it', async () => {
+    // A name column that has drifted out of step with its tracks is worse than
+    // no name column at all.
+    const state = await evaluate(
+      cdp,
+      `const l = window.__lanes();
+       l.scrollLeft = 0; l.scrollTop = 0;
+       await new Promise(r => setTimeout(r, 100));
+       const r = window.__wheel({ deltaY: 200, ctrlKey: true });
+       await new Promise(r => setTimeout(r, 300));
+       return { ...r, top: l.scrollTop, left: l.scrollLeft,
+                transform: document.querySelector('.tl-header-list').style.transform };`,
+    )
+    assert.ok(state.top > 0, 'Ctrl and scroll should have moved down the tracks')
+    assert.equal(state.left, 0, 'and must not have moved along time')
+    assert.equal(
+      state.transform,
+      `translateY(${-state.top}px)`,
+      'the track headers must follow the lanes exactly',
+    )
+    assert.equal(
+      state.defaultPrevented,
+      true,
+      'unhandled, Ctrl and wheel is Chromium page zoom and would zoom the whole app',
+    )
+  })
+
+  await check('the ruler stays put while the tracks scroll under it', async () => {
+    const state = await evaluate(
+      cdp,
+      `const l = window.__lanes();
+       l.scrollTop = 160;
+       await new Promise(r => setTimeout(r, 250));
+       const ruler = document.querySelector('.tl-ruler').getBoundingClientRect();
+       const box = l.getBoundingClientRect();
+       return { offset: Math.round(ruler.top - box.top), top: l.scrollTop };`,
+    )
+    assert.ok(state.top > 0, 'the timeline should be scrolled down for this to mean anything')
+    assert.equal(state.offset, 0, 'a timeline you cannot read the time off is not a timeline')
+  })
+
+  await check('Alt and scroll zooms', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { view } = window.__fluxDev;
+       const l = window.__lanes();
+       l.scrollTop = 0;
+       // Mid-range, so there is headroom in both directions to measure.
+       view.recordView({ timeline: { zoom: 150 } });
+       await new Promise(r => setTimeout(r, 250));
+       const before = view.getView().timeline.zoom;
+       const r = window.__wheel({ deltaY: -400, altKey: true });
+       await new Promise(r => setTimeout(r, 300));
+       const zoomedIn = view.getView().timeline.zoom;
+       window.__wheel({ deltaY: 400, altKey: true });
+       await new Promise(r => setTimeout(r, 300));
+       return { ...r, before, zoomedIn, zoomedOut: view.getView().timeline.zoom };`,
+    )
+    assert.ok(state.zoomedIn > state.before, `zoom went ${state.before} -> ${state.zoomedIn}`)
+    assert.ok(state.zoomedOut < state.zoomedIn, 'and the other way back out')
+    assert.equal(state.defaultPrevented, true)
+  })
+
+  await check('zooming keeps the time under the pointer where it was', async () => {
+    // Without an anchor the timeline slides out from under the pointer on every
+    // notch, and zooming in on a cut becomes zoom-then-hunt.
+    const state = await evaluate(
+      cdp,
+      `const { view } = window.__fluxDev;
+       const l = window.__lanes();
+       view.recordView({ timeline: { zoom: 150 } });
+       await new Promise(r => setTimeout(r, 250));
+       l.scrollLeft = 200;
+       await new Promise(r => setTimeout(r, 150));
+       const box = l.getBoundingClientRect();
+       const offsetInView = 260;
+       const timeBefore = (offsetInView + l.scrollLeft) / view.getView().timeline.zoom;
+
+       window.__wheel({ deltaY: -500, altKey: true, clientX: box.left + offsetInView });
+       await new Promise(r => setTimeout(r, 350));
+
+       const timeAfter = (offsetInView + l.scrollLeft) / view.getView().timeline.zoom;
+       return { timeBefore, timeAfter, drift: Math.abs(timeAfter - timeBefore) };`,
+    )
+    assert.ok(state.timeBefore > 0, 'the pointer should be over real time to begin with')
+    assert.ok(
+      state.drift < 0.02,
+      `the time under the pointer moved ${state.drift}s while zooming`,
+    )
+  })
+
+  await check('a new track lands on top, where it can be seen', async () => {
+    // Tracks are drawn in order and the first covers the others, so a video
+    // track added underneath everything would be invisible the moment anything
+    // is on V1 — which reads as the command having done nothing.
+    const state = await evaluate(
+      cdp,
+      `const { sequence, commands } = window.__fluxDev;
+       const before = sequence.getSequence().tracks.map(t => t.id);
+       await commands.run('timeline.addTrack');
+       await new Promise(r => setTimeout(r, 250));
+       const after = sequence.getSequence().tracks.map(t => t.id);
+       return { before, after,
+                headers: [...document.querySelectorAll('.track-name')].map(e => e.textContent) };`,
+    )
+    assert.equal(state.after.length, state.before.length + 1)
+    assert.ok(!state.before.includes(state.after[0]), 'the new track should be first')
+    assert.deepEqual(state.headers, state.after, 'and the header column should agree')
+  })
+
+  await check('the last track cannot be removed', async () => {
+    // A sequence with no tracks has nowhere to drop, and the timeline would be
+    // a panel you cannot use with no way back.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence({ name: 'One', frameRate: 24,
+         tracks: [{ id: 'V1', kind: 'video', name: 'V1' }], clips: [] });
+       await new Promise(r => setTimeout(r, 200));
+       const refused = sequence.removeTrack('V1');
+       return { refused, tracks: sequence.getSequence().tracks.length };`,
+    )
+    assert.equal(state.refused, false)
+    assert.equal(state.tracks, 1)
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

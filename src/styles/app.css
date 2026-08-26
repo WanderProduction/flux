@@ -334,9 +334,17 @@ kbd {
   border-right: 1px solid var(--flux-border);
   background: var(--flux-bg);
   z-index: 2;
+  /* The list is translated to follow the lanes; without this it would spill
+     out of the column when scrolled. */
+  overflow: hidden;
 }
+/* The spacer sits opposite the ruler and must stay put, so it paints over the
+   header list sliding up underneath it. */
 .tl-header-spacer {
+  position: relative;
+  z-index: 1;
   height: 22px;
+  background: var(--flux-bg);
   border-bottom: 1px solid var(--flux-border);
 }
 .tl-header {
@@ -352,10 +360,14 @@ kbd {
   color: var(--flux-text-dim);
 }
 
+/*
+ * Scrolls both ways. The wheel handler in TimelinePanel drives it: bare scroll
+ * travels time, Ctrl travels tracks, Alt zooms. The scrollbars stay as the
+ * honest indicator of how much there is either side of the view.
+ */
 .tl-scroll {
   flex: 1;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
   min-width: 0;
 }
 .tl-content {
@@ -363,8 +375,12 @@ kbd {
   min-height: 100%;
 }
 
+/* Sticky so the ruler survives scrolling down through tracks — a timeline you
+   cannot read the time off is not a timeline. */
 .tl-ruler {
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 2;
   height: 22px;
   border-bottom: 1px solid var(--flux-border);
   background: var(--flux-bg);
@@ -396,11 +412,12 @@ kbd {
 .tl-playhead-grip {
   position: absolute;
   top: 0;
-  left: -4px;
   width: 9px;
   height: 9px;
+  margin-left: -4.5px;
   clip-path: polygon(0 0, 100% 0, 50% 100%);
   background: var(--flux-accent);
+  pointer-events: none;
 }
 .tl-tick {
   position: absolute;

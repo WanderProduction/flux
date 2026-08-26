@@ -197,7 +197,10 @@ export async function resetProject(cdp) {
      if (!assets.isLoaded()) throw new Error('asset store never finished loading');
 
      assets.removeAssets(assets.getAssets().map(a => a.id));
-     sequence.clearSequence();
+     // setSequence(null) rather than clearSequence(): tracks can be added now,
+     // and a suite that added ten of them would otherwise hand the next suite a
+     // timeline of a completely different height.
+     sequence.setSequence(null);
      // The workspace is part of the document now, so a suite that switched it
      // would otherwise hand the next suite a layout with no Content Browser.
      view.setView(null);
