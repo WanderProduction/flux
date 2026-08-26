@@ -12,6 +12,7 @@ import {
   listSubfolders,
 } from './filesystem.js'
 import { serveFile } from './assetServer.js'
+import { pruneCache, readIndex, sourceToken, writeIndex } from './mediaCache.js'
 import { copyIntoImports, createProject, isProject, openProject, saveProject } from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
 
@@ -292,6 +293,37 @@ ipcMain.handle('project:copyIntoImports', (_e, root, sourcePath) =>
   copyIntoImports(root, sourcePath),
 )
 
+/**
+ * The media cache lives with the app's data, not with the project.
+ *
+ * It holds demuxed sample tables — derived from the media, rebuildable from it,
+ * and shared by every project that cuts the same footage. See
+ * electron/mediaCache.js for why that is the right side of the line.
+ */
+const mediaCachePath = () => path.join(app.getPath('userData'), 'media-cache')
+
+/**
+ * A stat, and deliberately not a read.
+ *
+ * The renderer asks this before every open, including the ones its own
+ * in-memory index answers — so it has to be the cheapest question in the
+ * system. Bundling the entry into the reply would mean reading a megabyte off
+ * disk to tell a caller that already has the answer that it still holds.
+ */
+ipcMain.handle('media:sourceToken', (_e, filePath) => sourceToken(filePath))
+/**
+ * The cached index, but only if the file still matches `token`.
+ *
+ * Uint8Array survives the structured clone, so the bytes arrive as bytes with
+ * no base64 round trip through a string.
+ */
+ipcMain.handle('media:readIndex', (_e, filePath, token) =>
+  readIndex(mediaCachePath(), filePath, token),
+)
+ipcMain.handle('media:writeIndex', (_e, filePath, token, payload) =>
+  writeIndex(mediaCachePath(), filePath, token, payload),
+)
+
 ipcMain.handle('dialog:pickProjectFile', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const result = await dialog.showOpenDialog(win, {
@@ -345,6 +377,12 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+
+  // After the window, and not awaited: the cache working is not a condition of
+  // the app starting, and a directory full of indexes to stat is exactly the
+  // kind of thing that has no business happening before the first paint.
+  pruneCache(mediaCachePath()).catch(() => {})
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

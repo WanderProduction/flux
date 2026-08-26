@@ -1,5 +1,6 @@
 import { assetUrl } from '../fsBridge'
-import { keyframeAt, readVideoTrack, sampleAt } from '../../../shared/mp4.js'
+import { keyframeAt, sampleAt } from '../../../shared/mp4.js'
+import { trackFor, type VideoTrack } from './indexCache'
 
 /**
  * One decoded video file, addressed by time.
@@ -64,20 +65,6 @@ export interface SourceInfo {
   frames: number
 }
 
-interface Mp4Track {
-  codec: string
-  description: Uint8Array
-  width: number
-  height: number
-  duration: number
-  count: number
-  offset: Float64Array
-  bytes: Uint32Array
-  dts: Float64Array
-  pts: Float64Array
-  key: Uint8Array
-}
-
 export type OpenFailure =
   | 'no-webcodecs'
   | 'unreadable'
@@ -89,28 +76,10 @@ export function hasWebCodecs(): boolean {
   return typeof VideoDecoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined'
 }
 
-function rangeReader(url: string) {
-  let total: number | null = null
-  return {
-    async size(): Promise<number> {
-      if (total !== null) return total
-      const res = await fetch(url, { method: 'HEAD' })
-      if (!res.ok) throw new Error(`HEAD ${res.status}`)
-      total = Number(res.headers.get('Content-Length') ?? 0)
-      return total
-    },
-    async read(start: number, end: number): Promise<Uint8Array> {
-      const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } })
-      if (!res.ok && res.status !== 206) throw new Error(`GET ${res.status}`)
-      return new Uint8Array(await res.arrayBuffer())
-    },
-  }
-}
-
 export class VideoSource {
   private constructor(
     private readonly url: string,
-    private readonly track: Mp4Track,
+    private readonly track: VideoTrack,
   ) {}
 
   private decoder: VideoDecoder | null = null
@@ -142,15 +111,12 @@ export class VideoSource {
     if (!hasWebCodecs()) return { ok: false, reason: 'no-webcodecs' }
 
     const url = assetUrl(path)
-    let result
-    try {
-      result = await readVideoTrack(rangeReader(url))
-    } catch {
-      return { ok: false, reason: 'unreadable' }
-    }
+    // Where the index comes from — memory, disk, or the file — is not this
+    // class's business. See media/indexCache.ts.
+    const result = await trackFor(path)
     if (!result.ok) return { ok: false, reason: result.reason }
 
-    const track = result.track as Mp4Track
+    const track = result.track
     const config: VideoDecoderConfig = {
       codec: track.codec,
       description: track.description,
@@ -244,7 +210,7 @@ export class VideoSource {
     this.discardBuffer()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
-    this.next = keyframeAt(this.track as never, time)
+    this.next = keyframeAt(this.track, time)
   }
 
   /**
@@ -265,7 +231,7 @@ export class VideoSource {
   private async feed(time: number): Promise<void> {
     const track = this.track
     const mine = this.generation
-    const wanted = Math.min(sampleAt(track as never, time) + LOOKAHEAD_FRAMES, track.count - 1)
+    const wanted = Math.min(sampleAt(track, time) + LOOKAHEAD_FRAMES, track.count - 1)
 
     while (
       !this.closed &&
@@ -326,7 +292,7 @@ export class VideoSource {
    */
   private trim() {
     if (this.buffer.length === 0) return
-    const keepFrom = Math.round(this.track.pts[sampleAt(this.track as never, this.wantTime)] * 1e6)
+    const keepFrom = Math.round(this.track.pts[sampleAt(this.track, this.wantTime)] * 1e6)
 
     let drop = 0
     while (drop < this.buffer.length && (this.buffer[drop].timestamp ?? 0) < keepFrom) drop += 1
@@ -362,7 +328,7 @@ export class VideoSource {
      * jumped somewhere else entirely — and only the second needs the decoder
      * torn down and restarted from a keyframe.
      */
-    const wanted = sampleAt(this.track as never, time)
+    const wanted = sampleAt(this.track, time)
     /*
      * Keep going only if the frame wanted is *near* where the decoder already
      * is; otherwise start again from the keyframe before it.
@@ -435,7 +401,7 @@ export class VideoSource {
    * success. Which looks exactly like a seek that did not work.
    */
   private pick(time: number): VideoFrame | null {
-    const index = sampleAt(this.track as never, time)
+    const index = sampleAt(this.track, time)
     const want = Math.round(this.track.pts[index] * 1e6)
     for (const frame of this.buffer) {
       if (frame.timestamp === want) return frame

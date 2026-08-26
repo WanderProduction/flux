@@ -39,6 +39,19 @@ contextBridge.exposeInMainWorld('flux', {
       }
     },
   },
+  media: {
+    /**
+     * Which version of a file this is: its size and modification time.
+     *
+     * Everything the index cache remembers is keyed on this, and it is carried
+     * from the lookup through to the write so an index built from one set of
+     * bytes can never be stored against another. See electron/mediaCache.js.
+     */
+    sourceToken: (filePath) => ipcRenderer.invoke('media:sourceToken', filePath),
+    readIndex: (filePath, token) => ipcRenderer.invoke('media:readIndex', filePath, token),
+    writeIndex: (filePath, token, bytes) =>
+      ipcRenderer.invoke('media:writeIndex', filePath, token, bytes),
+  },
   project: {
     create: (root, name) => ipcRenderer.invoke('project:create', root, name),
     open: (root) => ipcRenderer.invoke('project:open', root),

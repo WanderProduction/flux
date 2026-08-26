@@ -22,6 +22,7 @@
  */
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -580,6 +581,185 @@ try {
     )
     assert.equal(state.landed, 30, `only ${state.landed} of 30 scrubs reached their frame`)
     assert.ok(state.ms < 30000, `thirty scrubs took ${state.ms}ms`)
+  })
+
+  // ── the index, kept rather than rebuilt ──────────────────────
+
+  /*
+   * Demuxing is not what is slow. Getting at the bytes to demux is: the moov
+   * is found by stepping through the file's boxes, and every step is a ranged
+   * request through flux-asset, which is an IPC round trip. Measured, six of
+   * them — 13ms on a long file before a single frame is read, paid again every
+   * time the Viewer opens a source, which is every time the playhead crosses a
+   * cut.
+   *
+   * So what these check is not "is it faster" but the two things that make
+   * being faster worth anything: that a restored index is used *instead of*
+   * reading the file, and that it is indistinguishable from one that was.
+   */
+
+  /** Opens a source through the cache and reports where the index came from. */
+  const openCounting = (file, before = '') => `
+    const { indexCache, videoSource } = window.__fluxDev;
+    ${before}
+    const r = await videoSource.VideoSource.open(${file});
+    if (r.ok) r.source.close();
+    return { ok: r.ok, reason: r.reason, stats: indexCache.indexCacheStats() };`
+
+  /**
+   * Leaves `file` cached on disk, and waits until it really is.
+   *
+   * The app stores an index without waiting for it — the caller has the index
+   * in hand and is trying to show a frame. So a check that wants the disk
+   * layer has to wait for the write here instead of racing it, or it passes on
+   * whatever a previous run happened to leave behind and fails the first time
+   * it is run against an empty cache.
+   */
+  const ENSURE_STORED = (file) => `
+    {
+      indexCache.clearIndexMemory();
+      const warm = await videoSource.VideoSource.open(${file});
+      if (!warm.ok) throw new Error('could not open: ' + warm.reason);
+      warm.source.close();
+      if (indexCache.indexCacheStats().demux > 0) {
+        for (let i = 0; i < 200; i++) {
+          if (indexCache.indexCacheStats().stored > 0) break;
+          await new Promise(r => setTimeout(r, 20));
+        }
+        if (indexCache.indexCacheStats().stored === 0) throw new Error('index never stored');
+      }
+    }`
+
+  await check('a source opened three times is only fetched once', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { indexCache, videoSource } = window.__fluxDev;
+       indexCache.clearIndexMemory();
+       for (let i = 0; i < 3; i++) {
+         const r = await videoSource.VideoSource.open(${LONG});
+         if (r.ok) r.source.close();
+       }
+       return indexCache.indexCacheStats();`,
+    )
+    // One fetch of some kind and then nothing — whether the first open came
+    // off disk or out of the file depends on what a previous run left behind,
+    // and is the next check's business, not this one's.
+    assert.equal(
+      state.demux + state.disk,
+      1,
+      `three opens cost ${state.demux} reads and ${state.disk} cache loads`,
+    )
+    assert.equal(state.memory, 2, `${state.memory} of the opens were answered from memory`)
+  })
+
+  await check('a restored index comes off disk rather than out of the file', async () => {
+    // Emptying the memory layer is the only way to reach the one behind it —
+    // without this the disk path would never be exercised at all, and the
+    // check above would be the only one that ever ran.
+    const state = await evaluate(
+      cdp,
+      openCounting(LONG, `${ENSURE_STORED(LONG)} indexCache.clearIndexMemory();`),
+    )
+    assert.equal(state.ok, true, state.reason)
+    assert.equal(state.stats.disk, 1, 'the index did not come from the cache')
+    assert.equal(state.stats.demux, 0, 'the file was read again anyway')
+  })
+
+  await check('a restored index shows exactly the frames the original did', async () => {
+    // The one that matters. A cache that is fast and subtly different is worse
+    // than no cache: the same file would play one way on first open and
+    // another way on second, and nothing would point back here.
+    const state = await evaluate(
+      cdp,
+      `const { indexCache, videoSource } = window.__fluxDev;
+       const times = [0, 4.44, 19.2, 37, 51.75, 12.5];
+
+       const walk = async () => {
+         const r = await videoSource.VideoSource.open(${LONG});
+         if (!r.ok) return { error: r.reason };
+         const seen = [];
+         for (const t of times) {
+           const frame = await r.source.frameFor(t);
+           seen.push(frame ? frame.timestamp : null);
+         }
+         const info = r.source.info;
+         r.source.close();
+         return { seen, info };
+       };
+
+       indexCache.clearIndexMemory();
+       const fresh = await walk();          // read from the file
+       ${ENSURE_STORED(LONG)}
+       indexCache.clearIndexMemory();
+       const restored = await walk();       // read from the cache
+       return { fresh, restored, stats: indexCache.indexCacheStats() };`,
+    )
+    assert.equal(state.fresh.error, undefined, state.fresh.error)
+    assert.equal(state.restored.error, undefined, state.restored.error)
+    // Prove the second walk really did take the other path, or this compares
+    // one demux against another and passes for nothing.
+    assert.equal(state.stats.disk, 1, 'the second walk did not use the cache')
+    assert.ok(
+      state.fresh.seen.every((t) => t !== null),
+      `some frames never arrived: ${state.fresh.seen}`,
+    )
+    assert.deepEqual(state.restored.seen, state.fresh.seen, 'different frames came back')
+    assert.deepEqual(state.restored.info, state.fresh.info, 'the track described itself differently')
+  })
+
+  await check('a file the demuxer will not read is not read again', async () => {
+    // A refusal costs the same round trips as an answer, and the Viewer asks
+    // on every clip change. Remembered for the session — and only for the
+    // session, since a refusal has nothing to check itself against later.
+    const webm = JSON.stringify(path.join(MEDIA_DIR, 'render.webm'))
+    const state = await evaluate(
+      cdp,
+      `const { indexCache, videoSource } = window.__fluxDev;
+       indexCache.clearIndexMemory();
+       const reasons = [];
+       for (let i = 0; i < 3; i++) {
+         const r = await videoSource.VideoSource.open(${webm});
+         if (r.ok) r.source.close();
+         reasons.push(r.ok ? 'opened' : r.reason);
+       }
+       return { reasons, stats: indexCache.indexCacheStats() };`,
+    )
+    assert.deepEqual(state.reasons, ['no-moov', 'no-moov', 'no-moov'])
+    assert.equal(state.stats.demux, 1, `the webm was read ${state.stats.demux} times`)
+    assert.equal(state.stats.refused, 2, 'the refusal was not remembered')
+  })
+
+  await check('a file that has changed is indexed again, not trusted', async () => {
+    // The failure this prevents is silent: an index for bytes that are no
+    // longer there sends the decoder into the middle of other frames.
+    const scratch = path.join(os.tmpdir(), `flux-recut-${process.pid}.mp4`)
+    await fs.copyFile(path.join(MEDIA_DIR, 'clipA.mp4'), scratch)
+    const file = JSON.stringify(scratch)
+    try {
+      const first = await evaluate(cdp, openCounting(file, 'indexCache.clearIndexMemory();'))
+      assert.equal(first.ok, true, first.reason)
+      assert.equal(first.stats.demux, 1)
+      // The write happens after the index is stored, so wait for the store
+      // rather than racing it — it is deliberately not awaited in the app.
+      await evaluate(
+        cdp,
+        `const { indexCache } = window.__fluxDev;
+         for (let i = 0; i < 100; i++) {
+           if (indexCache.indexCacheStats().stored > 0) break;
+           await new Promise(r => setTimeout(r, 20));
+         }
+         return indexCache.indexCacheStats().stored;`,
+      )
+
+      await fs.appendFile(scratch, Buffer.alloc(2048))
+
+      const second = await evaluate(cdp, openCounting(file, 'indexCache.clearIndexMemory();'))
+      assert.equal(second.ok, true, second.reason)
+      assert.equal(second.stats.disk, 0, 'a stale index was handed back')
+      assert.equal(second.stats.demux, 1, 'the changed file was not read again')
+    } finally {
+      await fs.rm(scratch, { force: true })
+    }
   })
 
   await check('a container the demuxer will not read falls back to the element', async () => {
