@@ -2,7 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { commands } from '../kernel/commands'
 import { ensureProbed, getAssets, subscribeAssets, type Asset } from '../kernel/assets'
-import { isAssetDrag, readAssetDragPayload } from '../kernel/dragAssets'
+import {
+  isAssetDrag,
+  isDroppableDrag,
+  isFileDrag,
+  isNativeFileDrag,
+  readAssetDragPayload,
+  readFileDragPayload,
+  readNativeFileDrag,
+  type DraggedFile,
+} from '../kernel/dragAssets'
+import { importFiles } from '../kernel/importPipeline'
+import {
+  formatTimecode,
+  getTime,
+  isPlaying,
+  seek,
+  subscribePlayback,
+} from '../kernel/playback'
 import {
   addClip,
   findFreeStart,
@@ -15,7 +32,8 @@ import {
   type SequenceState,
   type Track,
 } from '../kernel/sequence'
-import { getView, recordView } from '../kernel/view'
+import { getView, recordView, subscribeView } from '../kernel/view'
+import { getAssets as allAssets } from '../kernel/assets'
 import { PanelFrame } from './PanelFrame'
 import { useThumbnail } from './useThumbnail'
 
@@ -52,11 +70,19 @@ function tickInterval(pixelsPerSecond: number): number {
   return candidates.find((step) => step * pixelsPerSecond >= 64) ?? 900
 }
 
-function formatTime(seconds: number): string {
-  const whole = Math.floor(seconds)
-  const m = Math.floor(whole / 60)
-  const s = whole % 60
-  return `${m}:${String(s).padStart(2, '0')}`
+/**
+ * A ruler label, at the precision the tick spacing actually needs.
+ *
+ * Zoomed in far enough, ticks fall every half second — and a label that only
+ * counts whole seconds then prints `0:01` twice in a row, which reads as a
+ * rendering bug and makes the ruler useless for placing anything.
+ */
+function formatTime(seconds: number, step = 1): string {
+  const m = Math.floor(seconds / 60)
+  const s = seconds - m * 60
+  if (step >= 1) return `${m}:${String(Math.round(s)).padStart(2, '0')}`
+  const decimals = step >= 0.1 ? 2 : 3
+  return `${m}:${s.toFixed(decimals).padStart(decimals + 3, '0')}`
 }
 
 interface DropPreview {
@@ -73,7 +99,18 @@ export function TimelinePanel() {
   const [zoom, setZoom] = useState(() => clampZoom(getView().timeline.zoom || DEFAULT_ZOOM))
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [preview, setPreview] = useState<DropPreview | null>(null)
+  const [time, setTime] = useState(getTime)
+  const [playing, setPlaying] = useState(isPlaying)
   const lanesRef = useRef<HTMLDivElement>(null)
+
+  useEffect(
+    () =>
+      subscribePlayback(() => {
+        setTime(getTime())
+        setPlaying(isPlaying())
+      }),
+    [],
+  )
 
   useEffect(() => {
     setSequence({ ...getSequence() })
@@ -85,6 +122,29 @@ export function TimelinePanel() {
   // Recorded, never marked dirty: zooming is not an edit. It is written out
   // with the next save. See kernel/view.ts.
   useEffect(() => recordView({ timeline: { zoom } }), [zoom])
+
+  /*
+   * Follow the view when it names a zoom.
+   *
+   * Seeding from the view at mount is only correct while every view change is
+   * followed by a remount, which is true today because the shell is keyed on
+   * the project root. That is an invariant one refactor away from quietly
+   * breaking, and when it breaks the failure is a saved zoom that does not
+   * match the zoom on screen.
+   *
+   * Only that direction. Writing the panel's zoom back when the view has none
+   * looks like tidiness and is not: resetView() fires while this panel is still
+   * mounted, so the panel would immediately undo it. Zero means "never set",
+   * which the seed above already handles.
+   */
+  useEffect(
+    () =>
+      subscribeView(() => {
+        const stored = getView().timeline.zoom
+        if (stored > 0 && Math.abs(stored - zoom) > 0.01) setZoom(clampZoom(stored))
+      }),
+    [zoom],
+  )
 
   const assetById = useMemo(() => {
     const map = new Map<string, Asset>()
@@ -110,7 +170,7 @@ export function TimelinePanel() {
 
   const onDragOver = useCallback(
     (event: React.DragEvent, track: Track) => {
-      if (!isAssetDrag(event)) return
+      if (!isDroppableDrag(event)) return
       // Without preventDefault the browser refuses the drop entirely.
       event.preventDefault()
       event.dataTransfer.dropEffect = 'copy'
@@ -123,15 +183,44 @@ export function TimelinePanel() {
     [timeAt],
   )
 
+  /**
+   * Turns whatever was dropped into asset ids, importing first if it has to.
+   *
+   * A file dragged from a folder, or straight out of Explorer, is not in the
+   * project yet — so this is where the import happens, question and all. Must
+   * read the DataTransfer synchronously: it goes inert the moment the drop
+   * handler yields, and the copy-or-link dialog is a very long yield.
+   */
+  const idsFromDrop = useCallback(async (event: React.DragEvent): Promise<string[]> => {
+    if (isAssetDrag(event)) return readAssetDragPayload(event)
+
+    let files: DraggedFile[] = []
+    if (isFileDrag(event)) files = readFileDragPayload(event)
+    else if (isNativeFileDrag(event)) files = readNativeFileDrag(event)
+    if (files.length === 0) return []
+
+    const added = await importFiles(files)
+    const ids = added.map((asset) => asset.id)
+
+    // Dropping a file that is already in the project still has to place a clip
+    // — importing is a no-op there, so `added` will not contain it.
+    const existing = allAssets()
+    for (const file of files) {
+      const hit = existing.find((asset) => asset.path === file.path)
+      if (hit && !ids.includes(hit.id)) ids.push(hit.id)
+    }
+    return ids
+  }, [])
+
   const onDrop = useCallback(
     async (event: React.DragEvent, track: Track) => {
-      if (!isAssetDrag(event)) return
+      if (!isDroppableDrag(event)) return
       event.preventDefault()
       setPreview(null)
 
-      const ids = readAssetDragPayload(event)
-      if (ids.length === 0) return
       const dropTime = timeAt(event.clientX)
+      const ids = await idsFromDrop(event)
+      if (ids.length === 0) return
 
       // Sequential so several assets dropped together land end to end rather
       // than all resolving against the same free slot.
@@ -148,6 +237,24 @@ export function TimelinePanel() {
         })
         if (clip) cursor = clip.start + clip.duration
       }
+    },
+    [timeAt, idsFromDrop],
+  )
+
+  // ── scrubbing ─────────────────────────────────────────────────
+
+  /** Click or drag anywhere on the ruler to move the playhead. */
+  const beginScrub = useCallback(
+    (event: React.PointerEvent) => {
+      event.preventDefault()
+      seek(snapToFrame(timeAt(event.clientX)))
+      const onMove = (move: PointerEvent) => seek(snapToFrame(timeAt(move.clientX)))
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
     },
     [timeAt],
   )
@@ -202,6 +309,10 @@ export function TimelinePanel() {
           <span className="tool-value tool-value--dim">
             {sequence.clips.length} clip{sequence.clips.length === 1 ? '' : 's'}
           </span>
+          <span className="tool-sep" />
+          <span className="tool-value tool-value--mono">
+            {formatTimecode(time, sequence.frameRate)}
+          </span>
           <span className="cb-toolbar-end">
             {selected.size > 0 && (
               <button className="cb-btn" onClick={deleteSelected}>
@@ -238,12 +349,12 @@ export function TimelinePanel() {
 
         <div className="tl-scroll" ref={lanesRef}>
           <div className="tl-content" style={{ width: contentWidth }}>
-            <div className="tl-ruler">
+            <div className="tl-ruler" onPointerDown={beginScrub}>
               {Array.from({ length: tickCount }, (_, i) => {
                 const seconds = i * step
                 return (
                   <div className="tl-tick" key={i} style={{ left: seconds * zoom }}>
-                    <span>{formatTime(seconds)}</span>
+                    <span>{formatTime(seconds, step)}</span>
                   </div>
                 )
               })}
@@ -289,11 +400,19 @@ export function TimelinePanel() {
                 )}
               </div>
             ))}
+
+            {/* One playhead over every lane, drawn last so nothing covers it. */}
+            <div
+              className={`tl-playhead${playing ? ' tl-playhead--live' : ''}`}
+              style={{ left: time * zoom }}
+            >
+              <span className="tl-playhead-grip" />
+            </div>
           </div>
         </div>
 
         {sequence.clips.length === 0 && (
-          <div className="tl-hint">Drag a video from the Content Browser onto a track</div>
+          <div className="tl-hint">Drag media onto a track — from the browser, or from Explorer</div>
         )}
       </div>
     </PanelFrame>

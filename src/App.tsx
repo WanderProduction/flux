@@ -8,6 +8,7 @@ import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
 import { getView, recordView } from './kernel/view'
 import { CommandPalette } from './shell/CommandPalette'
+import { ImportChoiceHost } from './shell/ImportChoiceHost'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
 import {
   closeProject,
@@ -292,6 +293,7 @@ function Workspace({ project }: { project: Project }) {
         onClose={() => setPaletteOpen(false)}
         lookupChord={keymap.lookup}
       />
+      <ImportChoiceHost />
     </div>
   )
 }

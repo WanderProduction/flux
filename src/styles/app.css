@@ -110,9 +110,18 @@ kbd {
   color: var(--flux-text-dim);
 }
 
+/*
+ * The dock does not run into the window edge.
+ *
+ * Panels are already dense with borders; letting the outermost one share an
+ * edge with the OS chrome makes the whole app read as one flat sheet. A small
+ * gutter is what separates "the application" from "the desktop behind it".
+ */
 .dock-host {
   min-height: 0;
   position: relative;
+  padding: 0 var(--flux-app-gutter);
+  box-sizing: border-box;
 }
 
 .statusbar {
@@ -125,6 +134,9 @@ kbd {
   font-size: var(--flux-text-sm);
   color: var(--flux-text-faint);
 }
+/* Both halves are flex, or the scope and the save state run together into
+   "Sequence 1unsaved changes". */
+.status-left,
 .status-right {
   display: flex;
   align-items: center;
@@ -218,6 +230,19 @@ kbd {
 .viewer-frame-inner {
   display: grid;
   place-items: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Fits the frame without cropping, whatever the source's aspect ratio is. */
+.viewer-media {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  display: block;
+  background: #000;
 }
 .viewer-placeholder {
   color: var(--flux-text-faint);
@@ -244,18 +269,54 @@ kbd {
 .tc--dim {
   color: var(--flux-text-faint);
 }
+.transport-button {
+  width: 26px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.transport-button:hover:not(:disabled) {
+  border-color: var(--flux-accent-dim);
+  color: var(--flux-accent);
+}
+.transport-button:disabled {
+  color: var(--flux-text-faint);
+  cursor: default;
+}
+
 .transport-bar {
   position: relative;
   flex: 1;
   height: 3px;
   border-radius: 2px;
   background: var(--flux-bg-active);
+  cursor: pointer;
+  /* A 3px strip is hard to hit; the padding is the target, the strip is the
+     picture. */
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  background-clip: padding-box;
+}
+.transport-progress {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--flux-accent-dim);
 }
 .transport-playhead {
   position: absolute;
   top: -4px;
   width: 2px;
   height: 11px;
+  margin-left: -1px;
   background: var(--flux-accent);
 }
 
@@ -307,6 +368,39 @@ kbd {
   height: 22px;
   border-bottom: 1px solid var(--flux-border);
   background: var(--flux-bg);
+  cursor: ew-resize;
+  user-select: none;
+}
+
+/*
+ * One line down the whole timeline.
+ *
+ * pointer-events: none matters more than it looks — the playhead sits over
+ * every lane, and a playhead that swallowed clicks would make the clip
+ * underneath it unselectable and block drops at exactly the time you are
+ * looking at.
+ */
+.tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--flux-accent);
+  pointer-events: none;
+  z-index: 3;
+}
+.tl-playhead--live {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--flux-accent) 60%, transparent);
+}
+.tl-playhead-grip {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 9px;
+  height: 9px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  background: var(--flux-accent);
 }
 .tl-tick {
   position: absolute;
@@ -823,6 +917,12 @@ kbd {
   color: #cdf5e4;
 }
 
+/* An asset whose file was left where it was, so the project does not own it. */
+.card-badge--linked {
+  background: color-mix(in srgb, var(--flux-driver) 26%, rgba(0, 0, 0, 0.65));
+  color: #ded0ff;
+}
+
 .cb-btn {
   padding: 3px 9px;
   border: 1px solid var(--flux-border);
@@ -853,14 +953,29 @@ kbd {
   flex: 0 0 auto;
 }
 
+/*
+ * Deep paths scroll rather than squeeze.
+ *
+ * Flex items shrink by default, so a path with more crumbs than room used to
+ * compress every one of them and clip the last to a single letter - the one
+ * crumb that says where you actually are. Pinning their size and scrolling the
+ * strip keeps the current folder whole; the effect in the panel keeps it in
+ * view.
+ */
 .cb-crumbs {
   display: flex;
   align-items: center;
   gap: 1px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   min-width: 0;
+  scrollbar-width: none;
+}
+.cb-crumbs::-webkit-scrollbar {
+  display: none;
 }
 .cb-crumb {
+  flex: 0 0 auto;
   border: 0;
   background: transparent;
   color: var(--flux-text-dim);
@@ -1587,27 +1702,6 @@ kbd {
 
 /* ── Copy progress ─────────────────────────────────────────── */
 
-.cb-progress {
-  padding: 5px 12px;
-  border-bottom: 1px solid var(--flux-border);
-  background: var(--flux-bg);
-  color: var(--flux-accent);
-  font-size: var(--flux-text-sm);
-  font-family: var(--flux-font-mono);
-}
-.cb-banner--error {
-  border-color: var(--flux-warn);
-  color: var(--flux-warn);
-  cursor: pointer;
-}
-
-/* The two trees in the Project section, kept visually distinct. */
-.cb-subtree--assets {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--flux-border);
-}
-
 /* Unsaved-changes marker on the project chip. */
 .project-chip--dirty {
   border-color: var(--flux-warn);
@@ -1618,4 +1712,42 @@ kbd {
   font-size: 9px;
   line-height: 1;
   color: var(--flux-warn);
+}
+
+/* ── Import status, app level ──────────────────────────────── */
+
+/*
+ * Raised above the dock rather than shown inside the Content Browser: an import
+ * can now be started by dropping a file on the Timeline, so the panel that
+ * triggered it is not necessarily the panel in front.
+ */
+.import-progress,
+.import-error {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--flux-statusbar-h) + 12px);
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(680px, 80vw);
+  padding: 6px 14px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.import-error {
+  border-color: var(--flux-danger, #d05f5f);
+  color: #ffd7d7;
+  cursor: pointer;
+}
+.import-error-dismiss {
+  color: var(--flux-text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }

@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 /**
  * The only bridge between the renderer and the OS.
@@ -24,6 +24,20 @@ contextBridge.exposeInMainWorld('flux', {
      * being spelled out again in the UI.
      */
     assetUrl: (filePath) => `flux-asset://local/?p=${encodeURIComponent(filePath)}`,
+    /**
+     * The real path behind a File dropped in from Explorer.
+     *
+     * Electron removed File.path, so this is the only way a drop from outside
+     * the app can name what was dropped. It reads a path the user already
+     * chose by dragging it - it cannot browse, and it opens nothing.
+     */
+    pathForFile: (file) => {
+      try {
+        return webUtils.getPathForFile(file)
+      } catch {
+        return ''
+      }
+    },
   },
   project: {
     create: (root, name) => ipcRenderer.invoke('project:create', root, name),

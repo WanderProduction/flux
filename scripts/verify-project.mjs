@@ -158,18 +158,17 @@ try {
     assert.equal(doc.assets.length, 2, 'the second import should be in the saved document')
   })
 
-  await check('the document carries the workspace, zoom and browsing position', async () => {
+  await check('the document carries the view, and the view is not unsaved work', async () => {
     // "Save the project" has to mean the arrangement too, the way a .prproj
-    // reopens where you left it - not only the assets and the cuts.
+    // reopens where you left it -- not only the assets and the cuts.
     const written = await evaluate(
       cdp,
       `const { view, project } = window.__fluxDev;
        view.recordView({
-         workspace: 'nodes',
          timeline: { zoom: 123 },
          browser: { location: { type: 'folder', path: ${js(MEDIA_DIR)} } },
        });
-       await new Promise(r => setTimeout(r, 100));
+       await new Promise(r => setTimeout(r, 150));
        const before = project.isDirty();
        await project.saveProject();
        return { before, after: project.isDirty() };`,
@@ -177,45 +176,50 @@ try {
     assert.equal(written.before, false, 'rearranging the app is not unsaved work')
 
     const doc = JSON.parse(await fs.readFile(DOC_A, 'utf8'))
-    assert.equal(doc.view.workspace, 'nodes')
+    assert.equal(doc.view.workspace, 'edit')
     assert.equal(doc.view.timeline.zoom, 123)
     assert.equal(doc.view.browser.location.path, MEDIA_DIR)
   })
 
-  await check('reopening restores the workspace, zoom and browsing position', async () => {
+  await check('reopening restores the zoom and the browsing position', async () => {
     const state = await evaluate(
       cdp,
-      `const { project, view, commands } = window.__fluxDev;
+      `const { project, view } = window.__fluxDev;
        project.closeProject();
        for (let i = 0; i < 40 && !document.querySelector('.launcher'); i++)
          await new Promise(r => setTimeout(r, 100));
-       const whileClosed = view.getView().workspace;
+       const whileClosed = view.getView().timeline.zoom;
 
        const r = await project.openProject(${js(projectA)});
        if (!r.ok) throw new Error(r.error);
        for (let i = 0; i < 40 && !document.querySelector('.app'); i++)
          await new Promise(r => setTimeout(r, 100));
        await new Promise(r => setTimeout(r, 400));
-       const state = { whileClosed, view: view.getView(), dirty: project.isDirty(),
-                       tab: document.querySelector('.ws-tab--active')?.textContent ?? '' };
-
-       // Hand the app back the way it was found, on disk as well as on screen:
-       // the Nodes workspace opens no Content Browser, and every later check in
-       // this suite that reopens Alpha would land in it again.
-       await commands.run('workspace.switch.edit');
-       await new Promise(r => setTimeout(r, 300));
-       await project.saveProject();
-       return state;`,
+       return { whileClosed, view: view.getView(), dirty: project.isDirty() };`,
     )
-    assert.equal(state.whileClosed, 'edit', 'closing drops back to the default view')
-    assert.equal(state.view.workspace, 'nodes')
+    assert.equal(state.whileClosed, 0, 'closing drops back to the default view')
     assert.equal(state.view.timeline.zoom, 123)
     assert.equal(state.view.browser.location.path, MEDIA_DIR)
-    assert.ok(
-      state.tab.includes('Nodes'),
-      `the restored workspace should be on screen, not just in memory (tab was "${state.tab}")`,
-    )
     assert.equal(state.dirty, false, 'restoring a view is not unsaved work either')
+  })
+
+  await check('a workspace the build does not have falls back rather than blanking', async () => {
+    // A hand-edited document, or one from a build with more workspaces than
+    // this one, must not leave the shell with no layout at all. (The check that
+    // a *known* workspace round-trips belongs here too, and comes back with the
+    // second workspace -- there is only one to switch to today.)
+    const state = await evaluate(
+      cdp,
+      `const { view } = window.__fluxDev;
+       view.setView({ workspace: 'nodes', timeline: { zoom: 90 } });
+       await new Promise(r => setTimeout(r, 300));
+       return { workspace: view.getView().workspace,
+                tab: document.querySelector('.ws-tab--active')?.textContent ?? '',
+                panels: [...document.querySelectorAll('.panel')].length };`,
+    )
+    assert.equal(state.workspace, 'nodes', 'the document said so, and is reported honestly')
+    assert.ok(state.tab.includes('Edit'), `the shell should fall back to Edit, tab was "${state.tab}"`)
+    assert.ok(state.panels > 0, 'the workspace must never end up empty')
   })
 
   await check('closing a project returns to the launcher', async () => {

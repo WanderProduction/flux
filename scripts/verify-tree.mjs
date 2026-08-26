@@ -57,15 +57,24 @@ const HELPERS = String.raw`
       return el;
     },
     rowsIn(title) {
-      // The Project section holds two trees - the project's real folders and
-      // the Assets bin - so 'Project' means the bin specifically.
-      if (title === 'Project') {
-        return [...this.sectionOf(title).querySelectorAll('.cb-subtree--assets .tree-row')];
-      }
-      if (title === 'Project Folders') {
+      // The Project section holds one tree now: the project's real folders.
+      // The synthetic Assets bin is gone - the imports folder is the bin.
+      if (title === 'Project' || title === 'Project Folders') {
         return [...this.sectionOf('Project').querySelectorAll('.cb-subtree--folders .tree-row')];
       }
       return [...this.sectionOf(title).querySelectorAll('.tree-row')];
+    },
+    cards() {
+      return [...document.querySelectorAll('.cb-grid .card')].map(c => ({
+        name: c.querySelector('.card-name')?.textContent,
+        badge: c.querySelector('.card-badge')?.textContent ?? null,
+        missing: c.classList.contains('card--missing'),
+        kind: c.querySelector('.card-kind')?.textContent,
+      }));
+    },
+    cardByName(name) {
+      return [...document.querySelectorAll('.cb-grid .card')]
+        .find(c => c.querySelector('.card-name')?.textContent === name);
     },
     describe(title) {
       return this.rowsIn(title).map(r => ({
@@ -318,73 +327,63 @@ try {
     assert.ok(result.depth >= 3, `expected a nested depth, got ${result.depth}`)
   })
 
-  // ── project tree ──────────────────────────────────────────────
+  // ── the project's folders, and the bin ────────────────────────
 
-  await check('the project tree is empty before anything is imported', async () => {
-    const rows = await evaluate(cdp, `return window.__tree.describe('Project');`)
-    assert.equal(rows[0].label, 'Assets')
-    assert.ok(
-      rows.some((r) => r.label === 'nothing imported'),
-      `expected an empty note, got ${JSON.stringify(rows.map((r) => r.label))}`,
-    )
+  await check('the project tree shows the real folders and nothing invented', async () => {
+    // There used to be a synthetic "Assets" node beside these, which meant two
+    // lists of the same footage that agreed only some of the time.
+    const labels = await evaluate(cdp, `return window.__tree.describe('Project').map(r => r.label);`)
+    assert.ok(labels.includes('imports'), `expected imports, got ${JSON.stringify(labels)}`)
+    assert.ok(labels.includes('exports'))
+    assert.ok(labels.includes('project_files'))
+    assert.ok(!labels.includes('Assets'), 'the invented Assets node should be gone')
   })
 
-  await check('imported files appear as leaves under the project root', async () => {
-    const rows = await evaluate(
+  await check('the browser opens in the project imports folder', async () => {
+    const current = await evaluate(
       cdp,
-      `const t = window.__tree;
-       window.__fluxDev.assets.importAssets([
-         { path: ${dir} + '\\\\clipA.mp4', kind: 'video' },
-         { path: ${dir} + '\\\\still.jpg', kind: 'image' },
-       ]);
-       await t.until(() => t.rowsIn('Project').length === 3);
-       return t.describe('Project');`,
+      `const { commands } = window.__fluxDev;
+       await commands.run('content.project');
+       await window.__tree.until(() =>
+         document.querySelector('.cb-crumb--current')?.textContent === 'imports');
+       return document.querySelector('.cb-crumb--current')?.textContent;`,
     )
-    assert.deepEqual(
-      rows.map((r) => r.label),
-      ['Assets', 'clipA.mp4', 'still.jpg'],
-    )
-    assert.ok(rows.slice(1).every((r) => r.depth === 1), 'assets sit one level under the root')
+    assert.equal(current, 'imports', 'imports is the bin, and is where the browser lands')
   })
 
   await check('the project tree is separate from the disk tree', async () => {
-    // A project asset is a reference, not a location: the folder it happens to
-    // live in must not appear in the project tree.
+    // The project's folders are its own; a drive must not leak into them.
     const labels = await evaluate(cdp, `return window.__tree.describe('Project').map(r => r.label);`)
     assert.ok(!labels.includes('C:'), 'a drive leaked into the project tree')
     assert.ok(!labels.includes('flux-media-test'), 'a disk folder leaked into the project tree')
   })
 
-  await check('collapsing the project root hides its assets', async () => {
-    const labels = await evaluate(
+  await check('a linked asset is visible in the bin, marked as linked', async () => {
+    // The property the removed bin existed for. A linked file lives outside
+    // imports, so without this it would be in the project, on the timeline, and
+    // findable nowhere in the browser at all.
+    const cards = await evaluate(
       cdp,
       `const t = window.__tree;
-       await t.toggleByPath('Project', '::assets');
-       return t.describe('Project').map(r => r.label);`,
+       const { importPipeline, importMode, commands } = window.__fluxDev;
+       importMode.setImportMode('link');
+       await importPipeline.importFiles([
+         { path: ${dir} + '\\\\clipA.mp4', kind: 'video' },
+         { path: ${dir} + '\\\\still.jpg', kind: 'image' },
+       ]);
+       await commands.run('content.project');
+       await t.until(() => t.cardByName('clipA.mp4'));
+       return t.cards();`,
     )
-    assert.deepEqual(labels, ['Assets'])
+    const names = cards.map((c) => c.name).sort()
+    assert.deepEqual(names, ['clipA.mp4', 'still.jpg'])
+    assert.ok(
+      cards.every((c) => c.badge === 'linked'),
+      `expected every card marked linked, got ${JSON.stringify(cards)}`,
+    )
   })
 
-  await check('clicking an asset leaf selects that card in the project grid', async () => {
-    const result = await evaluate(
-      cdp,
-      `const t = window.__tree;
-       await t.toggleByPath('Project', '::assets');
-       const leaf = await t.until(() => t.byLabel('Project', 'still.jpg'));
-       leaf.click();
-       await t.until(() => document.querySelector('.card--selected'));
-       return {
-         card: document.querySelector('.card--selected .card-name')?.textContent,
-         // The path bar is always present now, so "in the project" is told by
-         // what the trailing crumb says, not by crumbs being absent.
-         current: document.querySelector('.cb-crumb--current')?.textContent,
-       };`,
-    )
-    assert.equal(result.card, 'still.jpg', 'the matching card should be highlighted')
-    assert.equal(result.current, 'Assets', 'the grid should have switched to the project')
-  })
-
-  await check('an asset leaf can be dragged from the tree to the timeline', async () => {
+  await check('an asset card can be dragged from the bin to the timeline', async () => {
     const clips = await evaluate(
       cdp,
       `const t = window.__tree;
@@ -392,34 +391,52 @@ try {
        sequence.clearSequence();
        await assets.ensureProbed(assets.getAssets().find(a => a.name === 'clipA.mp4').id);
 
-       const row = t.byLabel('Project', 'clipA.mp4');
+       const card = t.cardByName('clipA.mp4');
        const lane = document.querySelectorAll('.tl-lane')[1];
        const dt = new DataTransfer();
-       row.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       const carried = [...dt.types];
        const rect = lane.getBoundingClientRect();
        lane.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
        lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
        await t.until(() => sequence.getSequence().clips.length > 0);
-       return sequence.getSequence().clips.length;`,
+       return { clips: sequence.getSequence().clips.length, carried };`,
     )
-    assert.equal(clips, 1, 'dragging a tree leaf should place a clip')
+    assert.equal(clips.clips, 1, 'dragging a bin card should place a clip')
+    assert.deepEqual(
+      clips.carried,
+      ['application/x-flux-assets'],
+      'something already in the project drags by id, so the drop is a pure placement',
+    )
   })
 
-  await check('an offline asset is marked in the project tree', async () => {
-    const result = await evaluate(
+  await check('an offline asset is marked on its card', async () => {
+    const card = await evaluate(
+      cdp,
+      `const t = window.__tree;
+       const { assets, commands } = window.__fluxDev;
+       assets.importAssets([{ path: ${dir} + '\\\\ghost.mp4', kind: 'video', name: 'ghost.mp4' }]);
+       await assets.recheckMissing();
+       await commands.run('content.project');
+       // Wait for the rendered state, not merely the card: it exists from the
+       // import render, before the missing flag has been applied to it.
+       await t.until(() => t.cards().find(c => c.name === 'ghost.mp4')?.missing);
+       return t.cards().find(c => c.name === 'ghost.mp4');`,
+    )
+    assert.equal(card.missing, true, 'a vanished file must be marked on the card')
+  })
+
+  await check('removing an asset takes it out of the bin', async () => {
+    const after = await evaluate(
       cdp,
       `const t = window.__tree;
        const { assets } = window.__fluxDev;
-       assets.importAssets([{ path: ${dir} + '\\\\ghost.mp4', kind: 'video', name: 'ghost.mp4' }]);
-       await assets.recheckMissing();
-       // Wait for the rendered note, not merely for the row: the row exists from
-       // the import render, before the missing flag has been applied to it.
-       const note = await t.until(() =>
-         t.byLabel('Project', 'ghost.mp4')?.querySelector('.tree-note')?.textContent);
-       return { note, missing: assets.getAssets().find(a => a.name === 'ghost.mp4')?.missing };`,
+       const ghost = assets.getAssets().find(a => a.name === 'ghost.mp4');
+       t.cardByName('ghost.mp4').querySelector('.card-remove').click();
+       await t.until(() => !assets.getAssets().some(a => a.id === ghost.id));
+       return t.cards().map(c => c.name);`,
     )
-    assert.equal(result.missing, true, 'the asset itself should be flagged missing')
-    assert.equal(result.note, 'offline', 'the tree row should show the offline marker')
+    assert.ok(!after.includes('ghost.mp4'), 'the card should be gone with the asset')
   })
 
   // ── rail resizing ─────────────────────────────────────────────
@@ -569,22 +586,17 @@ try {
     assert.ok(!result.paths[0].inProject)
   })
 
-  await check('an asset leaf shows a media icon, not a folder icon', async () => {
-    const kinds = await evaluate(
+  await check('a media card is labelled by kind, and a folder is not', async () => {
+    const result = await evaluate(
       cdp,
       `const t = window.__tree;
-       const row = await t.until(() => t.byLabel('Project', 'clipA.mp4'));
-       const icon = row.querySelector('.tree-icon');
-       const folderRow = t.rowsIn('Project Folders').find(
+       const clip = t.cards().find(c => c.name === 'clipA.mp4');
+       const folderRow = t.rowsIn('Project').find(
          r => r.querySelector('.tree-label')?.textContent === 'imports');
-       return {
-         asset: icon?.getAttribute('class'),
-         folder: folderRow?.querySelector('.tree-icon')?.getAttribute('class'),
-       };`,
+       return { kind: clip?.kind, folder: folderRow?.querySelector('.tree-icon')?.getAttribute('class') };`,
     )
-    assert.ok(kinds.asset?.includes('tree-icon--video'), `asset icon was ${kinds.asset}`)
-    assert.ok(kinds.folder?.includes('tree-icon--folder'), `folder icon was ${kinds.folder}`)
-    assert.notEqual(kinds.asset, kinds.folder, 'an asset must not look like a folder')
+    assert.equal(result.kind, 'video', `card kind was ${result.kind}`)
+    assert.ok(result.folder?.includes('tree-icon--folder'), `folder icon was ${result.folder}`)
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

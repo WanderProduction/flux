@@ -88,3 +88,23 @@ export function projectFolderPath(parent, name) {
   while (trimmed.endsWith('/') || trimmed.endsWith(BACKSLASH)) trimmed = trimmed.slice(0, -1)
   return `${trimmed}${sep}${safeFolderName(name)}`
 }
+
+/**
+ * A child of a project folder - imports, exports, project_files.
+ *
+ * The separator is taken from the path itself rather than assumed, because this
+ * runs in the renderer too, where node's path module is not available and the
+ * project root arrived as a string from the other side of the bridge.
+ * @param {string} root
+ * @param {string} child
+ * @returns {string}
+ */
+export function projectChildPath(root, child) {
+  const sep = root.includes(BACKSLASH) ? BACKSLASH : '/'
+  let trimmed = root
+  while (trimmed.endsWith('/') || trimmed.endsWith(BACKSLASH)) trimmed = trimmed.slice(0, -1)
+  return `${trimmed}${sep}${child}`
+}
+
+/** The folder media is copied into. Named once, used on both sides. */
+export const IMPORTS_DIR = 'imports'

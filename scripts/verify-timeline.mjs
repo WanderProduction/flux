@@ -465,6 +465,163 @@ try {
     )
   })
 
+  // ── dropping a file that is not in the project yet ────────────
+
+  await check('a file card carries its path, not an asset id', async () => {
+    // The two payloads are what tell the Timeline whether a drop is a
+    // placement or an import-then-placement.
+    const types = await evaluate(
+      cdp,
+      `const { commands } = window.__fluxDev;
+       // Browse to the fixtures the way a user would: Quick > Home, then in.
+       const home = [...document.querySelectorAll('.cb-quick-item')]
+         .find(b => b.textContent.trim() === 'Home');
+       home.click();
+       for (let i = 0; i < 60 && !document.querySelector('.card--folder'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       const folder = [...document.querySelectorAll('.card--folder')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'flux-media-test');
+       if (!folder) throw new Error('fixture folder not listed under Home');
+       folder.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+       for (let i = 0; i < 60; i++) {
+         if (document.querySelector('.cb-crumb--current')?.textContent === 'flux-media-test') break;
+         await new Promise(r => setTimeout(r, 100));
+       }
+       const card = [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'shot_B.mp4');
+       if (!card) throw new Error('shot_B.mp4 not on screen');
+       const dt = new DataTransfer();
+       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       return [...dt.types];`,
+    )
+    assert.deepEqual(types, ['application/x-flux-files'])
+  })
+
+  await check('dropping an un-imported file asks how to import it', async () => {
+    // The question has to reach the Timeline. It has no dialog of its own, so
+    // this is really a check that the import pipeline is shared rather than
+    // duplicated inside the Content Browser.
+    const state = await evaluate(
+      cdp,
+      `const { importMode, sequence, assets } = window.__fluxDev;
+       importMode.setImportMode('ask');
+       sequence.clearSequence();
+       assets.removeAssets(assets.getAssets()
+         .filter(a => a.name === 'shot_B.mp4').map(a => a.id));
+       await new Promise(r => setTimeout(r, 200));
+
+       const card = [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'shot_B.mp4');
+       const lane = document.querySelectorAll('.tl-lane')[1];
+       const dt = new DataTransfer();
+       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       const rect = lane.getBoundingClientRect();
+       lane.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
+       lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
+
+       for (let i = 0; i < 60 && !document.querySelector('.dialog'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       return { dialog: !!document.querySelector('.dialog'),
+                clips: sequence.getSequence().clips.length };`,
+    )
+    assert.equal(state.dialog, true, 'the copy-or-link question should be on screen')
+    assert.equal(state.clips, 0, 'nothing is placed until the question is answered')
+  })
+
+  await check('answering it imports the file and places the clip', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence, assets } = window.__fluxDev;
+       const link = [...document.querySelectorAll('.dialog button')]
+         .find(b => /leave the files|origin|link/i.test(b.textContent));
+       if (!link) throw new Error('no link choice in the dialog');
+       link.click();
+       for (let i = 0; i < 80 && sequence.getSequence().clips.length === 0; i++)
+         await new Promise(r => setTimeout(r, 100));
+       const clip = sequence.getSequence().clips[0];
+       const asset = clip && assets.getAssets().find(a => a.id === clip.assetId);
+       return { imported: !!asset, name: asset?.name, inProject: asset?.inProject ?? false,
+                duration: clip ? Math.round(clip.duration * 100) / 100 : null,
+                dialogGone: !document.querySelector('.dialog') };`,
+    )
+    assert.equal(state.imported, true, 'the dropped file should now be a project asset')
+    assert.equal(state.name, 'shot_B.mp4')
+    assert.equal(state.inProject, false, 'Origin leaves the file where it was')
+    assert.ok(state.duration > 0, 'the clip should be as long as the media, not a guess')
+    assert.equal(state.dialogGone, true)
+  })
+
+  await check('cancelling the question imports nothing and places nothing', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence, assets, importMode } = window.__fluxDev;
+       importMode.setImportMode('ask');
+       sequence.clearSequence();
+       const before = assets.getAssets().length;
+
+       const card = [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'render.webm');
+       const lane = document.querySelectorAll('.tl-lane')[1];
+       const dt = new DataTransfer();
+       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       const rect = lane.getBoundingClientRect();
+       lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
+       for (let i = 0; i < 60 && !document.querySelector('.dialog'); i++)
+         await new Promise(r => setTimeout(r, 100));
+
+       document.querySelector('.dialog').dispatchEvent(
+         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+       await new Promise(r => setTimeout(r, 800));
+       return { before, after: assets.getAssets().length,
+                clips: sequence.getSequence().clips.length,
+                dialogGone: !document.querySelector('.dialog') };`,
+    )
+    assert.equal(state.dialogGone, true, 'Escape should dismiss the question')
+    assert.equal(state.after, state.before, 'cancelling must import nothing')
+    assert.equal(state.clips, 0, 'and place nothing')
+  })
+
+  await check('a drop with a remembered preference skips the question', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence, assets, importMode } = window.__fluxDev;
+       importMode.setImportMode('link');
+       sequence.clearSequence();
+
+       const card = [...document.querySelectorAll('.card')]
+         .find(c => c.querySelector('.card-name')?.textContent === 'render.webm');
+       const lane = document.querySelectorAll('.tl-lane')[1];
+       const dt = new DataTransfer();
+       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+       const rect = lane.getBoundingClientRect();
+       lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
+       for (let i = 0; i < 80 && sequence.getSequence().clips.length === 0; i++)
+         await new Promise(r => setTimeout(r, 100));
+       return { dialog: !!document.querySelector('.dialog'),
+                clips: sequence.getSequence().clips.length,
+                names: assets.getAssets().map(a => a.name).sort() };`,
+    )
+    assert.equal(state.dialog, false, 'a settled preference must not ask again')
+    assert.equal(state.clips, 1)
+    assert.ok(state.names.includes('render.webm'))
+  })
+
+  await check('a drag carrying nothing FLUX understands is refused', async () => {
+    const clips = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       const before = sequence.getSequence().clips.length;
+       const lane = document.querySelectorAll('.tl-lane')[0];
+       const dt = new DataTransfer();
+       dt.setData('text/plain', 'C:/somewhere/else.mp4');
+       const rect = lane.getBoundingClientRect();
+       lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
+       await new Promise(r => setTimeout(r, 500));
+       return { before, after: sequence.getSequence().clips.length };`,
+    )
+    assert.equal(clips.after, clips.before, 'a plain-text drag is not an import')
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })

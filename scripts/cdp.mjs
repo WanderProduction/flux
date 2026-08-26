@@ -201,6 +201,11 @@ export async function resetProject(cdp) {
      // The workspace is part of the document now, so a suite that switched it
      // would otherwise hand the next suite a layout with no Content Browser.
      view.setView(null);
+     // And pin the timeline scale. The zoom is saved in the document too, so a
+     // suite that zoomed leaves the *next run* opening at that zoom - which
+     // shows up as a check about block widths failing depending on what ran
+     // before it. 60 is TimelinePanel's DEFAULT_ZOOM, in pixels per second.
+     view.recordView({ timeline: { zoom: 60 } });
 
      // Write the cleared state through to the document, so a previous suite's
      // saved work cannot reappear after the next open.

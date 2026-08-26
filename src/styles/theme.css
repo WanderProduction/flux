@@ -45,6 +45,9 @@
   /* Chrome metrics */
   --flux-topbar-h: 34px;
   --flux-statusbar-h: 22px;
+  /* Breathing room between the panel dock and the window edge. A skin that
+     wants an edge-to-edge look sets this to 0. */
+  --flux-app-gutter: 8px;
 }
 
 /*

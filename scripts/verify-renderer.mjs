@@ -166,6 +166,7 @@ try {
       'assetUrl',
       'exists',
       'list',
+      'pathForFile',
       'pickDirectory',
       'pickFiles',
       'pickProjectFile',
@@ -487,10 +488,18 @@ try {
     assert.equal(count.after, count.before, 'duplicate import should be a no-op')
   })
 
-  await check('the Project view renders the imported assets', async () => {
+  await check('the project bin renders the imported assets', async () => {
+    // `imports` is the bin. Linked assets live elsewhere on disk and are shown
+    // here anyway, which is the whole reason the view is not a plain listing.
     const names = await evaluate(
       cdp,
-      `[...document.querySelectorAll('.tree-label')].find(e => e.textContent === 'Assets').closest('.tree-row').click();
+      `await window.__fluxDev.commands.run('content.project');
+       // Wait for the *navigation*, not for cards: the folder we are leaving
+       // already has cards, so counting them returns the old view instantly.
+       for (let i = 0; i < 60; i++) {
+         if (document.querySelector('.cb-crumb--current')?.textContent === 'imports') break;
+         await new Promise(r => setTimeout(r, 100));
+       }
        await new Promise(r => setTimeout(r, 400));
        return [...document.querySelectorAll('.card-name')].map(e => e.textContent).sort();`,
     )

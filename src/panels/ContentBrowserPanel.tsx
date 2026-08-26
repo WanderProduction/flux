@@ -13,15 +13,10 @@ import {
   type MediaKind,
   type Places,
 } from '../kernel/fsBridge'
-import {
-  getAssets,
-  importAssets,
-  removeAssets,
-  subscribeAssets,
-  type Asset,
-} from '../kernel/assets'
-import { setAssetDragPayload } from '../kernel/dragAssets'
-import { getImportMode, setImportMode, type ImportMode } from '../kernel/importMode'
+import { getAssets, removeAssets, subscribeAssets, type Asset } from '../kernel/assets'
+import { setAssetDragPayload, setFileDragPayload } from '../kernel/dragAssets'
+import { setImportMode } from '../kernel/importMode'
+import { importFiles, type ImportEntry } from '../kernel/importPipeline'
 import {
   getPinned,
   isPinned,
@@ -30,14 +25,14 @@ import {
   subscribePinned,
   togglePin,
 } from '../kernel/pinned'
-import { copyIntoImports, getProject, subscribeProject } from '../kernel/project'
+import { getProject, subscribeProject } from '../kernel/project'
 import { loadStore, saveStore } from '../kernel/store'
 import { getView, recordView, type BrowserLocation } from '../kernel/view'
 import { mediaKindOf } from '../../shared/mediaTypes.js'
+import { IMPORTS_DIR, projectChildPath } from '../../shared/projectNaming.js'
 import { PanelFrame } from './PanelFrame'
 import { AssetThumb } from './AssetThumb'
-import { ImportChoiceDialog, type ImportChoice } from './ImportChoiceDialog'
-import { TreeView, useDiskTree, type TreeRow } from './FolderTree'
+import { TreeView, useDiskTree } from './FolderTree'
 
 /**
  * Content Browser — browse the machine, import media into the project.
@@ -46,26 +41,21 @@ import { TreeView, useDiskTree, type TreeRow } from './FolderTree'
  * the folders this person pinned, then the raw disks, with the OS's named
  * folders last as a fallback.
  *
- * PROJECT shows two things. The project's own folder tree — imports, exports,
- * project_files as they really are on disk — and the Assets bin. They are not
- * the same list: a linked asset lives wherever the user left it and appears in
- * the bin without ever appearing under the project folder.
+ * PROJECT is the project's own folders as they really are on disk, and
+ * `imports` is where the browser opens: it is the project's bin. There used to
+ * be a separate synthetic "Assets" node beside the folders, which meant two
+ * lists of the same footage that agreed only some of the time.
+ *
+ * One consequence has to be handled rather than ignored. A *linked* asset lives
+ * wherever the user left it and is not inside `imports` at all, so it would
+ * have nowhere to appear once the bin is gone. The imports view therefore shows
+ * the folder's real contents *plus* any asset that lives elsewhere, marked as
+ * linked. Everything imported is visible in one place, which is the property
+ * the bin was there for.
  */
-
-/** The bin's synthetic root. Prefixed so it can never collide with a real path. */
-const ASSETS_ROOT = '::assets'
 
 /** Shared with the project document, so the browser reopens where it was. */
 type Location = BrowserLocation
-
-/** What the import pipeline accepts, whether it came from the grid or a dialog. */
-interface ImportEntry {
-  path: string
-  kind: MediaKind
-  size?: number
-  mtimeMs?: number
-  inProject?: boolean
-}
 
 const RAIL_STORE = 'ui-content-browser'
 const RAIL_MIN = 140
@@ -80,28 +70,42 @@ function folderOf(filePath: string): string {
 
 export function ContentBrowserPanel() {
   const [project, setProjectState] = useState(getProject)
+  // The document may say `{ type: 'project' }`, which is a *symbolic* default
+  // meaning "this project's imports folder". Storing it that way rather than an
+  // absolute path is what lets a project folder move to another machine and
+  // still open where it should.
   const [location, setLocation] = useState<Location>(() => getView().browser.location)
   const [places, setPlaces] = useState<Places | null>(null)
   const [listing, setListing] = useState<DirectoryListing | null>(null)
   const [status, setStatus] = useState<'idle' | 'loading' | 'denied' | 'unreadable'>('idle')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [assets, setAssets] = useState<Asset[]>(getAssets)
-  const [assetsOpen, setAssetsOpen] = useState(true)
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null)
   const [railWidth, setRailWidth] = useState(RAIL_DEFAULT)
   const [pinnedFolders, setPinnedFolders] = useState(getPinned)
-  const [pendingImport, setPendingImport] = useState<{
-    entries: ImportEntry[]
-    resolve: (choice: ImportChoice | null) => void
-  } | null>(null)
-  const [copyProgress, setCopyProgress] = useState<string | null>(null)
-  const [copyError, setCopyError] = useState<string | null>(null)
+
+  /** Where copied media lands, and where the browser opens. */
+  const importsFolder = useMemo(
+    () => (project ? projectChildPath(project.root, IMPORTS_DIR) : null),
+    [project],
+  )
 
   useEffect(() => subscribeProject(() => setProjectState(getProject())), [])
 
   // Where you were browsing goes into the project document. Recorded rather
   // than saved: walking a folder tree is not an edit. See kernel/view.ts.
-  useEffect(() => recordView({ browser: { location } }), [location])
+  useEffect(() => {
+    const symbolic = importsFolder && location.type === 'folder' && location.path === importsFolder
+    recordView({ browser: { location: symbolic ? { type: 'project' } : location } })
+  }, [location, importsFolder])
+
+  // Resolve the symbolic default once the project is known, so the panel's own
+  // `location` is always a real folder from here on.
+  useEffect(() => {
+    if (location.type === 'project' && importsFolder) {
+      setLocation({ type: 'folder', path: importsFolder })
+    }
+  }, [location, importsFolder])
 
   useEffect(() => {
     // The project applies the document; the panel only mirrors it.
@@ -209,10 +213,14 @@ export function ContentBrowserPanel() {
     [disk],
   )
 
-  const openAssets = useCallback(() => {
-    setLocation({ type: 'project' })
+  /** The project's bin: the imports folder. */
+  const openImports = useCallback(() => {
+    if (!importsFolder) return
+    setLocation({ type: 'folder', path: importsFolder })
     setSelected(new Set())
-  }, [])
+    setFocusedAssetId(null)
+    void projectTree.reveal(importsFolder)
+  }, [importsFolder, projectTree])
 
   const [reloadToken, setReloadToken] = useState(0)
   const refresh = useCallback(() => setReloadToken((n) => n + 1), [])
@@ -243,75 +251,18 @@ export function ContentBrowserPanel() {
   }, [location, listing, openFolder])
 
   // ── import ────────────────────────────────────────────────────
-  const askImportMode = useCallback(
-    (entries: ImportEntry[]) =>
-      new Promise<ImportChoice | null>((resolve) => setPendingImport({ entries, resolve })),
-    [],
-  )
 
   /**
-   * Copies each file into the project, then imports the copies.
-   *
-   * Sequential rather than parallel: copying several camera files at once
-   * saturates the disk and makes every one of them slower, and a serial queue is
-   * what lets the progress line say which file is being worked on.
+   * Everything the panel imports goes through the kernel pipeline, which owns
+   * the copy-or-link decision and asks the question through a request the app
+   * shell answers. The Timeline imports the same way — see kernel/importPipeline.
    */
-  const importByCopy = useCallback(async (entries: ImportEntry[]) => {
-    const copied: ImportEntry[] = []
-    const failures: string[] = []
-
-    for (const [index, entry] of entries.entries()) {
-      setCopyProgress(`Copying ${index + 1} of ${entries.length}…`)
-      const result = await copyIntoImports(entry.path)
-      if (result.ok && result.path) {
-        copied.push({
-          path: result.path,
-          kind: entry.kind,
-          size: result.size,
-          mtimeMs: result.mtimeMs,
-          inProject: true,
-        })
-      } else {
-        failures.push(`${entry.path.split(/[\\/]/).pop()} (${result.error ?? 'failed'})`)
-      }
-    }
-
-    setCopyProgress(null)
-    if (copied.length > 0) importAssets(copied)
-    if (failures.length > 0) {
-      // Surfaced rather than swallowed: a copy that silently did not happen is a
-      // file the user believes is backed up and is not.
-      setCopyError(`Could not copy ${failures.length}: ${failures.join(', ')}`)
-    }
-    return copied.length
+  const importPaths = useCallback(async (entries: ImportEntry[], forced?: 'copy' | 'link') => {
+    if (entries.length === 0) return 0
+    setSelected(new Set())
+    const added = await importFiles(entries, forced)
+    return added.length
   }, [])
-
-  /**
-   * The single way media enters the project. `forced` comes from the split
-   * button's menu and skips both the preference and the question.
-   */
-  const importPaths = useCallback(
-    async (entries: ImportEntry[], forced?: 'copy' | 'link') => {
-      if (entries.length === 0) return 0
-      setSelected(new Set())
-
-      // Without a project there is nowhere to copy to, so linking is the only
-      // option available.
-      const canCopy = Boolean(getProject())
-      let mode: ImportMode = forced ?? (canCopy ? getImportMode() : 'link')
-
-      if (mode === 'ask') {
-        const choice = await askImportMode(entries)
-        if (!choice) return 0
-        mode = choice.mode
-        if (choice.remember) setImportMode(choice.mode)
-      }
-
-      if (mode === 'copy' && canCopy) return importByCopy(entries)
-      return importAssets(entries).length
-    },
-    [askImportMode, importByCopy],
-  )
 
   const pickAndImport = useCallback(
     async (forced?: 'copy' | 'link') => {
@@ -374,7 +325,13 @@ export function ContentBrowserPanel() {
         category: 'Content',
         run: () => void runImport('link'),
       },
-      { id: 'content.project', title: 'Go to Project Assets', category: 'Content', run: openAssets },
+      {
+        id: 'content.project',
+        title: 'Go to Project Imports',
+        category: 'Content',
+        detail: "The project's bin — everything imported, wherever the file lives",
+        run: openImports,
+      },
       { id: 'content.up', title: 'Go Up One Folder', category: 'Content', run: goUp },
       { id: 'content.refresh', title: 'Refresh Folder', category: 'Content', run: refresh },
       {
@@ -399,64 +356,46 @@ export function ContentBrowserPanel() {
       },
     ])
     return () => handle.dispose()
-  }, [runImport, openAssets, goUp, refresh, disk, currentIsPinned, currentFolder, togglePinCurrent])
+  }, [runImport, openImports, goUp, refresh, disk, currentIsPinned, currentFolder, togglePinCurrent])
 
-  // ── project + asset tree rows ─────────────────────────────────
-  const assetRows = useMemo<TreeRow[]>(() => {
-    const root: TreeRow = {
-      id: ASSETS_ROOT,
-      label: 'Assets',
-      depth: 0,
-      icon: 'project',
-      expandable: true,
-      expanded: assetsOpen,
-      note: assets.length > 0 ? String(assets.length) : undefined,
-      title: 'Media imported into this project',
-    }
-    if (!assetsOpen) return [root]
+  // ── the bin ───────────────────────────────────────────────────
 
-    if (assets.length === 0) {
-      return [
-        root,
-        {
-          id: '::assets-empty',
-          label: 'nothing imported',
-          depth: 1,
-          icon: 'folder',
-          expandable: false,
-          expanded: false,
-          placeholder: true,
-          title: 'Import media to fill the project',
-        },
-      ]
-    }
+  const inImports = location.type === 'folder' && location.path === importsFolder
 
-    const leaves = [...assets]
+  /** Assets by path, so any card can tell whether it is already in the project. */
+  const assetByPath = useMemo(() => {
+    const map = new Map<string, Asset>()
+    assets.forEach((asset) => map.set(asset.path, asset))
+    return map
+  }, [assets])
+
+  /**
+   * Assets that live outside the imports folder — the linked ones.
+   *
+   * Shown alongside the folder's real contents, and only there. Without this a
+   * linked import would be in the project, on the timeline, and visible nowhere
+   * in the browser at all.
+   */
+  const linkedAssets = useMemo(() => {
+    if (!inImports || !importsFolder) return []
+    return assets
+      .filter((asset) => !asset.path.startsWith(importsFolder))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-      .map<TreeRow>((asset) => ({
-        id: asset.id,
-        label: asset.name,
-        depth: 1,
-        // The asset's own kind, so a clip never wears a folder icon.
-        icon: asset.kind,
-        expandable: false,
-        expanded: false,
-        note: asset.missing ? 'offline' : undefined,
-        title: asset.path,
-      }))
-    return [root, ...leaves]
-  }, [assets, assetsOpen])
-
-  const onAssetSelect = useCallback((row: TreeRow) => {
-    setLocation({ type: 'project' })
-    setFocusedAssetId(row.id === ASSETS_ROOT ? null : row.id)
-  }, [])
+  }, [assets, inImports, importsFolder])
 
   // ── path bar ──────────────────────────────────────────────────
   const crumbs = useMemo(
     () => (location.type === 'folder' ? breadcrumbsOf(location.path) : []),
     [location],
   )
+
+  // Keep the deepest crumb in view. The strip scrolls instead of squeezing, so
+  // without this a deep path would show its root and hide where you are.
+  const crumbsRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const strip = crumbsRef.current
+    if (strip) strip.scrollLeft = strip.scrollWidth
+  }, [crumbs])
 
   const toggleSelect = (path: string) =>
     setSelected((current) => {
@@ -485,8 +424,8 @@ export function ContentBrowserPanel() {
         <aside className="cb-rail">
           <section className="cb-tree-section">
             <h3 className="cb-rail-title">Project</h3>
-            {/* The project's real folders, and the bin. Wrapped separately so
-                each can be styled and addressed on its own. */}
+            {/* The project's real folders. `imports` is the bin, and is where
+                the browser opens. */}
             <div className="cb-subtree cb-subtree--folders">
               <TreeView
                 rows={projectTree.rows}
@@ -495,23 +434,6 @@ export function ContentBrowserPanel() {
                 onToggle={(row) => projectTree.toggle(row.id)}
                 emptyNote="No project open"
               />
-            </div>
-            <div className="cb-subtree cb-subtree--assets">
-            <TreeView
-              rows={assetRows}
-              selectedId={location.type === 'project' ? (focusedAssetId ?? ASSETS_ROOT) : null}
-              onSelect={onAssetSelect}
-              onToggle={(row) => {
-                if (row.id === ASSETS_ROOT) setAssetsOpen((open) => !open)
-              }}
-              onDragStartRow={(row, event) => {
-                // Leaves are assets, so the tree is a drag source for the
-                // timeline exactly like the cards are.
-                if (row.id.startsWith('::')) return
-                const asset = assets.find((a) => a.id === row.id)
-                if (asset && !asset.missing) setAssetDragPayload(event, [asset.id])
-              }}
-            />
             </div>
           </section>
 
@@ -582,32 +504,17 @@ export function ContentBrowserPanel() {
               ↑
             </button>
 
-            <nav className="cb-crumbs">
-              {location.type === 'project' ? (
-                <>
-                  <button
-                    className="cb-crumb"
-                    onClick={() => project && openFolder(project.root, false)}
-                    title={project?.root}
-                  >
-                    {project?.name ?? 'Project'}
-                  </button>
-                  <button className="cb-crumb cb-crumb--current" onClick={openAssets}>
-                    Assets
-                  </button>
-                </>
-              ) : (
-                crumbs.map((crumb, i) => (
-                  <button
-                    key={crumb.path}
-                    className={`cb-crumb${i === crumbs.length - 1 ? ' cb-crumb--current' : ''}`}
-                    onClick={() => openFolder(crumb.path)}
-                    title={crumb.path}
-                  >
-                    {crumb.label}
-                  </button>
-                ))
-              )}
+            <nav className="cb-crumbs" ref={crumbsRef}>
+              {crumbs.map((crumb, i) => (
+                <button
+                  key={crumb.path}
+                  className={`cb-crumb${i === crumbs.length - 1 ? ' cb-crumb--current' : ''}`}
+                  onClick={() => openFolder(crumb.path)}
+                  title={crumb.path}
+                >
+                  {crumb.label}
+                </button>
+              ))}
             </nav>
 
             <span className="cb-pathbar-end">
@@ -624,48 +531,24 @@ export function ContentBrowserPanel() {
             </span>
           </div>
 
-          {copyProgress && <div className="cb-progress">{copyProgress}</div>}
-          {copyError && (
-            <div className="cb-banner cb-banner--error" onClick={() => setCopyError(null)}>
-              {copyError}
-            </div>
-          )}
-
           <div className="cb-scroll">
-            {location.type === 'project' ? (
-              <ProjectGrid
-                assets={assets}
-                focusedId={focusedAssetId}
-                onReveal={(path) => openFolder(path)}
-              />
-            ) : (
-              <FolderGrid
-                status={status}
-                listing={listing}
-                selected={selected}
-                onOpenFolder={openFolder}
-                onToggle={toggleSelect}
-                onImportOne={(file) => void importPaths([file])}
-              />
-            )}
+            <FolderGrid
+              status={status}
+              listing={listing}
+              selected={selected}
+              assetByPath={assetByPath}
+              linkedAssets={linkedAssets}
+              focusedAssetId={focusedAssetId}
+              isBin={inImports}
+              onOpenFolder={openFolder}
+              onToggle={toggleSelect}
+              onImportOne={(file) => void importPaths([file])}
+              onReveal={(path) => openFolder(path)}
+            />
           </div>
         </div>
       </div>
 
-      {pendingImport && (
-        <ImportChoiceDialog
-          count={pendingImport.entries.length}
-          projectName={project?.name}
-          onChoose={(choice) => {
-            pendingImport.resolve(choice)
-            setPendingImport(null)
-          }}
-          onCancel={() => {
-            pendingImport.resolve(null)
-            setPendingImport(null)
-          }}
-        />
-      )}
     </PanelFrame>
   )
 }
@@ -740,93 +623,48 @@ function ImportSplitButton({
   )
 }
 
-function ProjectGrid({
-  assets,
-  focusedId,
-  onReveal,
-}: {
-  assets: Asset[]
-  focusedId: string | null
-  onReveal: (path: string) => void
-}) {
-  // Bring a card selected from the tree into view.
-  useEffect(() => {
-    if (!focusedId) return
-    document.querySelector(`[data-asset-id="${focusedId}"]`)?.scrollIntoView({ block: 'nearest' })
-  }, [focusedId])
-
-  if (assets.length === 0) {
-    return (
-      <div className="cb-empty">
-        <p>No assets yet.</p>
-        <p className="cb-empty-hint">
-          Browse a folder in the tree and import, or press <kbd>Ctrl K</kbd> and run{' '}
-          <em>Import Media…</em>
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="cb-grid">
-      {assets.map((asset) => (
-        <div
-          key={asset.id}
-          data-asset-id={asset.id}
-          className={`card${asset.missing ? ' card--missing' : ''}${
-            asset.id === focusedId ? ' card--selected' : ''
-          }`}
-          title={asset.path}
-          // Only a resolvable asset is draggable — dropping a card whose file is
-          // gone could only ever produce a clip that cannot play.
-          draggable={!asset.missing}
-          onDragStart={(e) => setAssetDragPayload(e, [asset.id])}
-          onDoubleClick={() => onReveal(folderOf(asset.path))}
-        >
-          <AssetThumb path={asset.path} kind={asset.kind} missing={asset.missing} />
-          <div className="card-meta">
-            <span className="card-name">{asset.name}</span>
-            <span className="card-sub">
-              {asset.missing ? 'file not found' : formatBytes(asset.size)}
-            </span>
-          </div>
-          <span className={`card-kind card-kind--${asset.kind}`}>{asset.kind}</span>
-          {asset.inProject && (
-            <span className="card-badge" title="Copied into the project">
-              in project
-            </span>
-          )}
-          <button
-            className="card-remove"
-            title="Remove from project (the file on disk is untouched)"
-            onClick={(e) => {
-              e.stopPropagation()
-              removeAssets([asset.id])
-            }}
-          >
-            ×
-          </button>
-        </div>
-      ))}
-    </div>
-  )
-}
-
+/**
+ * The file grid — a folder's real contents, and in the project's bin the
+ * linked assets that live elsewhere.
+ *
+ * One grid rather than two. A card is a card: it shows a file, it says whether
+ * that file is in the project, and it can be dragged onto the Timeline. What
+ * differs between a folder on some drive and the project's own imports folder
+ * is only which cards are there, which is a filter, not a second component.
+ */
 function FolderGrid({
   status,
   listing,
   selected,
+  assetByPath,
+  linkedAssets,
+  focusedAssetId,
+  isBin,
   onOpenFolder,
   onToggle,
   onImportOne,
+  onReveal,
 }: {
   status: 'idle' | 'loading' | 'denied' | 'unreadable'
   listing: DirectoryListing | null
   selected: Set<string>
+  assetByPath: Map<string, Asset>
+  linkedAssets: Asset[]
+  focusedAssetId: string | null
+  isBin: boolean
   onOpenFolder: (path: string) => void
   onToggle: (path: string) => void
   onImportOne: (file: ImportEntry) => void
+  onReveal: (path: string) => void
 }) {
+  // Bring a card selected from elsewhere into view.
+  useEffect(() => {
+    if (!focusedAssetId) return
+    document
+      .querySelector(`[data-asset-id="${focusedAssetId}"]`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [focusedAssetId])
+
   if (status === 'denied') {
     return (
       <div className="cb-empty">
@@ -847,7 +685,8 @@ function FolderGrid({
   }
   if (!listing) return null
 
-  const empty = listing.folders.length === 0 && listing.files.length === 0
+  const empty =
+    listing.folders.length === 0 && listing.files.length === 0 && linkedAssets.length === 0
 
   return (
     <>
@@ -858,7 +697,17 @@ function FolderGrid({
       )}
 
       {empty ? (
-        <div className="cb-empty cb-empty--quiet">Nothing here that FLUX can open.</div>
+        isBin ? (
+          <div className="cb-empty">
+            <p>Nothing imported yet.</p>
+            <p className="cb-empty-hint">
+              Browse a folder in the tree and import, or press <kbd>Ctrl K</kbd> and run{' '}
+              <em>Import Media…</em>
+            </p>
+          </div>
+        ) : (
+          <div className="cb-empty cb-empty--quiet">Nothing here that FLUX can open.</div>
+        )
       ) : (
         <div className="cb-grid">
           {listing.folders.map((folder: FolderEntry) => (
@@ -877,23 +726,121 @@ function FolderGrid({
           ))}
 
           {listing.files.map((file) => (
-            <div
+            <FileCard
               key={file.path}
-              className={`card${selected.has(file.path) ? ' card--selected' : ''}`}
-              title={file.path}
+              path={file.path}
+              name={file.name}
+              kind={file.kind}
+              size={file.size}
+              asset={assetByPath.get(file.path)}
+              selected={selected.has(file.path)}
+              focused={assetByPath.get(file.path)?.id === focusedAssetId}
               onClick={() => onToggle(file.path)}
               onDoubleClick={() => void onImportOne(file)}
-            >
-              <AssetThumb path={file.path} kind={file.kind} />
-              <div className="card-meta">
-                <span className="card-name">{file.name}</span>
-                <span className="card-sub">{formatBytes(file.size)}</span>
-              </div>
-              <span className={`card-kind card-kind--${file.kind}`}>{file.kind}</span>
-            </div>
+            />
+          ))}
+
+          {linkedAssets.map((asset) => (
+            <FileCard
+              key={asset.id}
+              path={asset.path}
+              name={asset.name}
+              kind={asset.kind}
+              size={asset.size}
+              asset={asset}
+              selected={false}
+              focused={asset.id === focusedAssetId}
+              onDoubleClick={() => onReveal(folderOf(asset.path))}
+            />
           ))}
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * One card.
+ *
+ * Draggable whether or not it is in the project: an unimported file dropped on
+ * the Timeline imports itself on the way, which is the whole point of being
+ * able to drag from anywhere. What is never draggable is a file that is gone —
+ * that could only ever produce a clip with nothing to play.
+ */
+function FileCard({
+  path,
+  name,
+  kind,
+  size,
+  asset,
+  selected,
+  focused,
+  onClick,
+  onDoubleClick,
+}: {
+  path: string
+  name: string
+  kind: MediaKind
+  size: number
+  asset?: Asset
+  selected: boolean
+  focused: boolean
+  onClick?: () => void
+  onDoubleClick?: () => void
+}) {
+  const missing = asset?.missing ?? false
+
+  return (
+    <div
+      data-asset-id={asset?.id}
+      className={`card${selected ? ' card--selected' : ''}${focused ? ' card--selected' : ''}${
+        missing ? ' card--missing' : ''
+      }`}
+      title={path}
+      draggable={!missing}
+      onDragStart={(event) => {
+        // An asset drags by id, so the drop is a pure placement. Anything else
+        // drags by path, and the drop imports it first.
+        if (asset) setAssetDragPayload(event, [asset.id])
+        else setFileDragPayload(event, [{ path, kind, size }])
+      }}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+    >
+      <AssetThumb path={path} kind={kind} missing={missing} />
+      <div className="card-meta">
+        <span className="card-name">{name}</span>
+        <span className="card-sub">
+          {/* A zero size means nobody has stat'd it yet, not an empty file.
+              Saying "0 B" about someone's footage is worse than saying nothing. */}
+          {missing ? 'file not found' : size > 0 ? formatBytes(size) : kind}
+        </span>
+      </div>
+      <span className={`card-kind card-kind--${kind}`}>{kind}</span>
+
+      {asset?.inProject && (
+        <span className="card-badge" title="Copied into the project">
+          in project
+        </span>
+      )}
+      {asset && !asset.inProject && (
+        <span className="card-badge card-badge--linked" title={`Linked from ${path}`}>
+          linked
+        </span>
+      )}
+
+      {asset && (
+        <button
+          className="card-remove"
+          title="Remove from project (the file on disk is untouched)"
+          onClick={(event) => {
+            event.stopPropagation()
+            removeAssets([asset.id])
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
   )
 }

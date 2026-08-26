@@ -15,18 +15,18 @@ export const defaultKeymap: Keymap = {
   'ctrl+k': 'palette.open',
   'ctrl+shift+p': 'palette.open',
   '1': 'workspace.switch.edit',
-  '2': 'workspace.switch.sound',
-  '3': 'workspace.switch.nodes',
   'ctrl+1': 'panel.focus.viewer',
   'ctrl+2': 'panel.focus.timeline',
-  'ctrl+3': 'panel.focus.nodemap',
-  'ctrl+4': 'panel.focus.content',
-  'ctrl+5': 'panel.focus.inspector',
-  'ctrl+6': 'panel.focus.mixer',
+  'ctrl+3': 'panel.focus.content',
   'ctrl+s': 'project.save',
   'ctrl+alt+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
   delete: 'timeline.deleteSelected',
+  // The transport. Space is the one key in a media app that is spoken for
+  // before anything else is designed.
+  space: 'playback.toggle',
+  home: 'playback.goToStart',
+  end: 'playback.goToEnd',
 }
 
 /** Normalise a KeyboardEvent into a stable chord string like `ctrl+shift+p`. */

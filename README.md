@@ -43,16 +43,19 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 |---|---|
 | **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
-| **Workspaces** | Saved panel layouts. `1` Edit · `2` Sound Design · `3` Nodes / Motion. |
+| **Workspaces** | Saved panel layouts. `1` Edit. |
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
-| **Panel focus** | `Ctrl 1`–`Ctrl 6`, opening the panel if the workspace doesn't have it. |
-| **Content Browser** | Two rail trees — the local disks and the project. Browse, import by reference, thumbnails on cards. |
-| **Timeline** | Drag assets from the Content Browser onto a track. Select, delete, zoom. |
+| **Panel focus** | `Ctrl 1`–`Ctrl 3`, opening the panel if the workspace doesn't have it. |
+| **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
+| **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Select, delete, zoom, scrub. |
+| **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 
-Six built-in panels: Viewer, Timeline, Node Map, **Content Browser**, Inspector, Mixer. The Content
-Browser and Timeline do real work; the other four are still scaffolding.
+Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
+The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
+not exist yet, and a tour of empty rooms says less about where this is going than three that are
+furnished. They come back when there is something to put in them.
 
 ### Projects
 
@@ -149,9 +152,14 @@ an installed build instead. A packaged FLUX registers the association itself at 
 The rail is ordered by how often it is reached for:
 
 - **Project** — the project's own folders (`imports`, `exports`, `project_files`) as they really are
-  on disk, opened for you, plus the **Assets** bin. These are not the same list: a linked asset
-  lives wherever you left it and appears in the bin without ever appearing under the project folder.
-  Asset rows carry a media icon, never a folder icon.
+  on disk, opened for you. **`imports` is the project's bin**, and the folder the browser opens in.
+
+  There used to be a separate synthetic *Assets* node beside these folders, which meant two lists of
+  the same footage that agreed only some of the time. One consequence of removing it had to be
+  handled rather than ignored: a *linked* asset is not inside `imports` at all, so it would have had
+  nowhere left to appear. The imports view therefore shows the folder's real contents **plus** any
+  asset that lives elsewhere, marked `linked`. Everything imported is visible in one place, which is
+  the property the bin was there for.
 - **Pinned** — folders you marked to keep. Open any folder and hit **Pin**; pins are app-scoped, so
   a footage drive stays pinned across projects.
 - **This PC** — every mounted drive as its own root, expanding lazily.
@@ -172,7 +180,8 @@ shows up as a stutter on each chevron click. Windows system folders (`$Recycle.B
 `System Volume Information`) are hidden, as Explorer hides them — they sit in every drive root and
 only ever produce a permission error.
 
-Browse any folder, import media into the project, see it as cards.
+Browse any folder, import media into the project, see it as cards. Every card is draggable onto the
+Timeline — see below.
 
 **Importing asks how.** An asset is always a reference — an absolute path plus what we know about
 the file — but you choose where that path points:
@@ -208,10 +217,22 @@ blocks), which also gets range requests so video can seek without loading whole.
 
 ### The Timeline
 
-Drag a card from the Content Browser onto a track and it becomes a clip, as long as its source and
-starting where you dropped it. Click to select, `Delete` to remove, `+`/`−` to zoom. Video and
-stills only — blocks are solid, with no waveform, because there is no audio pipeline to draw one
-from.
+Drag a card onto a track and it becomes a clip, as long as its source and starting where you
+dropped it. Click to select, `Delete` to remove, `+`/`−` to zoom, and drag the ruler to scrub.
+Video and stills only — blocks are solid, with no waveform, because there is no audio pipeline to
+draw one from.
+
+**Anything droppable is droppable.** A card already in the project drops as a placement. A file
+that is *not* in the project — from any folder in the browser, or dragged straight out of Explorer —
+imports on the way, question and all, and then places. That means the copy-or-link decision can no
+longer live inside the Content Browser: the Timeline has to raise the same question and has no
+dialog of its own. It lives in [`src/kernel/importPipeline.ts`](src/kernel/importPipeline.ts) and
+asks through a request the app shell answers, so there is one decision rather than two that drift.
+
+A drag carries one of two payloads, both private MIME types — `x-flux-assets` (ids, a placement) or
+`x-flux-files` (paths, an import). A drop target can then refuse a foreign drag by simply not
+finding either, rather than guessing at the payload; dockview drives panel docking through drag
+events, so an unlabelled drag risks being read as a request to move a panel.
 
 A clip is the first thing in FLUX that **owns time**, which in
 [`docs/INTERACTION-MODEL.md`](docs/INTERACTION-MODEL.md) is exactly what separates a
@@ -229,6 +250,39 @@ Two behaviours worth knowing:
   trade this project makes.
 
 Not yet: moving or trimming clips once placed, and audio tracks.
+
+### Playback
+
+`Space` plays. The playhead runs down the Timeline, the Viewer shows the clip under it, and the
+ruler scrubs.
+
+**There is exactly one clock**, in [`src/kernel/playback.ts`](src/kernel/playback.ts). Panels read
+it and render; only commands move it. The moment two panels each keep their own time they disagree,
+and "the picture is a few frames off the timeline" is the kind of bug that makes an editor stop
+trusting the tool.
+
+The clock is driven by `requestAnimationFrame`, **not** by the `<video>` element, and the element is
+dragged along behind it. A video is only the *source* under the playhead: it starts, it ends, it is
+replaced by the next clip, while the sequence's time runs continuously across gaps where no video
+exists at all. A viewer that used the element as its clock would be running on the source's
+timeline instead of the sequence's, and would have nothing to say about a gap between two clips.
+
+The element is re-seeked only when it drifts past about a quarter of a frame. Assigning
+`currentTime` every frame re-seeks the decoder every frame, which stutters far worse than the drift
+it corrects.
+
+Small behaviours that are deliberate: playback **stops on the last frame** rather than running past
+it into empty space, so the picture stays up; pressing play at the end **starts over**, because
+nothing happening is not what a finger expects from a player; and deleting the clip under the
+playhead **pulls the playhead back** rather than leaving it floating past the end of everything,
+where play would then refuse to move it.
+
+This is a *player*, not a renderer — it shows the source directly, because there is no compositor
+yet to composite anything. When the engine lands, the Viewer becomes the surface it draws into and
+the clip lookup moves into the graph. What must not change is who owns the time.
+
+Not yet: audio scrubbing, loop, frame stepping, and playing across a gap without a black frame at
+the seam.
 
 ---
 
@@ -269,11 +323,11 @@ in the skinning system.
 ```
 src/
   kernel/       commands · panels · keymap · workspaces · store
-                project · view · fsBridge · assets · sequence
-                thumbnails · mediaProbe · importMode              (the seams)
+                project · view · playback · fsBridge · assets · sequence
+                importPipeline · thumbnails · mediaProbe          (the seams)
   launcher/     the project chooser, shown until a project is open
-  panels/       the six built-in panels, registered via the SDK
-  shell/        command palette
+  panels/       the three built-in panels, registered via the SDK
+  shell/        command palette · the import-choice host
   styles/       theme tokens + app styles
 shared/         media types, project naming and the .flux format
                 — imported by BOTH main and renderer
@@ -337,6 +391,15 @@ app rather than starting a second copy.
 ```bash
 npm run verify:launch
 ```
+
+```bash
+npm run verify:playback
+```
+
+`verify:playback` is the one suite where "it looks right" proves nothing: a viewer showing a stale
+frame while the clock has moved on, and a clock running while the video is paused, both photograph
+perfectly. So it checks that the sequence's time and the element's time stay in agreement, in
+seconds, against a real decode of a real file.
 
 `verify:app`, `verify:tree` and `verify:timeline` expect fixture media in `~/flux-media-test`. Generate it with
 ffmpeg — two H.264 mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be
