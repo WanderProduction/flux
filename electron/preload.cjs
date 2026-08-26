@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('flux', {
   fs: {
     places: () => ipcRenderer.invoke('fs:places'),
     list: (dirPath) => ipcRenderer.invoke('fs:list', dirPath),
+    subfolders: (dirPath) => ipcRenderer.invoke('fs:subfolders', dirPath),
     exists: (paths) => ipcRenderer.invoke('fs:exists', paths),
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles'),
     /**

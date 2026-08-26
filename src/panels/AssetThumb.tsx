@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
-import { assetUrl, hasFilesystem, type MediaKind } from '../kernel/fsBridge'
-import { cachedThumbnail, requestThumbnail } from '../kernel/thumbnails'
+import { type MediaKind } from '../kernel/fsBridge'
+import { useThumbnail } from './useThumbnail'
 
 /**
  * A card's picture. Renders from cache instantly when the thumbnail is already
@@ -16,29 +15,7 @@ export function AssetThumb({
   kind: MediaKind
   missing?: boolean
 }) {
-  const [src, setSrc] = useState<string | null | undefined>(() => cachedThumbnail(path))
-
-  useEffect(() => {
-    if (missing || !hasFilesystem) return
-
-    const known = cachedThumbnail(path)
-    if (known !== undefined) {
-      setSrc(known)
-      return
-    }
-
-    let cancelled = false
-    setSrc(undefined)
-    void requestThumbnail(path, kind, assetUrl(path)).then((thumbnail) => {
-      // The card can be scrolled away or the folder changed while a decode is
-      // queued; setting state then would warn and waste a render.
-      if (!cancelled) setSrc(thumbnail)
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [path, kind, missing])
+  const src = useThumbnail(path, kind, !missing)
 
   if (missing) {
     return (

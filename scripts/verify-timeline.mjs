@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 
-import { attach, createChecker, evaluate } from './cdp.mjs'
+import { attach, createChecker, evaluate, requireFixtures, resetProject } from './cdp.mjs'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const dir = JSON.stringify(MEDIA_DIR)
@@ -53,21 +53,11 @@ const DRAG_HELPER = `
 `
 
 try {
-  // Fresh project and empty sequence. The waits throw rather than falling
-  // through: silently proceeding before the stores had loaded is what made an
-  // earlier version of this script fail intermittently for reasons that had
-  // nothing to do with the behaviour under test.
-  await evaluate(
-    cdp,
-    `const { assets, sequence: seq } = window.__fluxDev;
-     for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
-     if (!assets.isLoaded()) throw new Error('asset store never finished loading');
-     if (!seq.isSequenceLoaded()) await seq.loadSequence();
-     assets.removeAssets(assets.getAssets().map(a => a.id));
-     seq.clearSequence();
-     await new Promise(r => setTimeout(r, 200));
-     return true;`,
-  )
+  // Shared reset: clears assets, the sequence, AND the Content Browser's view.
+  // Running these suites back-to-back once failed purely because one left the
+  // browser parked in a folder while the next assumed the project view.
+  await requireFixtures(cdp, MEDIA_DIR)
+  await resetProject(cdp)
 
   await check('a new sequence has video tracks and no clips', async () => {
     const state = await evaluate(
@@ -135,9 +125,25 @@ try {
   await check('the clip renders as a block sized to its duration', async () => {
     const block = await evaluate(
       cdp,
-      `const el = document.querySelector('.tl-lane .clip');
-       const label = el.querySelector('.clip-label')?.textContent;
-       return { label, left: el.style.left, width: parseFloat(el.style.width), hasThumb: !!el.querySelector('.clip-thumb') };`,
+      `const until = async (fn, ms = 20000) => {
+         const deadline = Date.now() + ms;
+         while (Date.now() < deadline) {
+           const v = fn();
+           if (v) return v;
+           await new Promise(r => setTimeout(r, 100));
+         }
+         return null;
+       };
+       const el = document.querySelector('.tl-lane .clip');
+       // The block decodes its own thumbnail now, so wait for it rather than
+       // assuming the Content Browser already put one in the cache.
+       await until(() => el.querySelector('.clip-thumb'));
+       return {
+         label: el.querySelector('.clip-label')?.textContent,
+         left: el.style.left,
+         width: parseFloat(el.style.width),
+         hasThumb: !!el.querySelector('.clip-thumb'),
+       };`,
     )
     assert.equal(block.label, 'clipA.mp4')
     assert.equal(block.left, '0px')
@@ -314,7 +320,10 @@ try {
       `const seq = window.__fluxDev.sequence;
        return seq.getSequence().clips.map(c => [c.trackId, Math.round(c.start * 1000), Math.round(c.duration * 1000)]);`,
     )
-    await evaluate(cdp, `location.reload(); return true;`)
+    await evaluate(
+      cdp,
+      `await window.__fluxDev.store.flushStores(); location.reload(); return true;`,
+    )
     await new Promise((r) => setTimeout(r, 2500))
     const after = await evaluate(
       cdp,

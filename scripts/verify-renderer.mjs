@@ -149,7 +149,7 @@ try {
 
   await check('preload bridge exposes the filesystem API', async () => {
     const api = await evaluate(cdp, `return Object.keys(window.flux?.fs ?? {}).sort();`)
-    assert.deepEqual(api, ['assetUrl', 'exists', 'list', 'pickFiles', 'places'])
+    assert.deepEqual(api, ['assetUrl', 'exists', 'list', 'pickFiles', 'places', 'subfolders'])
   })
 
   await check('fs:places returns real folders and drives over IPC', async () => {
@@ -324,7 +324,7 @@ try {
     const result = await evaluate(
       cdp,
       `document.querySelector('.palette-scrim')?.remove();
-       const home = [...document.querySelectorAll('.cb-rail-item')].find(b => b.textContent === 'Home');
+       const home = [...document.querySelectorAll('.cb-quick-item')].find(b => b.textContent === 'Home');
        home.click();
        for (let i = 0; i < 40 && !document.querySelector('.card'); i++)
          await new Promise(r => setTimeout(r, 250));
@@ -424,7 +424,7 @@ try {
   await check('the Project view renders the imported assets', async () => {
     const names = await evaluate(
       cdp,
-      `[...document.querySelectorAll('.cb-rail-item')].find(b => b.textContent === 'Assets').click();
+      `[...document.querySelectorAll('.tree-label')].find(e => e.textContent === 'Assets').closest('.tree-row').click();
        await new Promise(r => setTimeout(r, 400));
        return [...document.querySelectorAll('.card-name')].map(e => e.textContent).sort();`,
     )
@@ -432,7 +432,12 @@ try {
   })
 
   await check('assets survive a reload (persisted to the Electron store)', async () => {
-    await evaluate(cdp, `location.reload(); return true;`)
+    // Flush pending writes before reloading. saveStore is fire-and-forget so
+    // the UI never blocks on disk, which means a reload can outrun the write.
+    await evaluate(
+      cdp,
+      `await window.__fluxDev.store.flushStores(); location.reload(); return true;`,
+    )
     await new Promise((r) => setTimeout(r, 2500))
     const names = await evaluate(
       cdp,
@@ -467,6 +472,28 @@ try {
        return assets.getAssets().map(a => a.name).sort();`,
     )
     assert.deepEqual(remaining, ['clipA.mp4', 'still.jpg'])
+  })
+
+  await check('rapid writes to one store key land in order', async () => {
+    // Regression: each save is a separate IPC round trip with no ordering
+    // guarantee, so a later write could land before an earlier one and leave
+    // stale content on disk. The app showed the new state, the file held the
+    // old one, and the difference only surfaced after a restart.
+    const result = await evaluate(
+      cdp,
+      `const { store } = window.__fluxDev;
+       // A big payload followed immediately by a small one. Unordered, the slow
+       // write finishes last and wins; ordered, the small one is final. Two
+       // equal-sized writes would usually land in order by luck and prove
+       // nothing — an earlier version of this probe did exactly that and stayed
+       // green against the broken implementation.
+       const big = Array.from({ length: 60000 }, (_, i) => ({ i, pad: 'xxxxxxxxxxxxxxxxxxxx' }));
+       store.saveStore('order-probe', { tag: 'first', big });
+       store.saveStore('order-probe', { tag: 'last' });
+       await store.flushStores();
+       return await window.flux.store.get('order-probe');`,
+    )
+    assert.equal(result.tag, 'last', `the later write should win, got tag=${result.tag}`)
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

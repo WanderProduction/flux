@@ -12,6 +12,7 @@ import * as sequence from './kernel/sequence'
 import * as thumbnails from './kernel/thumbnails'
 import { commands } from './kernel/commands'
 import { panels } from './kernel/panels'
+import * as store from './kernel/store'
 
 // Panels register before the first render so the dock's component map is
 // complete on mount. Plugins will hook in here later, ahead of this call.
@@ -33,7 +34,7 @@ if (!container) throw new Error('#root missing from index.html')
  */
 if (import.meta.env.DEV) {
   Object.assign(window, {
-    __fluxDev: { assets, sequence, thumbnails, commands, panels },
+    __fluxDev: { assets, sequence, thumbnails, commands, panels, store },
   })
 }
 

@@ -15,9 +15,11 @@ import path from 'node:path'
 
 import {
   existsMany,
+  isHiddenEntry,
   isServableMediaPath,
   listDirectory,
   listDrives,
+  listSubfolders,
 } from '../electron/filesystem.js'
 
 let passed = 0
@@ -149,6 +151,54 @@ try {
     const bigListing = await listDirectory(big)
     assert.equal(bigListing.truncated, true, 'expected truncation past the cap')
     assert.ok(bigListing.files.length <= 4000)
+  })
+
+  await check('listSubfolders returns directories only', async () => {
+    const { folders } = await listSubfolders(root)
+    const names = folders.map((f) => f.name)
+    // Not an exact match: an earlier check adds `big/` to this same fixture.
+    assert.ok(names.includes('Archive') && names.includes('Footage'))
+    assert.ok(!names.includes('.hidden-folder'), 'dotfolder leaked')
+    assert.ok(
+      !names.some((n) => n.endsWith('.mp4') || n.endsWith('.png') || n.endsWith('.txt')),
+      `files leaked into the tree: ${names.join(', ')}`,
+    )
+    assert.ok(folders.every((f) => path.isAbsolute(f.path)))
+  })
+
+  await check('listSubfolders hides dotfolders and Windows system folders', () => {
+    assert.equal(isHiddenEntry('.git'), true)
+    assert.equal(isHiddenEntry('Footage'), false)
+    if (process.platform === 'win32') {
+      // These sit in every drive root and only ever produce EACCES.
+      assert.equal(isHiddenEntry('$Recycle.Bin'), true)
+      assert.equal(isHiddenEntry('System Volume Information'), true)
+    }
+  })
+
+  await check('listSubfolders does not stat media, so it stays cheap', async () => {
+    // A folder of files with no subfolders should come back empty and fast,
+    // rather than paying for a stat per media file the tree never shows.
+    const started = Date.now()
+    const { folders } = await listSubfolders(path.join(root, 'big'))
+    assert.deepEqual(folders, [])
+    assert.ok(Date.now() - started < 4000, 'subfolder listing took too long')
+  })
+
+  await check('listSubfolders rejects an unreadable path', async () => {
+    await assert.rejects(() => listSubfolders(path.join(root, 'nope')))
+  })
+
+  await check('every drive root can be expanded', async () => {
+    const drives = await listDrives()
+    for (const drive of drives) {
+      const { folders } = await listSubfolders(drive.path)
+      assert.ok(Array.isArray(folders), `${drive.name} did not enumerate`)
+      assert.ok(
+        folders.every((f) => !f.name.startsWith('$')),
+        `${drive.name} leaked a system folder`,
+      )
+    }
   })
 } finally {
   await fs.rm(root, { recursive: true, force: true })

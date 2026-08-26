@@ -496,51 +496,193 @@ kbd {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-columns: 148px 1fr;
+  /* columns are set inline: rail | resizer | main */
   min-height: 0;
 }
 
 .cb-rail {
-  border-right: 1px solid var(--flux-border);
   background: var(--flux-bg);
-  overflow-y: auto;
-  padding: 8px 0;
+  overflow: auto;
+  padding: 8px 0 12px;
+  min-width: 0;
 }
-.cb-rail-group {
-  margin-bottom: 12px;
+
+.cb-resizer {
+  cursor: col-resize;
+  background: var(--flux-border);
+  position: relative;
+}
+.cb-resizer::after {
+  /* A 4px strip is a small target, so the grab area is widened invisibly. */
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+}
+.cb-resizer:hover,
+.cb-resizer:active {
+  background: var(--flux-accent);
+}
+
+.cb-tree-section {
+  margin-bottom: 10px;
 }
 .cb-rail-title {
-  display: block;
-  padding: 0 12px 4px;
+  margin: 0;
+  padding: 0 10px 4px;
   font-size: 9px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.09em;
   color: var(--flux-text-faint);
 }
-.cb-rail-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 4px 12px;
-  border: 0;
-  border-left: 2px solid transparent;
-  background: transparent;
+
+.cb-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 0 8px;
+}
+.cb-quick-item {
+  padding: 2px 7px;
+  border: 1px solid var(--flux-border);
+  border-radius: 10px;
+  background: var(--flux-bg-panel);
   color: var(--flux-text-dim);
   font-family: inherit;
-  font-size: var(--flux-text-md);
+  font-size: 10px;
   cursor: pointer;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.cb-rail-item:hover {
+.cb-quick-item:hover {
   background: var(--flux-bg-hover);
   color: var(--flux-text);
 }
-.cb-rail-item--active {
-  border-left-color: var(--flux-accent);
-  background: var(--flux-bg-elevated);
+.cb-quick-item--active {
+  border-color: var(--flux-accent-dim);
+  color: var(--flux-accent);
+}
+
+/* -- tree -- */
+
+.tree {
+  display: flex;
+  flex-direction: column;
+}
+.tree-empty {
+  margin: 0;
+  padding: 2px 12px;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-faint);
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  height: 21px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-md);
+  cursor: pointer;
+  white-space: nowrap;
+  outline: none;
+  border-left: 2px solid transparent;
+}
+.tree-row:hover {
+  background: var(--flux-bg-hover);
   color: var(--flux-text);
+}
+.tree-row:focus-visible {
+  box-shadow: 0 0 0 1px var(--flux-accent) inset;
+}
+.tree-row--selected {
+  background: var(--flux-bg-elevated);
+  border-left-color: var(--flux-accent);
+  color: var(--flux-text);
+}
+.tree-row--error {
+  color: var(--flux-warn);
+}
+.tree-row--placeholder {
+  color: var(--flux-text-faint);
+  font-style: italic;
+  cursor: default;
+}
+.tree-row--placeholder:hover {
+  background: transparent;
+  color: var(--flux-text-faint);
+}
+
+.tree-chevron {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+}
+.tree-chevron::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  border-left: 4px solid var(--flux-text-faint);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 90ms ease;
+  transform-origin: 2px 50%;
+}
+.tree-chevron--open::before {
+  transform: rotate(90deg);
+}
+.tree-chevron--leaf {
+  cursor: default;
+}
+.tree-chevron--leaf::before {
+  content: none;
+}
+
+.tree-icon {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 9px;
+  border-radius: 1.5px;
+  background: var(--flux-bg-active);
+  border: 1px solid var(--flux-border-strong);
+}
+.tree-icon--drive {
+  background: var(--flux-bg-hover);
+  border-color: var(--flux-text-faint);
+}
+.tree-icon--folder {
+  border-top-width: 3px;
+  border-top-color: var(--flux-text-faint);
+}
+.tree-icon--root {
+  background: color-mix(in srgb, var(--flux-accent) 45%, var(--flux-bg-active));
+  border-color: var(--flux-accent-dim);
+}
+.tree-icon--video {
+  background: color-mix(in srgb, var(--flux-accent) 45%, var(--flux-bg-active));
+  border-color: transparent;
+}
+.tree-icon--image {
+  background: color-mix(in srgb, var(--flux-driver) 45%, var(--flux-bg-active));
+  border-color: transparent;
+}
+
+.tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-note {
+  margin-left: auto;
+  padding-left: 6px;
+  font-size: 9px;
+  color: var(--flux-text-faint);
+  font-family: var(--flux-font-mono);
 }
 
 .cb-main {

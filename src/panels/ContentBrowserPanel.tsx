@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { commands } from '../kernel/commands'
 import {
@@ -23,9 +23,11 @@ import {
   type Asset,
 } from '../kernel/assets'
 import { setAssetDragPayload } from '../kernel/dragAssets'
+import { loadStore, saveStore } from '../kernel/store'
 import { mediaKindOf } from '../../shared/mediaTypes.js'
 import { PanelFrame } from './PanelFrame'
 import { AssetThumb } from './AssetThumb'
+import { TreeView, useDiskTree, type TreeRow } from './FolderTree'
 
 /** Directory portion of a path, for revealing an asset's folder. */
 function folderOf(filePath: string): string {
@@ -36,11 +38,22 @@ function folderOf(filePath: string): string {
 /**
  * Content Browser — browse the machine, import media into the project.
  *
- * Two locations share one grid: the Project (imported assets) and any folder on
- * disk. Import is by reference; see kernel/assets.ts for why nothing is copied.
+ * The rail holds two trees: the project's imported assets, and the local disks
+ * with every mounted drive as its own root. They are separate on purpose. A
+ * project asset is a *reference* to a file, not the file's location, so folding
+ * them into one tree would suggest the project mirrors the disk — and it does
+ * not. Project folders, when they arrive, will be the project's own structure
+ * with no relationship to where the files actually live.
+ *
+ * Both trees drive the same grid.
  */
 
 type Location = { type: 'project' } | { type: 'folder'; path: string }
+
+const RAIL_STORE = 'ui-content-browser'
+const RAIL_MIN = 140
+const RAIL_MAX = 460
+const RAIL_DEFAULT = 210
 
 export function ContentBrowserPanel() {
   const [location, setLocation] = useState<Location>({ type: 'project' })
@@ -49,6 +62,9 @@ export function ContentBrowserPanel() {
   const [status, setStatus] = useState<'idle' | 'loading' | 'denied' | 'unreadable'>('idle')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [assets, setAssets] = useState<Asset[]>(getAssets)
+  const [projectOpen, setProjectOpen] = useState(true)
+  const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null)
+  const [railWidth, setRailWidth] = useState(RAIL_DEFAULT)
 
   // ── project assets ────────────────────────────────────────────
   useEffect(() => {
@@ -58,7 +74,52 @@ export function ContentBrowserPanel() {
     return unsubscribe
   }, [])
 
-  // ── places rail ───────────────────────────────────────────────
+  // ── rail width, remembered across sessions ────────────────────
+  useEffect(() => {
+    let cancelled = false
+    void loadStore<number>(RAIL_STORE, RAIL_DEFAULT).then((width) => {
+      if (!cancelled && typeof width === 'number') {
+        setRailWidth(Math.min(RAIL_MAX, Math.max(RAIL_MIN, width)))
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const beginResize = useCallback(
+    (event: React.PointerEvent) => {
+      event.preventDefault()
+      dragStateRef.current = { startX: event.clientX, startWidth: railWidth }
+
+      const onMove = (move: PointerEvent) => {
+        const state = dragStateRef.current
+        if (!state) return
+        const next = Math.min(
+          RAIL_MAX,
+          Math.max(RAIL_MIN, state.startWidth + (move.clientX - state.startX)),
+        )
+        setRailWidth(next)
+      }
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        dragStateRef.current = null
+        // Persist on release rather than on every move: a drag fires hundreds
+        // of events and each one would be a disk write.
+        setRailWidth((width) => {
+          void saveStore(RAIL_STORE, width)
+          return width
+        })
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [railWidth],
+  )
+
+  // ── places + drives ───────────────────────────────────────────
   useEffect(() => {
     if (!hasFilesystem) return
     let cancelled = false
@@ -70,11 +131,21 @@ export function ContentBrowserPanel() {
     }
   }, [])
 
-  // ── directory listing ─────────────────────────────────────────
-  const openFolder = useCallback((path: string) => {
-    setLocation({ type: 'folder', path })
-    setSelected(new Set())
-  }, [])
+  const drives = useMemo(() => places?.drives ?? [], [places])
+  const disk = useDiskTree(drives)
+
+  // ── navigation ────────────────────────────────────────────────
+  const openFolder = useCallback(
+    (path: string, revealInTree = true) => {
+      setLocation({ type: 'folder', path })
+      setSelected(new Set())
+      setFocusedAssetId(null)
+      // Keep the tree in step with the grid, so descending through folder cards
+      // does not leave the tree pointing somewhere else entirely.
+      if (revealInTree) void disk.reveal(path)
+    },
+    [disk],
+  )
 
   const openProject = useCallback(() => {
     setLocation({ type: 'project' })
@@ -137,7 +208,63 @@ export function ContentBrowserPanel() {
     importPaths(entries)
   }, [importPaths])
 
-  // ── commands (registered while this panel is mounted) ─────────
+  // ── project tree rows ─────────────────────────────────────────
+  const projectRows = useMemo<TreeRow[]>(() => {
+    const root: TreeRow = {
+      id: '::project',
+      label: 'Assets',
+      depth: 0,
+      icon: 'root',
+      expandable: true,
+      expanded: projectOpen,
+      note: assets.length > 0 ? String(assets.length) : undefined,
+      title: 'Imported project assets',
+    }
+    if (!projectOpen) return [root]
+
+    if (assets.length === 0) {
+      return [
+        root,
+        {
+          id: '::project-empty',
+          label: 'nothing imported',
+          depth: 1,
+          icon: 'folder',
+          expandable: false,
+          expanded: false,
+          placeholder: true,
+          title: 'Import media to fill the project',
+        },
+      ]
+    }
+
+    const leaves = [...assets]
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+      .map<TreeRow>((asset) => ({
+        id: asset.id,
+        label: asset.name,
+        depth: 1,
+        icon: asset.kind,
+        expandable: false,
+        expanded: false,
+        note: asset.missing ? 'offline' : undefined,
+        title: asset.path,
+      }))
+    return [root, ...leaves]
+  }, [assets, projectOpen])
+
+  const onProjectSelect = useCallback((row: TreeRow) => {
+    if (row.id === '::project') {
+      setLocation({ type: 'project' })
+      setFocusedAssetId(null)
+      return
+    }
+    // An asset leaf: show the project grid with that card highlighted.
+    setLocation({ type: 'project' })
+    setFocusedAssetId(row.id)
+  }, [])
+
+  // ── commands ──────────────────────────────────────────────────
   useEffect(() => {
     if (!hasFilesystem) return
     const handle = commands.registerAll([
@@ -148,17 +275,18 @@ export function ContentBrowserPanel() {
         detail: 'Pick files to add to the project by reference',
         run: () => void importViaDialog(),
       },
-      {
-        id: 'content.project',
-        title: 'Go to Project',
-        category: 'Content',
-        run: openProject,
-      },
+      { id: 'content.project', title: 'Go to Project', category: 'Content', run: openProject },
       { id: 'content.up', title: 'Go Up One Folder', category: 'Content', run: goUp },
       { id: 'content.refresh', title: 'Refresh Folder', category: 'Content', run: refresh },
+      {
+        id: 'content.collapseTree',
+        title: 'Collapse All Folders',
+        category: 'Content',
+        run: () => disk.collapseAll(),
+      },
     ])
     return () => handle.dispose()
-  }, [importViaDialog, openProject, goUp, refresh])
+  }, [importViaDialog, openProject, goUp, refresh, disk])
 
   // ── rendering ─────────────────────────────────────────────────
   const crumbs = useMemo(
@@ -225,39 +353,78 @@ export function ContentBrowserPanel() {
         </>
       }
     >
-      <div className="cb">
+      <div className="cb" style={{ gridTemplateColumns: `${railWidth}px 4px 1fr` }}>
         <aside className="cb-rail">
-          <div className="cb-rail-group">
-            <span className="cb-rail-title">Project</span>
-            <button
-              className={`cb-rail-item${location.type === 'project' ? ' cb-rail-item--active' : ''}`}
-              onClick={openProject}
-            >
-              Assets
-            </button>
-          </div>
+          <section className="cb-tree-section">
+            <h3 className="cb-rail-title">Project</h3>
+            <TreeView
+              rows={projectRows}
+              selectedId={
+                location.type === 'project' ? (focusedAssetId ?? '::project') : null
+              }
+              onSelect={onProjectSelect}
+              onToggle={(row) => {
+                if (row.id === '::project') setProjectOpen((open) => !open)
+              }}
+              onDragStartRow={(row, event) => {
+                // Leaves are assets, so the tree is a drag source for the
+                // timeline exactly like the cards are.
+                if (row.id.startsWith('::')) return
+                const asset = assets.find((a) => a.id === row.id)
+                if (asset && !asset.missing) setAssetDragPayload(event, [asset.id])
+              }}
+            />
+          </section>
 
-          {places && (
-            <>
-              <RailGroup
-                title="Places"
-                entries={places.places}
-                location={location}
-                onOpen={openFolder}
-              />
-              <RailGroup
-                title="Drives"
-                entries={places.drives}
-                location={location}
-                onOpen={openFolder}
-              />
-            </>
+          {places && places.places.length > 0 && (
+            <section className="cb-tree-section">
+              <h3 className="cb-rail-title">Quick</h3>
+              <div className="cb-quick">
+                {places.places.map((place) => (
+                  <button
+                    key={place.path}
+                    className={`cb-quick-item${
+                      location.type === 'folder' && location.path === place.path
+                        ? ' cb-quick-item--active'
+                        : ''
+                    }`}
+                    onClick={() => openFolder(place.path)}
+                    title={place.path}
+                  >
+                    {place.name}
+                  </button>
+                ))}
+              </div>
+            </section>
           )}
+
+          <section className="cb-tree-section">
+            <h3 className="cb-rail-title">This PC</h3>
+            <TreeView
+              rows={disk.rows}
+              selectedId={location.type === 'folder' ? location.path : null}
+              onSelect={(row) => openFolder(row.id, false)}
+              onToggle={(row) => disk.toggle(row.id)}
+              emptyNote="No drives found"
+            />
+          </section>
         </aside>
+
+        <div
+          className="cb-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          onPointerDown={beginResize}
+          title="Drag to resize"
+        />
 
         <div className="cb-main">
           {location.type === 'project' ? (
-            <ProjectGrid assets={assets} onReveal={openFolder} />
+            <ProjectGrid
+              assets={assets}
+              focusedId={focusedAssetId}
+              onReveal={(path) => openFolder(path)}
+            />
           ) : (
             <FolderGrid
               status={status}
@@ -274,50 +441,29 @@ export function ContentBrowserPanel() {
   )
 }
 
-function RailGroup({
-  title,
-  entries,
-  location,
-  onOpen,
-}: {
-  title: string
-  entries: FolderEntry[]
-  location: Location
-  onOpen: (path: string) => void
-}) {
-  if (entries.length === 0) return null
-  return (
-    <div className="cb-rail-group">
-      <span className="cb-rail-title">{title}</span>
-      {entries.map((entry) => (
-        <button
-          key={entry.path}
-          className={`cb-rail-item${
-            location.type === 'folder' && location.path === entry.path ? ' cb-rail-item--active' : ''
-          }`}
-          onClick={() => onOpen(entry.path)}
-          title={entry.path}
-        >
-          {entry.name}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 function ProjectGrid({
   assets,
+  focusedId,
   onReveal,
 }: {
   assets: Asset[]
+  focusedId: string | null
   onReveal: (path: string) => void
 }) {
+  // Bring a card selected from the tree into view.
+  useEffect(() => {
+    if (!focusedId) return
+    document
+      .querySelector(`[data-asset-id="${focusedId}"]`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [focusedId])
+
   if (assets.length === 0) {
     return (
       <div className="cb-empty">
         <p>No assets yet.</p>
         <p className="cb-empty-hint">
-          Browse a folder on the left and import, or press <kbd>Ctrl K</kbd> and run{' '}
+          Browse a folder in the tree and import, or press <kbd>Ctrl K</kbd> and run{' '}
           <em>Import Media…</em>
         </p>
       </div>
@@ -329,7 +475,10 @@ function ProjectGrid({
       {assets.map((asset) => (
         <div
           key={asset.id}
-          className={`card${asset.missing ? ' card--missing' : ''}`}
+          data-asset-id={asset.id}
+          className={`card${asset.missing ? ' card--missing' : ''}${
+            asset.id === focusedId ? ' card--selected' : ''
+          }`}
           title={asset.path}
           // Only a resolvable asset is draggable — dropping a card whose file is
           // gone could only ever produce a clip that cannot play.
@@ -410,7 +559,7 @@ function FolderGrid({
         <div className="cb-empty cb-empty--quiet">Nothing here that FLUX can open.</div>
       ) : (
         <div className="cb-grid">
-          {listing.folders.map((folder) => (
+          {listing.folders.map((folder: FolderEntry) => (
             <div
               key={folder.path}
               className="card card--folder"

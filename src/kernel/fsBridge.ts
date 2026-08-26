@@ -34,6 +34,10 @@ export type ListResult =
   | { ok: true; listing: DirectoryListing }
   | { ok: false; error: 'denied' | 'unreadable' }
 
+export type SubfolderResult =
+  | { ok: true; folders: FolderEntry[]; truncated: boolean }
+  | { ok: false; error: 'denied' | 'unreadable' }
+
 export interface Places {
   places: FolderEntry[]
   drives: FolderEntry[]
@@ -42,6 +46,7 @@ export interface Places {
 interface FsBridge {
   places: () => Promise<Places>
   list: (dirPath: string) => Promise<ListResult>
+  subfolders: (dirPath: string) => Promise<SubfolderResult>
   exists: (paths: string[]) => Promise<Record<string, boolean>>
   pickFiles: () => Promise<string[]>
   assetUrl: (filePath: string) => string
@@ -63,6 +68,8 @@ function requireFs(): FsBridge {
 
 export const listPlaces = (): Promise<Places> => requireFs().places()
 export const listDirectory = (dirPath: string): Promise<ListResult> => requireFs().list(dirPath)
+export const listSubfolders = (dirPath: string): Promise<SubfolderResult> =>
+  requireFs().subfolders(dirPath)
 export const existsMany = (paths: string[]): Promise<Record<string, boolean>> =>
   requireFs().exists(paths)
 export const pickFiles = (): Promise<string[]> => requireFs().pickFiles()

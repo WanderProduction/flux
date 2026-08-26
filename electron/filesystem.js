@@ -48,7 +48,7 @@ export async function listDirectory(dirPath) {
     }
 
     const name = dirent.name
-    if (name.startsWith('.')) continue // dotfiles stay hidden
+    if (isHiddenEntry(name)) continue
 
     const full = path.join(resolved, name)
     let isDirectory = dirent.isDirectory()
@@ -154,4 +154,62 @@ export async function existsMany(paths) {
  */
 export function isServableMediaPath(filePath) {
   return mediaKindOf(filePath) !== null
+}
+
+/**
+ * Entries a file browser should not show.
+ *
+ * Dotfiles everywhere, plus the Windows system folders that sit in every drive
+ * root and only ever produce an EACCES when opened — `$Recycle.Bin`,
+ * `System Volume Information` and friends. Explorer hides them for the same
+ * reason. This is a name-based test rather than a real hidden-attribute check
+ * because Node exposes no portable way to read that attribute, and a wrong
+ * guess here only ever hides noise.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isHiddenEntry(name) {
+  if (name.startsWith('.')) return true
+  if (process.platform !== 'win32') return false
+  return name.startsWith('$') || name === 'System Volume Information'
+}
+
+/**
+ * Subdirectories only — the tree's expand step.
+ *
+ * Deliberately not listDirectory: expanding a node needs no file metadata, and
+ * statting every media file in a folder the user is only passing through is
+ * work that shows up as a stutter on each chevron click.
+ * @param {string} dirPath
+ * @returns {Promise<{ folders: Array<{ name: string, path: string }>, truncated: boolean }>}
+ */
+export async function listSubfolders(dirPath) {
+  const resolved = path.resolve(dirPath)
+  const dirents = await fs.readdir(resolved, { withFileTypes: true })
+
+  const folders = []
+  let truncated = false
+
+  for (const dirent of dirents) {
+    if (folders.length >= MAX_ENTRIES) {
+      truncated = true
+      break
+    }
+    const name = dirent.name
+    if (isHiddenEntry(name)) continue
+
+    const full = path.join(resolved, name)
+    let isDirectory = dirent.isDirectory()
+    if (dirent.isSymbolicLink()) {
+      try {
+        isDirectory = (await fs.stat(full)).isDirectory()
+      } catch {
+        continue // dangling link
+      }
+    }
+    if (isDirectory) folders.push({ name, path: full })
+  }
+
+  folders.sort((a, b) => collator.compare(a.name, b.name))
+  return { folders, truncated }
 }

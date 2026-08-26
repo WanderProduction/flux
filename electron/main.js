@@ -4,7 +4,13 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 
 import { DIALOG_FILTERS, mediaKindOf } from '../shared/mediaTypes.js'
-import { existsMany, isServableMediaPath, listDirectory, listDrives } from './filesystem.js'
+import {
+  existsMany,
+  isServableMediaPath,
+  listDirectory,
+  listDrives,
+  listSubfolders,
+} from './filesystem.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DEV_URL = 'http://127.0.0.1:5273'
@@ -110,6 +116,18 @@ ipcMain.handle('fs:list', async (_e, dirPath) => {
     // real disk, so they travel back as data for the UI to render calmly
     // rather than as an exception that trips an error boundary.
     return { ok: false, error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'unreadable' }
+  }
+})
+ipcMain.handle('fs:subfolders', async (_e, dirPath) => {
+  try {
+    return { ok: true, ...(await listSubfolders(dirPath)) }
+  } catch (err) {
+    // Expanding a tree node onto an unreadable folder is routine on a real
+    // disk, so this is data for the row to render, not an exception.
+    return {
+      ok: false,
+      error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'unreadable',
+    }
   }
 })
 ipcMain.handle('fs:exists', (_e, paths) => existsMany(paths))

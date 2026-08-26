@@ -123,20 +123,59 @@ export async function attach(port = DEFAULT_PORT) {
 }
 
 /**
- * Waits for the app's asset and sequence stores to finish loading, then resets
- * both, so a run starts from a known state.
+ * Waits for the app's stores to load, then resets everything a suite could have
+ * left behind: assets, the sequence, and the Content Browser's own view state.
+ *
+ * The UI reset matters as much as the data reset. Running these suites
+ * back-to-back once failed in ways that had nothing to do with the code under
+ * test, purely because one suite left the browser parked in a folder and the
+ * next assumed the project view.
  */
 export async function resetProject(cdp) {
-  return evaluate(
+  const ok = await evaluate(
     cdp,
-    `const { assets, sequence } = window.__fluxDev;
-     for (let i = 0; i < 40 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+    `const { assets, sequence, commands } = window.__fluxDev;
+     for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+     if (!assets.isLoaded()) throw new Error('asset store never finished loading');
      if (!sequence.isSequenceLoaded()) await sequence.loadSequence();
+
      assets.removeAssets(assets.getAssets().map(a => a.id));
      sequence.clearSequence();
-     await new Promise(r => setTimeout(r, 200));
-     return true;`,
+
+     // Put the Content Browser back where a suite expects to find it.
+     await commands.run('content.collapseTree');
+     await commands.run('content.project');
+     await new Promise(r => setTimeout(r, 300));
+     return assets.getAssets().length === 0 && sequence.getSequence().clips.length === 0;`,
   )
+  if (!ok) throw new Error('resetProject did not reach a clean state')
+  return ok
+}
+
+/**
+ * Fails loudly when the ffmpeg fixtures are absent.
+ *
+ * Without this a missing fixture surfaces as assets being flagged `missing`,
+ * which reads like a bug in the offline-detection code rather than an empty
+ * directory.
+ */
+export async function requireFixtures(cdp, mediaDir) {
+  const result = await evaluate(
+    cdp,
+    `return await window.flux.fs.list(${JSON.stringify(mediaDir)});`,
+  )
+  if (!result.ok) {
+    throw new Error(
+      `fixtures missing at ${mediaDir} (${result.error}) — see the README for the ffmpeg commands`,
+    )
+  }
+  const names = result.listing.files.map((f) => f.name)
+  for (const required of ['clipA.mp4', 'still.jpg']) {
+    if (!names.includes(required)) {
+      throw new Error(`fixture ${required} missing from ${mediaDir}`)
+    }
+  }
+  return names
 }
 
 export function createChecker() {

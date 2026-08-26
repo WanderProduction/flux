@@ -46,13 +46,34 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Layout persistence** | `Ctrl S` saves the current workspace's layout, `Ctrl Shift R` resets it. Restored on launch. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 6`, opening the panel if the workspace doesn't have it. |
-| **Content Browser** | Browse the machine, import image and video by reference, thumbnails on cards. |
+| **Content Browser** | Two rail trees — the local disks and the project. Browse, import by reference, thumbnails on cards. |
 | **Timeline** | Drag assets from the Content Browser onto a track. Select, delete, zoom. |
 
 Six built-in panels: Viewer, Timeline, Node Map, **Content Browser**, Inspector, Mixer. The Content
 Browser and Timeline do real work; the other four are still scaffolding.
 
 ### The Content Browser
+
+The rail holds **two separate trees**:
+
+- **Project** — the imported assets. Leaves drag to the timeline exactly like cards do.
+- **This PC** — every mounted drive as its own root, expanding lazily as you open branches.
+
+They are separate on purpose. A project asset is a *reference* to a file, not the file's location,
+so folding them into one tree would imply the project mirrors the disk — and it does not. Project
+folders, when they arrive, will be the project's own structure with no relationship to where the
+files actually live.
+
+Both trees drive the same grid. Arrow keys work throughout: Left/Right collapse and expand, Up/Down
+move, Enter selects. Descending into a folder from the grid reveals and selects that path in the
+tree, so the two panes never disagree about where you are. The rail is resizable and remembers its
+width — deep trees need it.
+
+Expanding a node uses a subfolder-only read rather than a full listing: opening a branch needs no
+file metadata, and statting every media file in a folder you are only passing through is work that
+shows up as a stutter on each chevron click. Windows system folders (`$Recycle.Bin`,
+`System Volume Information`) are hidden, as Explorer hides them — they sit in every drive root and
+only ever produce a permission error.
 
 Browse any folder, import media into the project, see it as cards.
 
@@ -174,16 +195,27 @@ npm run verify:app
 ```
 
 ```bash
+npm run verify:tree
+```
+
+```bash
 npm run verify:timeline
 ```
 
-`verify:app` and `verify:timeline` expect fixture media in `~/flux-media-test`. Generate it with
+`verify:app`, `verify:tree` and `verify:timeline` expect fixture media in `~/flux-media-test`. Generate it with
 ffmpeg — two H.264 mp4s, a VP9 webm, a png, a jpg, a nested folder, a `notes.txt` that must never be
 listed, and a deliberately corrupt `.mp4` that must resolve to "no preview" rather than hang. Both
 clear the project's asset list and sequence so runs are repeatable.
 
 `verify:timeline` synthesises drag and drop with a real `DataTransfer` and real `DragEvent`s
 dispatched at the actual DOM nodes, so the app's own handlers run as they do under a mouse.
+`verify:tree` clicks real chevrons and dispatches real arrow keys.
+
+> **Three rules the UI harnesses learned the hard way.** Wait for a *condition*, never a duration —
+> a cold directory read is slower than any sleep you would guess. Identify a tree row by *path*,
+> never by label — `Users` and `Program Files` exist on most drives, so a label match silently
+> picks a row on the wrong one. And let every check build the state it needs from scratch, so none
+> of them depends on what another happened to leave behind.
 
 > **Harnesses must reach kernel state through `window.__fluxDev`** (defined in `src/main.tsx`,
 > stripped from production builds), never by dynamic import. Importing `/src/kernel/x.ts` from

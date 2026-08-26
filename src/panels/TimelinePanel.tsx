@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { commands } from '../kernel/commands'
 import { ensureProbed, getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { isAssetDrag, readAssetDragPayload } from '../kernel/dragAssets'
-import { cachedThumbnail } from '../kernel/thumbnails'
 import {
   addClip,
   findFreeStart,
@@ -19,6 +18,7 @@ import {
   type Track,
 } from '../kernel/sequence'
 import { PanelFrame } from './PanelFrame'
+import { useThumbnail } from './useThumbnail'
 
 /**
  * Timeline — the time-occupying nodes of the current scope.
@@ -305,7 +305,10 @@ function ClipBlock({
   // The asset can be gone while the clip remains: removing something from the
   // bin must not silently delete the editing work that used it.
   const orphaned = !asset
-  const thumbnail = asset && !asset.missing ? cachedThumbnail(asset.path) : null
+  // Requests its own decode rather than reading the cache. Reading the cache
+  // made a clip's picture depend on whether the Content Browser had rendered
+  // that card first, so a block was blank for any asset never scrolled past.
+  const thumbnail = useThumbnail(asset?.path, asset?.kind, Boolean(asset) && !asset?.missing)
 
   const label = orphaned ? 'missing asset' : asset.name
   const state = orphaned || asset.missing ? ' clip--orphan' : ''
