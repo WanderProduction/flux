@@ -23,7 +23,8 @@
     "verify:tree": "node scripts/verify-tree.mjs",
     "verify:timeline": "node scripts/verify-timeline.mjs",
     "verify:launch": "node scripts/verify-launch.mjs",
-    "verify:playback": "node scripts/verify-playback.mjs"
+    "verify:playback": "node scripts/verify-playback.mjs",
+    "verify:demux": "node scripts/verify-demux.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",

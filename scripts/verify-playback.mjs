@@ -11,6 +11,13 @@
  * is that the sequence's time and the element's time stay in agreement, in
  * seconds, against a real decode of a real file.
  *
+ * There are two ways a picture reaches the screen — the WebCodecs pipeline
+ * drawing to a canvas, and a plain <video> for files the demuxer will not touch
+ * — so the checks ask *what is on screen* through `__picture()` rather than
+ * reaching for one element or the other. A check that names an element passes
+ * or fails on which path happened to be taken, which is not what any of these
+ * are about.
+ *
  * CLEARS the project's sequence so runs are repeatable.
  */
 
@@ -36,10 +43,48 @@ const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 const { check, report } = createChecker()
 const cdp = await attach()
 
+/**
+ * What the viewer is showing, and how it got there.
+ *
+ * `time` is in *source* seconds — where the picture is inside its own clip —
+ * because that is the number both paths can honestly report.
+ */
+const PICTURE = `
+  window.__picture = () => {
+    const canvas = document.querySelector('canvas.viewer-media');
+    if (canvas && getComputedStyle(canvas).display !== 'none' && canvas.dataset.frameTime) {
+      return { via: 'pipeline', time: parseFloat(canvas.dataset.frameTime), el: canvas };
+    }
+    const video = document.querySelector('video.viewer-media');
+    if (video) return { via: 'element', time: video.currentTime, el: video };
+    return { via: 'none', time: null, el: null };
+  };
+  window.__lit = (el, w = 48, h = 27) => {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(el, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    let lit = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i+1] + d[i+2] > 40) lit++;
+    return { lit, of: w * h };
+  };
+  window.__settle = async (want, ms = 6000) => {
+    const deadline = performance.now() + ms;
+    while (performance.now() < deadline) {
+      const p = window.__picture();
+      if (p.time !== null && Math.abs(p.time - want) < 0.08) return p;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return window.__picture();
+  };
+  return true;`
+
 try {
   await requireFixtures(cdp, MEDIA_DIR)
   await ensureProject(cdp, VERIFY_PROJECT)
   await resetProject(cdp)
+  await evaluate(cdp, PICTURE)
 
   // One clip on V1, starting at 0. Everything below reads against it.
   const setup = await evaluate(
@@ -83,14 +128,12 @@ try {
       cdp,
       `const { playback } = window.__fluxDev;
        playback.seek(0.5);
-       for (let i = 0; i < 40 && !document.querySelector('video.viewer-media'); i++)
-         await new Promise(r => setTimeout(r, 100));
-       const v = document.querySelector('video.viewer-media');
-       return { present: !!v, src: v?.getAttribute('src')?.slice(0, 11) ?? null,
+       const p = await window.__settle(0.5);
+       return { via: p.via, time: p.time,
                 placeholder: !!document.querySelector('.viewer-placeholder') };`,
     )
-    assert.equal(state.present, true, 'a video element should be on screen')
-    assert.equal(state.src, 'flux-asset:', 'served over the app protocol, not file://')
+    assert.notEqual(state.via, 'none', 'nothing is drawing the picture')
+    assert.ok(Math.abs(state.time - 0.5) < 0.1, `the picture sat at ${state.time}s`)
     assert.equal(state.placeholder, false)
   })
 
@@ -128,12 +171,14 @@ try {
        await new Promise(r => setTimeout(r, 300));
        await commands.run('playback.toggle');
        await new Promise(r => setTimeout(r, 1200));
-       const v = document.querySelector('video.viewer-media');
-       const sample = { time: playback.getTime(), videoTime: v.currentTime, paused: v.paused };
+       const before = playback.getTime();
+       const shown = window.__picture().time;
+       await new Promise(r => setTimeout(r, 400));
+       const moved = window.__picture().time > shown;
        await commands.run('playback.toggle');
-       return sample;`,
+       return { time: before, videoTime: shown, moved };`,
     )
-    assert.equal(state.paused, false, 'the element must actually be playing, not merely seeking')
+    assert.equal(state.moved, true, 'the picture must actually be advancing, not merely seeking')
     assert.ok(
       Math.abs(state.time - state.videoTime) < 0.15,
       `sequence at ${state.time}s, picture at ${state.videoTime}s`,
@@ -151,14 +196,14 @@ try {
        await commands.run('playback.pause');
        await new Promise(r => setTimeout(r, 400));
        const stoppedAt = playback.getTime();
+       const shown = window.__picture().time;
        await new Promise(r => setTimeout(r, 600));
-       const v = document.querySelector('video.viewer-media');
-       return { playing: playback.isPlaying(), stoppedAt,
-                later: playback.getTime(), paused: v.paused };`,
+       return { playing: playback.isPlaying(), stoppedAt, shown,
+                later: playback.getTime(), stillShown: window.__picture().time };`,
     )
     assert.equal(state.playing, false)
-    assert.equal(state.paused, true, 'the element should be paused too')
     assert.equal(state.later, state.stoppedAt, 'the playhead must not creep while paused')
+    assert.equal(state.stillShown, state.shown, 'and neither must the picture')
   })
 
   await check('seeking while paused moves the picture', async () => {
@@ -166,18 +211,13 @@ try {
       cdp,
       `const { playback } = window.__fluxDev;
        playback.seek(2);
-       for (let i = 0; i < 40; i++) {
-         const v = document.querySelector('video.viewer-media');
-         if (v && Math.abs(v.currentTime - 2) < 0.1) break;
-         await new Promise(r => setTimeout(r, 100));
-       }
-       const v = document.querySelector('video.viewer-media');
-       return { time: playback.getTime(), videoTime: v.currentTime };`,
+       const p = await window.__settle(2);
+       return { time: playback.getTime(), videoTime: p.time, via: p.via };`,
     )
     assert.equal(state.time, 2)
     assert.ok(
       Math.abs(state.videoTime - 2) < 0.15,
-      `the element sat at ${state.videoTime}s after seeking to 2s`,
+      `the picture sat at ${state.videoTime}s after seeking to 2s (via ${state.via})`,
     )
   })
 
@@ -335,20 +375,23 @@ try {
     // headers, in verify-renderer.
     const state = await evaluate(
       cdp,
-      `for (let i = 0; i < 60; i++) {
-         const v = document.querySelector('video.viewer-media');
-         if (v && v.readyState >= 1 && v.seekable.length) break;
-         await new Promise(r => setTimeout(r, 100));
+      `const { playback } = window.__fluxDev;
+       // Every second of it, sampled: the point is that no part of a long file
+       // is out of reach, whichever path is drawing.
+       const out = [];
+       for (const t of [1, 15, 30, 45, 59]) {
+         playback.seek(t);
+         const p = await window.__settle(t);
+         out.push([t, p.time, p.via]);
        }
-       const v = document.querySelector('video.viewer-media');
-       return { duration: v.duration, ranges: v.seekable.length,
-                end: v.seekable.length ? v.seekable.end(0) : 0 };`,
+       return out;`,
     )
-    assert.ok(state.ranges > 0, 'the element reports nothing seekable at all')
-    assert.ok(
-      state.end > state.duration - 1,
-      `only ${state.end}s of a ${state.duration}s clip is seekable`,
-    )
+    for (const [asked, got, via] of state) {
+      assert.ok(
+        got !== null && Math.abs(got - asked) < 0.1,
+        `asked for ${asked}s and got ${got}s via ${via}`,
+      )
+    }
   })
 
   await check('seeking deep into a long clip lands where it was asked to', async () => {
@@ -359,12 +402,8 @@ try {
        const out = [];
        for (const t of [48, 5, 30, 59]) {
          playback.seek(t);
-         for (let i = 0; i < 80; i++) {
-           const v = document.querySelector('video.viewer-media');
-           if (v && Math.abs(v.currentTime - t) < 0.2) break;
-           await new Promise(r => setTimeout(r, 100));
-         }
-         out.push([t, document.querySelector('video.viewer-media').currentTime]);
+         const p = await window.__settle(t);
+         out.push([t, p.time]);
        }
        return out;`,
     )
@@ -384,21 +423,9 @@ try {
       cdp,
       `const { playback } = window.__fluxDev;
        playback.seek(37);
-       for (let i = 0; i < 80; i++) {
-         const v = document.querySelector('video.viewer-media');
-         if (v && Math.abs(v.currentTime - 37) < 0.2) break;
-         await new Promise(r => setTimeout(r, 100));
-       }
-       const v = document.querySelector('video.viewer-media');
-       const c = document.createElement('canvas');
-       c.width = 48; c.height = 27;
-       c.getContext('2d').drawImage(v, 0, 0, 48, 27);
-       const data = c.getContext('2d').getImageData(0, 0, 48, 27).data;
-       let count = 0;
-       for (let i = 0; i < data.length; i += 4) {
-         if (data[i] + data[i + 1] + data[i + 2] > 40) count++;
-       }
-       return { count, of: 48 * 27 };`,
+       const p = await window.__settle(37);
+       const { lit: count, of } = window.__lit(p.el);
+       return { count, of, via: p.via };`,
     )
     assert.ok(lit.count > lit.of / 4, `only ${lit.count} of ${lit.of} sampled pixels had any light`)
   })
@@ -415,15 +442,18 @@ try {
        playback.seek(20);
        await new Promise(r => setTimeout(r, 900));
 
-       const v = document.querySelector('video.viewer-media');
+       // The element is the clock in both paths — under the pipeline it is the
+       // audio, under the fallback the video. Either way nothing should be
+       // moving it while it plays.
+       const media = document.querySelector('audio, video');
        let seeks = 0;
        const count = () => seeks++;
-       v.addEventListener('seeking', count);
+       media.addEventListener('seeking', count);
 
        await commands.run('playback.play');
        await new Promise(r => setTimeout(r, 2500));
        await commands.run('playback.pause');
-       v.removeEventListener('seeking', count);
+       media.removeEventListener('seeking', count);
        return { seeks, reached: playback.getTime() };`,
     )
     assert.ok(state.reached > 21, `the playhead only reached ${state.reached}s`)
@@ -442,8 +472,7 @@ try {
        let worst = 0;
        for (let i = 0; i < 8; i++) {
          await new Promise(r => setTimeout(r, 350));
-         const v = document.querySelector('video.viewer-media');
-         worst = Math.max(worst, Math.abs(playback.getTime() - v.currentTime));
+         worst = Math.max(worst, Math.abs(playback.getTime() - window.__picture().time));
        }
        const reached = playback.getTime();
        await commands.run('playback.pause');
@@ -472,6 +501,114 @@ try {
        return { before, after: playback.getTime() };`,
     )
     assert.equal(state.after, state.before, 'a paused transport must not creep')
+  })
+
+  // ── the WebCodecs pipeline ────────────────────────────────────
+
+  await check('an mp4 is drawn by the pipeline, not by an element', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       playback.seek(20);
+       const p = await window.__settle(20);
+       return { via: p.via,
+                canvas: !!document.querySelector('canvas.viewer-media'),
+                video: !!document.querySelector('video.viewer-media'),
+                audio: !!document.querySelector('audio'),
+                label: [...document.querySelectorAll('.tool-value')]
+                  .map(e => e.textContent).find(t => t === 'pipeline' || t === 'element') };`,
+    )
+    assert.equal(state.via, 'pipeline')
+    assert.equal(state.canvas, true, 'the pipeline draws to a canvas')
+    assert.equal(state.video, false, 'and no video element should be doing the drawing')
+    assert.equal(state.audio, true, 'sound and the clock still come from an element')
+    assert.equal(state.label, 'pipeline', 'and the toolbar should say which path is in use')
+  })
+
+  await check('the frame drawn is the frame the index says it should be', async () => {
+    // The whole point of holding the frames: not "a picture appeared" but "the
+    // picture is the one belonging to this moment". The demuxer's own answer is
+    // the reference.
+    const state = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       const mp4 = await import('/shared/mp4.js');
+       const url = window.flux.fs.assetUrl(${LONG});
+       const reader = {
+         size: async () => Number((await fetch(url, { method: 'HEAD' })).headers.get('content-length')),
+         read: async (a, b) => new Uint8Array(await (await fetch(url,
+           { headers: { Range: 'bytes=' + a + '-' + b } })).arrayBuffer()),
+       };
+       const track = (await mp4.readVideoTrack(reader)).track;
+
+       const rows = [];
+       for (const t of [3.3, 26.7, 48.02, 11.5]) {
+         playback.seek(t);
+         const p = await window.__settle(t);
+         rows.push([t, p.time, track.pts[mp4.sampleAt(track, t)]]);
+       }
+       return rows;`,
+    )
+    for (const [asked, shown, expected] of state) {
+      assert.ok(
+        Math.abs(shown - expected) < 1e-3,
+        `at ${asked}s the index says frame ${expected}s and the canvas shows ${shown}s`,
+      )
+    }
+  })
+
+  await check('scrubbing hard does not stall the decoder', async () => {
+    // Frames are handles on decoder buffers and the pool is small: hold too
+    // many and the decoder simply stops producing. Measured before that was
+    // understood, a thirty-two frame buffer turned a 59ms decode into twelve
+    // frames in five seconds. Thirty seeks is enough to exhaust any pool that
+    // is being leaked into.
+    const state = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       const started = performance.now();
+       let landed = 0;
+       for (let i = 0; i < 30; i++) {
+         const t = (i * 7919) % 5800 / 100;
+         playback.seek(t);
+         const p = await window.__settle(t, 3000);
+         if (p.time !== null && Math.abs(p.time - t) < 0.08) landed++;
+       }
+       return { landed, ms: Math.round(performance.now() - started) };`,
+    )
+    assert.equal(state.landed, 30, `only ${state.landed} of 30 scrubs reached their frame`)
+    assert.ok(state.ms < 30000, `thirty scrubs took ${state.ms}ms`)
+  })
+
+  await check('a container the demuxer will not read falls back to the element', async () => {
+    // A viewer that shows nothing because it could not parse a sample table is
+    // worse than one that shows the file the old way.
+    const state = await evaluate(
+      cdp,
+      `const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+       const added = await importPipeline.importFiles(
+         [{ path: ${dir} + '\\\\render.webm', kind: 'video' }], 'link');
+       const asset = added[0] ?? assets.getAssets().find(a => a.name === 'render.webm');
+       const probed = await assets.ensureProbed(asset.id);
+       sequence.setSequence(null);
+       sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+       playback.pause();
+       playback.seek(0.4);
+       for (let i = 0; i < 80; i++) {
+         if (document.querySelector('video.viewer-media')) break;
+         await new Promise(r => setTimeout(r, 100));
+       }
+       await new Promise(r => setTimeout(r, 800));
+       const p = window.__picture();
+       return { via: p.via, lit: p.el ? window.__lit(p.el).lit : 0,
+                label: [...document.querySelectorAll('.tool-value')]
+                  .map(e => e.textContent).find(t => t === 'pipeline' || t === 'element') };`,
+    )
+    assert.equal(state.via, 'element', 'a webm should fall back rather than show nothing')
+    assert.equal(state.label, 'element')
+    assert.ok(state.lit > 0, 'and it should still be showing a picture')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

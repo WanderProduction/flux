@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { commands } from '../kernel/commands'
 import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
+import { VideoSource } from '../kernel/media/videoSource'
 import {
   formatTimecode,
   getSeekToken,
@@ -29,17 +30,31 @@ import { PanelFrame } from './PanelFrame'
 /**
  * Viewer — what the sequence looks like at the playhead.
  *
- * This is a *player*, not a renderer: it shows the source under the playhead
- * directly. There is no compositor yet, so there is nothing to composite; when
- * the engine lands this element becomes the surface it draws into and the clip
- * lookup below moves into the graph.
+ * ## Two ways to put a picture on screen
  *
- * While the element is playing it *is* the clock — it hands kernel/playback.ts
- * its own position and the sequence follows, for the reasons set out at the top
- * of that file. The element is therefore moved in exactly one circumstance: a
- * deliberate seek, which the transport announces with a token. Moving it
- * because the time changed would mean moving it because it moved, which is a
- * decoder flush on every animation frame.
+ * **The pipeline.** An mp4 whose index we can read is demuxed, decoded through
+ * WebCodecs and drawn to a canvas: see kernel/media/videoSource.ts. We hold the
+ * frames, so we know exactly which one is on screen, and the canvas is the
+ * surface a compositor will eventually draw into. Sound comes from an `<audio>`
+ * element alongside, which is also the clock — see below.
+ *
+ * **The element.** Anything else — webm, a container the demuxer will not
+ * guess at, a build without WebCodecs — falls back to a plain `<video>`, which
+ * is what this panel used to do for everything. A fallback rather than a
+ * refusal: a viewer that shows nothing because it could not read a sample table
+ * is worse than one that shows the file the old way.
+ *
+ * ## Who holds the clock
+ *
+ * Whatever is playing the audio, in both paths. kernel/playback.ts explains why
+ * at length; the short version is that `requestAnimationFrame` is throttled the
+ * moment the window is not being painted, while the thing feeding the sound
+ * card is not. Frames are presented against that clock, which is what every NLE
+ * does and what Premiere is explicit about.
+ *
+ * The media element is moved in exactly one circumstance: a deliberate seek,
+ * which the transport announces with a token. Moving it because the time
+ * changed would mean moving it because it moved.
  */
 
 /**
@@ -73,7 +88,9 @@ export function ViewerPanel() {
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
   const [seekToken, setSeekToken] = useState(getSeekToken)
-  const videoRef = useRef<HTMLVideoElement>(null)
+
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const mediaRef = useRef<HTMLMediaElement>(null)
 
   useEffect(() => {
     setSequence({ ...getSequence() })
@@ -95,62 +112,140 @@ export function ViewerPanel() {
   const asset = clip ? assets.find((a) => a.id === clip.assetId) : undefined
   const playable = asset && !asset.missing && !asset.unreadable ? asset : undefined
 
-  // ── the element, the clock, and the one thing that moves it ───
+  // ── the pipeline, when the file allows it ─────────────────────
+
+  const [source, setSource] = useState<VideoSource | null>(null)
+  const [why, setWhy] = useState<string | null>(null)
+
+  useEffect(() => {
+    setSource(null)
+    setWhy(null)
+    if (!playable || playable.kind !== 'video') return
+
+    let live = true
+    let opened: VideoSource | null = null
+    void VideoSource.open(playable.path).then((result) => {
+      if (!live) {
+        if (result.ok) result.source.close()
+        return
+      }
+      if (result.ok) {
+        opened = result.source
+        setSource(result.source)
+      } else {
+        // Not an error to report at the user — the element path will show the
+        // file. Kept for the toolbar, which says which path is in use.
+        setWhy(result.reason)
+      }
+    })
+
+    return () => {
+      live = false
+      opened?.close()
+    }
+  }, [playable?.id, playable?.path])
+
+  /**
+   * Draws whichever frame belongs at the playhead.
+   *
+   * Reads the clock itself rather than taking `time` as a dependency, and skips
+   * a draw while one is in flight. A decode that has not finished must not
+   * queue another behind it — at sixty notifications a second that is how a
+   * scrub turns into a backlog of stale frames arriving in the wrong order.
+   */
+  useEffect(() => {
+    if (!source || !clip) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    let stopped = false
+    let drawing = false
+
+    const draw = async () => {
+      if (stopped || drawing) return
+      drawing = true
+      try {
+        const at = getTime() - clip.start
+        const frame = await source.frameFor(at)
+        if (stopped || !frame) return
+        const context = canvas.getContext('2d')
+        if (!context) return
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+          canvas.width = frame.displayWidth
+          canvas.height = frame.displayHeight
+        }
+        context.drawImage(frame, 0, 0, canvas.width, canvas.height)
+        // What is *actually* on screen, for anything that needs to check.
+        canvas.dataset.frameTime = ((frame.timestamp ?? 0) / 1e6).toFixed(3)
+      } finally {
+        drawing = false
+      }
+    }
+
+    void draw()
+    const unsubscribe = subscribePlayback(() => void draw())
+    return () => {
+      stopped = true
+      unsubscribe()
+    }
+  }, [source, clip])
+
+  // ── the media element: sound, and the clock ───────────────────
 
   /**
    * Puts the element where the playhead is.
    *
-   * Called on a deliberate seek and when the source changes, and at no other
-   * time — see the note at the top of this file.
+   * Reads the clock rather than the rendered `time`, so it is correct whenever
+   * it is called — on a seek, and once more just before play hands it the
+   * clock.
    */
-  const syncVideo = useCallback(() => {
-    const video = videoRef.current
-    if (!video || !clip) return
-    // readyState 0 means nothing is loaded yet and the assignment would be
-    // dropped; onLoadedMetadata calls back here once it can land.
-    if (video.readyState === 0) return
-    const target = time - clip.start
-    if (Math.abs(video.currentTime - target) > SYNC_TOLERANCE) video.currentTime = target
-    // `time` is read but deliberately not a dependency: this must fire on a
-    // seek, not on the clock advancing.
+  const syncMedia = useCallback(() => {
+    const media = mediaRef.current
+    if (!media || !clip) return
+    if (media.readyState === 0) return
+    const target = getTime() - clip.start
+    if (Math.abs(media.currentTime - target) > SYNC_TOLERANCE) media.currentTime = target
+    // seekToken is the dependency that matters: this must fire on a seek, not
+    // on the clock advancing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clip, playable?.id, seekToken])
 
-  useEffect(syncVideo, [syncVideo])
+  useEffect(syncMedia, [syncMedia])
 
-  /**
-   * Hands the clock to the element while it is playing this clip.
-   *
-   * `clip.start + currentTime` converts the source's own timeline into the
-   * sequence's. Null while paused, stalled or unloaded, which lets the wall
-   * clock cover the gap rather than freezing the playhead on a buffering
-   * stream — and means a stall stops the sequence exactly where the picture
-   * stopped, instead of the time running on without it.
-   */
   useEffect(() => {
     if (!clip || !playable || playable.kind !== 'video') {
       setClockSource(null)
       return
     }
     setClockSource(() => {
-      const video = videoRef.current
-      if (!video || video.paused || video.readyState < 2) return null
-      return clip.start + video.currentTime
+      const media = mediaRef.current
+      if (!media || media.paused || media.readyState < 2) return null
+      return clip.start + media.currentTime
     })
     return () => setClockSource(null)
   }, [clip, playable])
 
   useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
+    const media = mediaRef.current
+    if (!media) return
     if (playing) {
+      /*
+       * Put it where the playhead is *before* starting it.
+       *
+       * The moment it is playing it becomes the clock, and a clock that starts
+       * somewhere else drags the sequence there with it. Measured without this:
+       * pressing play ran the wall clock forward for the several hundred
+       * milliseconds the element took to start, and then the playhead snapped
+       * backwards to wherever the element had begun.
+       */
+      syncMedia()
       // A play() that loses a race with a source change rejects; there is
       // nothing to recover, and the next transport change will call again.
-      void video.play().catch(() => {})
+      void media.play().catch(() => {})
     } else {
-      video.pause()
+      media.pause()
     }
-  }, [playing, playable?.id])
+  }, [playing, playable?.id, source, syncMedia])
 
   // ── commands ──────────────────────────────────────────────────
 
@@ -166,12 +261,7 @@ export function ViewerPanel() {
       },
       { id: 'playback.play', title: 'Play', category: 'Playback', run: play },
       { id: 'playback.pause', title: 'Pause', category: 'Playback', run: pause },
-      {
-        id: 'playback.goToStart',
-        title: 'Go to Start',
-        category: 'Playback',
-        run: goToStart,
-      },
+      { id: 'playback.goToStart', title: 'Go to Start', category: 'Playback', run: goToStart },
       { id: 'playback.goToEnd', title: 'Go to End', category: 'Playback', run: goToEnd },
     ])
     return () => handle.dispose()
@@ -207,6 +297,8 @@ export function ViewerPanel() {
   )
 
   const progress = duration > 0 ? Math.min(1, time / duration) : 0
+  const url = playable ? assetUrl(playable.path) : undefined
+  const decoding = Boolean(source)
 
   return (
     <PanelFrame
@@ -220,6 +312,22 @@ export function ViewerPanel() {
           <span className="tool-value tool-value--dim">
             {playable ? playable.name : clip ? 'offline' : 'none'}
           </span>
+          {playable?.kind === 'video' && (
+            <>
+              <span className="tool-sep" />
+              <span className="tool-label">Decode</span>
+              <span
+                className="tool-value tool-value--dim"
+                title={
+                  decoding
+                    ? 'Demuxed here and decoded through WebCodecs'
+                    : `Played by the browser: ${why ?? 'opening'}`
+                }
+              >
+                {decoding ? 'pipeline' : 'element'}
+              </span>
+            </>
+          )}
         </>
       }
     >
@@ -227,24 +335,38 @@ export function ViewerPanel() {
         <div className="viewer-frame">
           <div className="viewer-frame-inner">
             {playable && clip ? (
-              playable.kind === 'video' ? (
-                <video
-                  // Keyed by asset: a different source needs a fresh element,
-                  // and reusing one mid-play leaves the old frame on screen
-                  // while the new file loads.
-                  key={playable.id}
-                  ref={videoRef}
-                  className="viewer-media"
-                  src={assetUrl(playable.path)}
-                  preload="auto"
-                  playsInline
-                  onLoadedMetadata={syncVideo}
-                  onSeeked={() => {
-                    /* nothing to do — the frame is already on screen */
-                  }}
-                />
+              playable.kind === 'image' ? (
+                <img className="viewer-media" src={url} alt={playable.name} />
               ) : (
-                <img className="viewer-media" src={assetUrl(playable.path)} alt={playable.name} />
+                <>
+                  {/* The pipeline draws here; the element below is then only
+                      sound and a clock, and is never seen. */}
+                  <canvas
+                    key={`canvas-${playable.id}`}
+                    ref={canvasRef}
+                    className="viewer-media"
+                    style={{ display: decoding ? 'block' : 'none' }}
+                  />
+                  {decoding ? (
+                    <audio
+                      key={`audio-${playable.id}`}
+                      ref={mediaRef as React.RefObject<HTMLAudioElement>}
+                      src={url}
+                      preload="auto"
+                      onLoadedMetadata={syncMedia}
+                    />
+                  ) : (
+                    <video
+                      key={`video-${playable.id}`}
+                      ref={mediaRef as React.RefObject<HTMLVideoElement>}
+                      className="viewer-media"
+                      src={url}
+                      preload="auto"
+                      playsInline
+                      onLoadedMetadata={syncMedia}
+                    />
+                  )}
+                </>
               )
             ) : (
               <span className="viewer-placeholder">

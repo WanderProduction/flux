@@ -54,6 +54,23 @@ let lastTick = 0
 let source: ClockSource | null = null
 
 /**
+ * A timer that keeps the clock honest when nothing is painting.
+ *
+ * Animation frames stop when Chromium decides the window does not need
+ * repainting — behind another window, most of the time. The audio keeps
+ * playing, so the *time* is still passing; what stops is anything that finds
+ * out about it. Timers are not throttled the same way, so this samples the
+ * source when frames dry up and does nothing at all when they are flowing.
+ *
+ * Roughly 20Hz: enough that nothing reading the clock is ever badly stale,
+ * cheap enough to be invisible next to a decoder.
+ */
+let backstop: number | null = null
+let lastFrame = 0
+const BACKSTOP_MS = 50
+const FRAME_STALE_MS = 100
+
+/**
  * Bumped on every deliberate seek.
  *
  * The Viewer moves its element when this changes and at no other time. Without
@@ -99,10 +116,13 @@ export function setClockSource(next: ClockSource | null): void {
 function stopLoop() {
   if (frame !== null) cancelAnimationFrame(frame)
   frame = null
+  if (backstop !== null) clearInterval(backstop)
+  backstop = null
 }
 
 function tick(now: number) {
   if (!playing) return
+  lastFrame = performance.now()
 
   const reported = source?.()
   const elapsed = (now - lastTick) / 1000
@@ -130,6 +150,19 @@ function tick(now: number) {
   frame = requestAnimationFrame(tick)
 }
 
+/** Samples the clock when animation frames have stopped arriving. */
+function guard() {
+  if (!playing) return
+  if (performance.now() - lastFrame < FRAME_STALE_MS) return
+  tick(performance.now())
+  // tick() queues another animation frame; cancel it so a window that starts
+  // painting again does not end up with two loops running.
+  if (frame !== null) {
+    cancelAnimationFrame(frame)
+    frame = null
+  }
+}
+
 export function play(): void {
   const end = sequenceDuration()
   if (playing || end <= 0) return
@@ -138,7 +171,9 @@ export function play(): void {
   if (time >= end) time = 0
   playing = true
   lastTick = performance.now()
+  lastFrame = performance.now()
   frame = requestAnimationFrame(tick)
+  backstop = window.setInterval(guard, BACKSTOP_MS)
   emit()
 }
 

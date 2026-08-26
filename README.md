@@ -52,6 +52,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
+| **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
@@ -377,6 +378,45 @@ the UI resamples. The element is moved in exactly one circumstance — a deliber
 transport announces with a token. Moving it because the time changed would mean moving it because it
 moved.
 
+#### The pipeline
+
+An mp4 whose index FLUX can read is **demuxed here and decoded through WebCodecs**, and the frames
+are drawn to a canvas. Anything else — a webm, a container the demuxer will not guess at, a build
+without WebCodecs — falls back to a plain `<video>`. The Viewer's toolbar says which path a clip is
+on. A fallback rather than a refusal: a viewer that shows nothing because it could not parse a
+sample table is worse than one that shows the file the old way.
+
+Three pieces:
+
+- [`shared/mp4.js`](shared/mp4.js) reads the sample table — where every frame is, how big it is,
+  when it is shown, and whether it is a keyframe. `VideoDecoder` decodes; it does not demux, and it
+  has no idea what an mp4 is. This is also what makes seeking possible: inter-frame codecs decode
+  forward from a keyframe and nowhere else, so a seek is always "rewind to a keyframe, decode
+  through". It reads bytes through a `ByteReader`, which is the same interface over ranged
+  `flux-asset://` fetches in the app and over a file handle in the harness — so the part most likely
+  to be subtly wrong is testable with no app running.
+- [`src/kernel/media/videoSource.ts`](src/kernel/media/videoSource.ts) turns that index into frames:
+  seek to the keyframe, decode forward, keep a small window, hand out the frame belonging to a given
+  moment.
+- The Viewer draws it, and an `<audio>` element alongside carries the sound *and the clock*.
+
+Three things about it were only obvious after being wrong:
+
+- **Holding frames stops the decoder.** A `VideoFrame` is a handle on a decoder buffer and the pool
+  is small; hold too many and the decoder waits for buffers instead of producing. Measured with a
+  32-frame buffer: a decode that takes 59ms became **twelve frames in five seconds**, and every seek
+  past the first came back empty. Frames behind the playhead are now released as they fall behind,
+  not when they are used.
+- **Presentation order is not decode order.** With B-frames a clip's timestamps run forward and
+  back through the sample table, so "scan until a timestamp is past the one I want" stops early and
+  returns the wrong frame. Lookups go through an index sorted by presentation time.
+- **A `flush()` demands a keyframe afterwards.** Calling it at the end of every batch makes the next
+  batch — which starts on a delta frame — fail outright.
+
+What the pipeline buys, beyond a picture: we hold the frames, so we know exactly which one is on
+screen, and a canvas is a surface a compositor can draw into. What it does not buy yet is any
+compositing — one clip is still one source, and a cut is still a source change.
+
 #### How Premiere does this, and where FLUX is on that road
 
 Worth being explicit, because it is the difference between what exists now and what VISION.md is
@@ -398,15 +438,15 @@ actually asking for.
 5. **Proxies** — low-resolution stand-ins swapped in for editing and swapped back out for export.
 6. **Quality throttling** — 1/2 and 1/4 playback resolution, and a lower quality while scrubbing.
 
-FLUX has exactly one piece of that: item 3's clock discipline, and only because a `<video>` element
-comes with a decoder and an audio device attached. Everything the element gives us is also
-everything it limits us to — **one source at a time, no compositing, no effects, and a visible seam
-where one clip becomes the next**, because a different source means a different element.
+FLUX now has the beginnings of 1 and 3: a sample-table index read on demand, frames decoded into a
+buffer we own, and audio as the master clock. It has **none of 2, 4, 5 or 6** — no compositing, no
+effects, no preview render files, no proxies — and the index is built per open rather than cached on
+import, so the first seek into a file pays for reading its `moov` every time.
 
-The road on from here is `VideoDecoder` (WebCodecs) plus a demuxer, decoding into a ring buffer we
-own and compositing on the GPU. That is the point at which items 1, 2 and 4 become possible at all,
-and it is the "GPU-first seed with prerender to cache" in VISION.md. It is a project, not a patch,
-and it should follow the seams being proven rather than precede it.
+The honest next steps, in the order they unblock each other: cache the index with the project (item
+1 properly), then a compositor drawing several decoded sources into one frame (item 2), at which
+point preview render files and proxies (4 and 6) are worth having because there is something
+expensive to cache. That is the "GPU-first seed with prerender to cache" in VISION.md.
 
 Small behaviours that are deliberate: playback **stops on the last frame** rather than running past
 it into empty space, so the picture stays up; pressing play at the end **starts over**, because
@@ -426,8 +466,9 @@ This is a *player*, not a renderer — it shows the source directly, because the
 yet to composite anything. When the engine lands, the Viewer becomes the surface it draws into and
 the clip lookup moves into the graph. What must not change is who owns the time.
 
-Not yet: audio scrubbing, loop, frame stepping, and playing across a cut without a hitch where one
-element is swapped for the next.
+Not yet: audio scrubbing, loop, frame stepping, compositing more than one clip at a time, and a cut
+that does not re-open a source. The index is also rebuilt every time a clip is opened rather than
+cached with the project.
 
 ---
 
@@ -470,12 +511,13 @@ src/
   kernel/       commands · panels · keymap · workspaces · store
                 project · view · playback · fsBridge · assets · sequence
                 importPipeline · thumbnails · mediaProbe          (the seams)
+    media/      the decode pipeline: demux index -> VideoDecoder -> frames
   launcher/     the project chooser, shown until a project is open
   panels/       the three built-in panels, registered via the SDK
   shell/        command palette · the import-choice host
   styles/       theme tokens + app styles
-shared/         media types, project naming and the .flux format
-                — imported by BOTH main and renderer
+shared/         media types, project naming, the .flux format, the mp4 demuxer
+                — imported by BOTH main and renderer, and by the harness
 build/          icons, generated by npm run icons (the script is the source)
 electron/       main process · preload bridge · filesystem reads · project layout
 scripts/        verification harnesses
@@ -540,6 +582,17 @@ npm run verify:launch
 ```bash
 npm run verify:playback
 ```
+
+```bash
+npm run verify:demux
+```
+
+`verify:demux` needs no app either — the demuxer reads through a `ByteReader`, so a file handle
+stands in for ranged fetches. It checks the index *against the file*: every sample inside its
+bounds, no two overlapping, timestamps counting evenly, keyframes where ffmpeg was told to put them,
+and containers it cannot read refused rather than guessed at. A demuxer that misreads an offset does
+not throw — it hands the decoder bytes from the middle of another frame, and that arrives later as
+garbage with no obvious cause.
 
 `verify:playback` is the one suite where "it looks right" proves nothing: a viewer showing a stale
 frame while the clock has moved on, and a clock running while the video is paused, both photograph
