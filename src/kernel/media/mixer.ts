@@ -6,7 +6,14 @@ import {
   setClockSource,
   subscribePlayback,
 } from '../playback'
-import { getSequence, type Clip } from '../sequence'
+import {
+  getSequence,
+  isTrackAudible,
+  MIN_GAIN_DB,
+  subscribeSequence,
+  type Clip,
+  type Track,
+} from '../sequence'
 import { AudioSource } from './audioSource'
 
 /**
@@ -47,6 +54,18 @@ import { AudioSource } from './audioSource'
  * What that window is trading: too short and a slow decode arrives after the
  * moment it was meant for, which is a gap you can hear; too long and every seek
  * throws away more work than it needed to.
+ *
+ * ## Level, mute and solo are a gain node, not a decision about decoding
+ *
+ * Every track gets a `GainNode` between its clips and the master, and muting
+ * sets it to zero. The audio for a muted track is still decoded and still
+ * scheduled, which sounds wasteful and is the only way unmuting can be
+ * *instant*: skipping the work would mean nothing was in the pipe, and the
+ * sound would arrive a scheduling window after the button was pressed.
+ *
+ * Levels are ramped over a few milliseconds rather than assigned. A gain that
+ * steps from 1 to 0 partway through a waveform is a discontinuity, and a
+ * discontinuity is a click — which is what "mute makes a noise" sounds like.
  */
 
 /** How far ahead of the playhead audio is decoded and scheduled. */
@@ -66,6 +85,15 @@ const START_LEAD = 0.08
 
 /** Frames whose moment has already gone. Dropped rather than played late. */
 const LATE_TOLERANCE = 0.005
+
+/**
+ * How long a level change takes to happen.
+ *
+ * Short enough to feel immediate, long enough that the waveform bends rather
+ * than jumps. A step change in gain is a click, and a click is louder than
+ * whatever was being turned down.
+ */
+const GAIN_RAMP = 0.012
 
 export interface MixerStats {
   /** Whether the context exists and is running. */
@@ -87,6 +115,13 @@ export interface MixerStats {
   anchors: number
   sampleRate: number
   state: string
+  /**
+   * What each track's fader is actually set to, as the audio device has it.
+   *
+   * Not what the sequence says it should be — that is a different number, and
+   * the whole question a mute check is asking is whether the two agree.
+   */
+  gains: Record<string, number>
 }
 
 interface Voice {
@@ -102,6 +137,21 @@ interface Voice {
 
 let context: AudioContext | null = null
 let master: GainNode | null = null
+/** One per track, between its clips and the master. Outlives the clips on it. */
+const trackGains = new Map<string, GainNode>()
+/**
+ * What each fader was last *told* to be, which is not what it currently is.
+ *
+ * A level change is a ramp, and for the few milliseconds it is running
+ * `gain.value` still reports the old number. Deciding whether anything changed
+ * by reading it therefore compares the new request against a value that is on
+ * its way somewhere else — so a second change arriving mid-ramp looks like no
+ * change at all and is dropped, leaving the first one to win.
+ *
+ * Which is not a rare case. It is unmute-then-mute, and it is every fader drag,
+ * where changes arrive far faster than 12ms apart.
+ */
+const trackTargets = new Map<string, number>()
 let meter: AnalyserNode | null = null
 let meterData: Float32Array<ArrayBuffer> | null = null
 
@@ -125,6 +175,59 @@ export function mixerStats(): MixerStats {
     anchors,
     sampleRate: context?.sampleRate ?? 0,
     state: context?.state ?? 'none',
+    gains: Object.fromEntries([...trackGains].map(([id, node]) => [id, node.gain.value])),
+  }
+}
+
+/**
+ * A track's level as a multiplier, taking mute and solo into account.
+ *
+ * The bottom of the fader is silence rather than a very quiet -60dB: a fader
+ * pulled all the way down means off, and leaving a thousandth of the signal
+ * through would be a bug you could only find with a meter.
+ */
+export function trackLevel(track: Track, tracks: Track[]): number {
+  if (!isTrackAudible(track, tracks)) return 0
+  if (track.gain <= MIN_GAIN_DB) return 0
+  return 10 ** (track.gain / 20)
+}
+
+/** The node a track's clips play into, made on demand. */
+function gainFor(trackId: string): GainNode | null {
+  const ctx = context
+  if (!ctx || !master) return null
+  let node = trackGains.get(trackId)
+  if (!node) {
+    node = ctx.createGain()
+    node.connect(master)
+    trackGains.set(trackId, node)
+  }
+  return node
+}
+
+/**
+ * Pushes every track's level at the audio device.
+ *
+ * Called whenever the sequence changes, not on the scheduling tick: a mute has
+ * to take effect when it is pressed, and a tenth of a second late is the
+ * difference between a button and a suggestion.
+ */
+export function applyTrackLevels(): void {
+  const ctx = context
+  if (!ctx) return
+  const tracks = getSequence().tracks
+  for (const track of tracks) {
+    if (track.kind !== 'audio') continue
+    const node = gainFor(track.id)
+    if (!node) continue
+    const wanted = trackLevel(track, tracks)
+    if (trackTargets.get(track.id) === wanted) continue
+    trackTargets.set(track.id, wanted)
+    // From wherever the last ramp had got to, which is what cancelling and
+    // then pinning the current value is for.
+    node.gain.cancelScheduledValues(ctx.currentTime)
+    node.gain.setValueAtTime(node.gain.value, ctx.currentTime)
+    node.gain.linearRampToValueAtTime(wanted, ctx.currentTime + GAIN_RAMP)
   }
 }
 
@@ -294,7 +397,9 @@ async function tick() {
 
         const node = ctx.createBufferSource()
         node.buffer = buffer
-        node.connect(master as GainNode)
+        // Into its track's fader, not straight at the master: that is what
+        // makes a level change apply to everything already scheduled.
+        node.connect(gainFor(clip.trackId) ?? (master as GainNode))
         node.onended = () => {
           voice?.nodes.delete(node)
           node.disconnect()
@@ -335,6 +440,7 @@ export function startMix(at: number): void {
   anchorContext = ctx.currentTime + START_LEAD
   anchorSequence = at
   anchors += 1
+  applyTrackLevels()
   // The clock, for as long as there is something to hear. mixerTime returns
   // null when no clip is sounding, and the transport falls through to the wall
   // clock — a silent stretch still has to pass at the right speed.
@@ -383,7 +489,12 @@ export function connectMixer(): () => void {
   let wasPlaying = isPlaying()
   let lastSeek = getSeekToken()
 
-  return subscribePlayback(() => {
+  // Levels follow the sequence rather than the transport: a mute pressed while
+  // paused has to be in force by the time play is pressed, and one pressed
+  // while playing has to be in force now.
+  const stopSequence = subscribeSequence(applyTrackLevels)
+
+  const stopPlayback = subscribePlayback(() => {
     const playing = isPlaying()
     const token = getSeekToken()
 
@@ -394,4 +505,9 @@ export function connectMixer(): () => void {
     wasPlaying = playing
     lastSeek = token
   })
+
+  return () => {
+    stopSequence()
+    stopPlayback()
+  }
 }

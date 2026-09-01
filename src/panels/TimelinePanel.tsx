@@ -25,6 +25,13 @@ import { peakRange } from '../../shared/peaks.js'
 import {
   addClip,
   addLinkedClips,
+  clampGain,
+  isTrackAudible,
+  MAX_GAIN_DB,
+  MIN_GAIN_DB,
+  setTrackGain,
+  setTrackMuted,
+  setTrackSolo,
   withLinked,
   addTrack,
   findFreeStart,
@@ -56,7 +63,7 @@ import { useThumbnail } from './useThumbnail'
  */
 
 const TRACK_HEIGHT = 46
-const HEADER_WIDTH = 68
+const HEADER_WIDTH = 118
 const MIN_ZOOM = 8
 const MAX_ZOOM = 400
 const DEFAULT_ZOOM = 60 // pixels per second
@@ -673,6 +680,9 @@ export function TimelinePanel() {
                 style={{ height: TRACK_HEIGHT }}
               >
                 <span className="track-name">{track.name}</span>
+                {track.kind === 'audio' && (
+                  <TrackControls track={track} silent={!isTrackAudible(track, sequence.tracks)} />
+                )}
               </div>
             ))}
           </div>
@@ -755,6 +765,87 @@ export function TimelinePanel() {
         )}
       </div>
     </PanelFrame>
+  )
+}
+
+/**
+ * A track's level, and whether it is heard.
+ *
+ * The level is dragged rather than typed, the way every parameter in a
+ * compositor is: a fader is a gesture, and stopping to select a number and
+ * commit it is not how anyone rides a level. Double-click puts it back to
+ * unity, which is the only value worth a shortcut.
+ *
+ * `silent` is not the same as `muted` — a track is also silent when something
+ * else is soloed — so the row dims for either, and the M button still shows
+ * only what it itself is doing.
+ */
+function TrackControls({ track, silent }: { track: Track; silent: boolean }) {
+  const dragging = useRef(false)
+
+  const beginGainDrag = useCallback(
+    (event: React.PointerEvent) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      const startX = event.clientX
+      const startGain = track.gain
+      dragging.current = false
+
+      const onMove = (move: PointerEvent) => {
+        const dx = move.clientX - startX
+        if (!dragging.current && Math.abs(dx) < DRAG_THRESHOLD_PX) return
+        dragging.current = true
+        // A quarter of a decibel per pixel: the whole range in a drag the width
+        // of the panel, and fine enough to place a level by ear.
+        setTrackGain(track.id, clampGain(startGain + dx * 0.25))
+      }
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+    },
+    [track.id, track.gain],
+  )
+
+  return (
+    <span className={`track-controls${silent ? ' track-controls--silent' : ''}`}>
+      <button
+        className={`track-toggle${track.muted ? ' track-toggle--on' : ''}`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => setTrackMuted(track.id, !track.muted)}
+        title={`${track.muted ? 'Unmute' : 'Mute'} ${track.name}`}
+        aria-pressed={track.muted}
+      >
+        M
+      </button>
+      <button
+        className={`track-toggle track-toggle--solo${track.solo ? ' track-toggle--on' : ''}`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => setTrackSolo(track.id, !track.solo)}
+        title={`${track.solo ? 'Unsolo' : 'Solo'} ${track.name}`}
+        aria-pressed={track.solo}
+      >
+        S
+      </button>
+      <span
+        className="track-gain"
+        onPointerDown={beginGainDrag}
+        onDoubleClick={() => setTrackGain(track.id, 0)}
+        title={`${track.name} level — drag to change, double-click for unity`}
+        role="slider"
+        aria-label={`${track.name} level`}
+        aria-valuemin={MIN_GAIN_DB}
+        aria-valuemax={MAX_GAIN_DB}
+        aria-valuenow={track.gain}
+      >
+        {track.gain <= MIN_GAIN_DB ? '-∞' : `${track.gain > 0 ? '+' : ''}${track.gain.toFixed(1)}`}
+      </span>
+    </span>
   )
 }
 

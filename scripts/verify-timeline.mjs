@@ -739,9 +739,15 @@ try {
        l.scrollLeft = 0; l.scrollTop = 0;
        await new Promise(r => setTimeout(r, 100));
        const r = window.__wheel({ deltaY: 200, ctrlKey: true });
-       await new Promise(r => setTimeout(r, 300));
-       return { ...r, top: l.scrollTop, left: l.scrollLeft,
-                transform: document.querySelector('.tl-header-list').style.transform };`,
+       // Wait for the headers to catch up, not for a duration. Scroll events
+       // are delivered when Chromium feels like it, and a fixed sleep here is a
+       // check that passes on a quiet machine and fails on a busy one.
+       const headers = document.querySelector('.tl-header-list');
+       for (let i = 0; i < 100; i++) {
+         if (l.scrollTop > 0 && headers.style.transform === 'translateY(' + -l.scrollTop + 'px)') break;
+         await new Promise(r => setTimeout(r, 20));
+       }
+       return { ...r, top: l.scrollTop, left: l.scrollLeft, transform: headers.style.transform };`,
     )
     assert.ok(state.top > 0, 'Ctrl and scroll should have moved down the tracks')
     assert.equal(state.left, 0, 'and must not have moved along time')
@@ -1371,6 +1377,205 @@ try {
     assert.deepEqual(state.kinds, ['video'])
   })
 
+  // ── level, mute and solo ──────────────────────────────────────
+
+  /** Puts every audio track back to unity and unmuted. */
+  const PLAIN_TRACKS = `
+    const { sequence } = window.__fluxDev;
+    for (const track of sequence.getSequence().tracks) {
+      sequence.setTrackMuted(track.id, false);
+      sequence.setTrackSolo(track.id, false);
+      sequence.setTrackGain(track.id, 0);
+    }
+    await new Promise(r => setTimeout(r, 100));`
+
+  await check('a new track is at unity, unmuted and unsoloed', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 200));
+       return sequence.getSequence().tracks
+         .map(t => ({ id: t.id, gain: t.gain, muted: t.muted, solo: t.solo }));`,
+    )
+    for (const track of state) {
+      assert.equal(track.gain, 0, `${track.id} starts at ${track.gain}dB`)
+      assert.equal(track.muted, false)
+      assert.equal(track.solo, false)
+    }
+  })
+
+  await check('solo picks the subset and mute silences within it', async () => {
+    // The rule, stated as the truth table it is. Each button keeps meaning one
+    // thing rather than one quietly overriding the other.
+    const state = await evaluate(
+      cdp,
+      PLAIN_TRACKS +
+        `const audible = () => sequence.getSequence().tracks
+           .filter(t => t.kind === 'audio')
+           .map(t => t.id + ':' + (sequence.isTrackAudible(t) ? 'on' : 'off'))
+           .join(' ');
+         const rows = { plain: audible() };
+         sequence.setTrackMuted('A1', true);
+         rows.mutedA1 = audible();
+         sequence.setTrackMuted('A1', false);
+         sequence.setTrackSolo('A2', true);
+         rows.soloA2 = audible();
+         sequence.setTrackSolo('A1', true);
+         rows.soloBoth = audible();
+         sequence.setTrackMuted('A1', true);
+         rows.soloBothMutedA1 = audible();
+         return rows;`,
+    )
+    assert.equal(state.plain, 'A1:on A2:on')
+    assert.equal(state.mutedA1, 'A1:off A2:on')
+    assert.equal(state.soloA2, 'A1:off A2:on', 'soloing one track must silence the others')
+    assert.equal(state.soloBoth, 'A1:on A2:on', 'soloing both is the same as soloing neither')
+    assert.equal(
+      state.soloBothMutedA1,
+      'A1:off A2:on',
+      'a soloed track that is also muted must stay silent',
+    )
+  })
+
+  await check('a level cannot be pushed past the ends of the fader', async () => {
+    const state = await evaluate(
+      cdp,
+      PLAIN_TRACKS +
+        `const set = (db) => { sequence.setTrackGain('A1', db);
+           return sequence.getSequence().tracks.find(t => t.id === 'A1').gain; };
+         return { low: set(-500), high: set(500), nan: set(NaN), fine: set(-6.5) };`,
+    )
+    assert.equal(state.low, -60, 'the bottom of the fader')
+    assert.equal(state.high, 12, 'and the top')
+    assert.equal(state.nan, 0, 'a level that is not a number is unity, not silence')
+    assert.equal(state.fine, -6.5, 'and anything in between is kept as it was set')
+  })
+
+  await check('a track saved before it had a level opens at unity', async () => {
+    // Older projects again: no level is not the same as a level of zero, and
+    // reading it as silence would open someone's project mute.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence({
+         name: 'Old', frameRate: 24,
+         tracks: [{ id: 'V1', kind: 'video', name: 'V1' },
+                  { id: 'A1', kind: 'audio', name: 'A1' }],
+         clips: [],
+       });
+       await new Promise(r => setTimeout(r, 200));
+       return sequence.getSequence().tracks
+         .map(t => ({ id: t.id, gain: t.gain, muted: t.muted, solo: t.solo }));`,
+    )
+    const a1 = state.find((track) => track.id === 'A1')
+    assert.ok(a1, 'the audio track should have survived')
+    assert.equal(a1.gain, 0)
+    assert.equal(a1.muted, false)
+    assert.equal(a1.solo, false)
+  })
+
+  await check('the header shows a track that something else has soloed as silent', async () => {
+    // Muted and "silenced by another track's solo" are different states with
+    // the same outcome, so the row dims for either while the M button keeps
+    // showing only what it is itself doing.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const read = () => [...document.querySelectorAll('.tl-header--audio')].map(h => ({
+         name: h.querySelector('.track-name').textContent,
+         silent: h.querySelector('.track-controls').className.includes('--silent'),
+         muteOn: h.querySelector('.track-toggle').className.includes('--on'),
+       }));
+       const plain = read();
+       sequence.setTrackSolo('A2', true);
+       await new Promise(r => setTimeout(r, 250));
+       const soloed = read();
+       sequence.setTrackSolo('A2', false);
+       await new Promise(r => setTimeout(r, 250));
+       return { plain, soloed };`,
+    )
+    assert.deepEqual(
+      state.plain.map((row) => row.silent),
+      [false, false],
+      'nothing should read as silent to begin with',
+    )
+    const a1 = state.soloed.find((row) => row.name === 'A1')
+    const a2 = state.soloed.find((row) => row.name === 'A2')
+    assert.equal(a1.silent, true, 'A1 is silenced by A2 being soloed')
+    assert.equal(a1.muteOn, false, 'but it is not muted, and must not claim to be')
+    assert.equal(a2.silent, false, 'the soloed track is the one being heard')
+  })
+
+  await check('clicking M and S in the header changes the track', async () => {
+    // Through the DOM, because a control nobody can reach is not a control.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const header = [...document.querySelectorAll('.tl-header--audio')]
+         .find(h => h.querySelector('.track-name').textContent === 'A1');
+       const [mute, solo] = header.querySelectorAll('.track-toggle');
+       mute.click();
+       await new Promise(r => setTimeout(r, 150));
+       const afterMute = sequence.getSequence().tracks.find(t => t.id === 'A1');
+       solo.click();
+       await new Promise(r => setTimeout(r, 150));
+       const afterSolo = sequence.getSequence().tracks.find(t => t.id === 'A1');
+       mute.click();
+       solo.click();
+       await new Promise(r => setTimeout(r, 150));
+       const afterAgain = sequence.getSequence().tracks.find(t => t.id === 'A1');
+       return {
+         afterMute: { muted: afterMute.muted, solo: afterMute.solo },
+         afterSolo: { muted: afterSolo.muted, solo: afterSolo.solo },
+         afterAgain: { muted: afterAgain.muted, solo: afterAgain.solo },
+       };`,
+    )
+    assert.deepEqual(state.afterMute, { muted: true, solo: false })
+    assert.deepEqual(state.afterSolo, { muted: true, solo: true })
+    assert.deepEqual(state.afterAgain, { muted: false, solo: false }, 'both must toggle back off')
+  })
+
+  await check('dragging the level readout rides the level', async () => {
+    // A fader is a gesture. Dragged through the same window listeners a real
+    // pointer drives, for the reason the clip drag gives at length.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const header = [...document.querySelectorAll('.tl-header--audio')]
+         .find(h => h.querySelector('.track-name').textContent === 'A1');
+       const readout = header.querySelector('.track-gain');
+       const box = readout.getBoundingClientRect();
+       const x = box.left + box.width / 2, y = box.top + box.height / 2;
+
+       readout.dispatchEvent(new PointerEvent('pointerdown',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 9, clientX: x, clientY: y }));
+       for (const dx of [10, 20, 40]) {
+         window.dispatchEvent(new PointerEvent('pointermove',
+           { bubbles: true, pointerId: 9, clientX: x - dx, clientY: y }));
+       }
+       window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 9 }));
+       await new Promise(r => setTimeout(r, 200));
+       const dragged = sequence.getSequence().tracks.find(t => t.id === 'A1').gain;
+       const shown = readout.textContent;
+
+       readout.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+       await new Promise(r => setTimeout(r, 200));
+       const reset = sequence.getSequence().tracks.find(t => t.id === 'A1').gain;
+       return { dragged, shown, reset };`,
+    )
+    // Forty pixels left at a quarter of a decibel each.
+    assert.equal(state.dragged, -10, `dragging left gave ${state.dragged}dB`)
+    assert.equal(state.shown, '-10.0', `the readout said ${state.shown}`)
+    assert.equal(state.reset, 0, 'double-click should put it back to unity')
+  })
+
   // ── the waveform ──────────────────────────────────────────────
 
   /**
@@ -1382,8 +1587,12 @@ try {
    */
   const COLUMN = `
     window.__waveColumn = (atSeconds) => {
-      const canvas = document.querySelector('canvas.clip-wave');
-      if (!canvas) throw new Error('no waveform canvas');
+      const canvases = document.querySelectorAll('canvas.clip-wave');
+      // Exactly one, or this is measuring whichever happened to be first in the
+      // document — a precondition the check silently assumed until a run where
+      // it was not true sent an afternoon after the wrong bug.
+      if (canvases.length !== 1) throw new Error(canvases.length + ' waveforms on screen, expected 1');
+      const canvas = canvases[0];
       const clip = canvas.closest('.clip');
       const duration = Number(clip.title.match(/([\\d.]+)s/)[1]);
       const x = Math.min(canvas.width - 1, Math.round((atSeconds / duration) * canvas.width));
@@ -1393,6 +1602,22 @@ try {
         if (data[y * 4 + 3] > 8) { if (top < 0) top = y; bottom = y; }
       }
       return top < 0 ? 0 : bottom - top + 1;
+    };
+    /** What the waveform was drawn from, so a wrong picture can be told from wrong data. */
+    window.__wavePeaks = () => {
+      const canvas = document.querySelector('canvas.clip-wave');
+      const clip = canvas?.closest('.clip');
+      const assets = window.__fluxDev.assets.getAssets();
+      const name = clip?.querySelector('.clip-label')?.textContent;
+      const asset = assets.find(a => a.name === name);
+      const peaks = asset ? window.__fluxDev.peaks.cachedPeaks(asset.path) : null;
+      if (!peaks) return { name, peaks: null };
+      const at = (t) => {
+        const i = Math.floor(t * peaks.perSecond);
+        return Math.max(peaks.max[i], -peaks.min[i]);
+      };
+      return { name, title: clip?.title,
+               envelope: [0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5,10.5,11.5].map(at) };
     };
     return true;`
   await evaluate(cdp, COLUMN)
@@ -1429,11 +1654,35 @@ try {
     const state = await evaluate(
       cdp,
       withWaveform +
-        `return [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5]
-           .map(t => window.__waveColumn(t));`,
+        `return {
+           columns: [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5]
+             .map(t => window.__waveColumn(t)),
+           source: window.__wavePeaks(),
+         };`,
     )
-    const loud = [0, 1, 4, 5, 8, 9].map((i) => state[i])
-    const quiet = [2, 3, 6, 7, 10, 11].map((i) => state[i])
+
+    /*
+     * The peaks the drawing was made from, first.
+     *
+     * Two quite different things look identical in a column of pixels: a
+     * waveform that ignores its peaks, and a waveform faithfully drawing peaks
+     * that are themselves wrong. Naming which one it is here is the difference
+     * between a minute and an afternoon — the cache outlives the code that
+     * filled it, so a bad build from an earlier run can still be on disk long
+     * after the reason for it is gone.
+     */
+    const from = state.source
+    assert.ok(from.envelope, `no peaks in hand for ${from.name} (${from.title})`)
+    const loudSource = [0, 1, 4, 5, 8, 9].map((i) => from.envelope[i])
+    const quietSource = [2, 3, 6, 7, 10, 11].map((i) => from.envelope[i])
+    assert.ok(
+      Math.min(...loudSource) > 100 && Math.max(...quietSource) < 20,
+      `the peaks themselves do not match the fixture — loud ${loudSource.join(',')}, ` +
+        `quiet ${quietSource.join(',')}. The drawing is not what is wrong here.`,
+    )
+
+    const loud = [0, 1, 4, 5, 8, 9].map((i) => state.columns[i])
+    const quiet = [2, 3, 6, 7, 10, 11].map((i) => state.columns[i])
     assert.ok(
       Math.min(...loud) > Math.max(...quiet) * 3,
       `loud columns ${loud.join(',')} are not clearly taller than quiet ones ${quiet.join(',')}`,
@@ -1490,6 +1739,50 @@ try {
     )
     assert.deepEqual(after.clips, before, 'the pair did not come back as it went in')
     assert.equal(after.oneLink, true, 'the two halves are no longer linked to each other')
+  })
+
+  await check('levels and mutes survive a save and a reload', async () => {
+    const before = await evaluate(
+      cdp,
+      `const { sequence, store, project } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 200));
+       sequence.setTrackGain('A1', -7.5);
+       sequence.setTrackMuted('A2', true);
+       sequence.setTrackSolo('A1', true);
+       await new Promise(r => setTimeout(r, 200));
+       const state = sequence.getSequence().tracks
+         .map(t => [t.id, t.gain, t.muted, t.solo]);
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+       location.reload();
+       return state;`,
+    )
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       return seq.getSequence().tracks.map(t => [t.id, t.gain, t.muted, t.solo]);`,
+    )
+    assert.deepEqual(after, before, 'the mixer settings did not come back as they went in')
+
+    // And leave the tracks plain, so nothing below inherits a mute.
+    await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       for (const track of sequence.getSequence().tracks) {
+         sequence.setTrackMuted(track.id, false);
+         sequence.setTrackSolo(track.id, false);
+         sequence.setTrackGain(track.id, 0);
+       }
+       return true;`,
+    )
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

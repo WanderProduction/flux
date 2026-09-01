@@ -350,9 +350,70 @@ kbd {
 .tl-header {
   display: flex;
   align-items: center;
-  padding: 0 10px;
+  gap: 6px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--flux-border);
   box-sizing: border-box;
+}
+
+/*
+ * A track's level and whether it is heard.
+ *
+ * The whole row dims when the track is silent for any reason — muted, or
+ * something else soloed — while the M button shows only what it is itself
+ * doing. Otherwise a track silenced by another track's solo looks exactly like
+ * one that is playing.
+ */
+.track-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+.track-controls--silent {
+  opacity: 0.45;
+}
+.track-toggle {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--flux-text-dim);
+  background: var(--flux-bg-elevated);
+  border: 1px solid var(--flux-border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.track-toggle:hover {
+  color: var(--flux-text);
+  border-color: var(--flux-text-dim);
+}
+.track-toggle--on {
+  color: var(--flux-bg);
+  background: var(--flux-warn);
+  border-color: var(--flux-warn);
+}
+.track-toggle--solo.track-toggle--on {
+  background: var(--flux-audio);
+  border-color: var(--flux-audio);
+}
+/* Dragged, not typed: a fader is a gesture. */
+.track-gain {
+  min-width: 32px;
+  text-align: right;
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+  color: var(--flux-text-dim);
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+.track-gain:hover {
+  color: var(--flux-text);
 }
 .track-name {
   font-family: var(--flux-font-mono);

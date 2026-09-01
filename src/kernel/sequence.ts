@@ -17,6 +17,17 @@ export interface Track {
   id: string
   kind: TrackKind
   name: string
+  /**
+   * Level, in decibels. 0 is unity — the clip as it was recorded.
+   *
+   * Decibels rather than a linear multiplier because that is what the number
+   * means to whoever is setting it: -6 is half as loud, and a project file that
+   * says `"gain": -6` can be read. The mixer converts once, at the point it
+   * hands the number to the audio device.
+   */
+  gain: number
+  muted: boolean
+  solo: boolean
 }
 
 export interface Clip {
@@ -42,6 +53,17 @@ export interface Clip {
   linkId?: string
 }
 
+/** Below this a track is off rather than quiet, which is what a fader bottom means. */
+export const MIN_GAIN_DB = -60
+
+/** Headroom above unity. Enough to rescue a quiet take, not enough to be a mistake. */
+export const MAX_GAIN_DB = 12
+
+export function clampGain(db: number): number {
+  if (!Number.isFinite(db)) return 0
+  return Math.min(MAX_GAIN_DB, Math.max(MIN_GAIN_DB, db))
+}
+
 export interface SequenceState {
   name: string
   frameRate: number
@@ -63,13 +85,17 @@ function defaultSequence(): SequenceState {
     name: 'Sequence 1',
     frameRate: 24,
     tracks: [
-      { id: 'V2', kind: 'video', name: 'V2' },
-      { id: 'V1', kind: 'video', name: 'V1' },
-      { id: 'A1', kind: 'audio', name: 'A1' },
-      { id: 'A2', kind: 'audio', name: 'A2' },
+      makeTrack('V2', 'video'),
+      makeTrack('V1', 'video'),
+      makeTrack('A1', 'audio'),
+      makeTrack('A2', 'audio'),
     ],
     clips: [],
   }
+}
+
+function makeTrack(id: string, kind: TrackKind): Track {
+  return { id, kind, name: id, gain: 0, muted: false, solo: false }
 }
 
 let sequence: SequenceState = defaultSequence()
@@ -119,9 +145,18 @@ export function setSequence(next: SequenceState | null): void {
  * only older.
  */
 function normalise(next: SequenceState): SequenceState {
-  const tracks = next.tracks.some((track) => track.kind === 'audio')
+  const withAudio = next.tracks.some((track) => track.kind === 'audio')
     ? next.tracks
     : [...next.tracks, ...defaultSequence().tracks.filter((track) => track.kind === 'audio')]
+
+  // A track saved before it could be turned down has no level, which is not
+  // the same as a level of zero — it means unity, the clip as recorded.
+  const tracks = withAudio.map((track) => ({
+    ...track,
+    gain: typeof track.gain === 'number' ? clampGain(track.gain) : 0,
+    muted: Boolean(track.muted),
+    solo: Boolean(track.solo),
+  }))
 
   const kindOf = new Map(tracks.map((track) => [track.id, track.kind]))
   const clips = next.clips.map((clip) =>
@@ -326,7 +361,7 @@ export function addTrack(kind: TrackKind = 'video'): Track {
   let index = sequence.tracks.filter((track) => track.kind === kind).length + 1
   while (taken.has(`${prefix}${index}`)) index += 1
 
-  const track: Track = { id: `${prefix}${index}`, kind, name: `${prefix}${index}` }
+  const track = makeTrack(`${prefix}${index}`, kind)
   // Outward from the middle, which is what the numbering means: V3 above V2, A3
   // below A2. Putting either at the far end of the list would break the one
   // rule the track order encodes, that video is above audio.
@@ -354,6 +389,52 @@ export function removeTrack(trackId: string): boolean {
   }
   emit()
   return true
+}
+
+/**
+ * Whether a track is heard, given what else is soloed.
+ *
+ * Solo picks a subset and mute silences within it: a track that is both soloed
+ * and muted stays silent. That is the rule that surprises nobody, because each
+ * button keeps meaning exactly one thing rather than one of them quietly
+ * overriding the other.
+ */
+export function isTrackAudible(track: Track, tracks: Track[] = sequence.tracks): boolean {
+  if (track.muted) return false
+  const soloing = tracks.some((other) => other.kind === 'audio' && other.solo)
+  return soloing ? track.solo : true
+}
+
+function updateTrack(trackId: string, change: (track: Track) => Track): boolean {
+  const existing = sequence.tracks.find((track) => track.id === trackId)
+  if (!existing) return false
+  const next = change(existing)
+  if (
+    next.gain === existing.gain &&
+    next.muted === existing.muted &&
+    next.solo === existing.solo
+  ) {
+    return false
+  }
+  sequence = {
+    ...sequence,
+    tracks: sequence.tracks.map((track) => (track.id === trackId ? next : track)),
+  }
+  emit()
+  return true
+}
+
+/** @param db decibels, 0 being unity. Clamped to the fader's range. */
+export function setTrackGain(trackId: string, db: number): boolean {
+  return updateTrack(trackId, (track) => ({ ...track, gain: clampGain(db) }))
+}
+
+export function setTrackMuted(trackId: string, muted: boolean): boolean {
+  return updateTrack(trackId, (track) => ({ ...track, muted }))
+}
+
+export function setTrackSolo(trackId: string, solo: boolean): boolean {
+  return updateTrack(trackId, (track) => ({ ...track, solo }))
 }
 
 /**

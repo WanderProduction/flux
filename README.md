@@ -55,6 +55,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
 | **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
+| **Level, mute, solo** | Per track, in decibels, saved with the project. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
@@ -615,9 +616,41 @@ Measured over 222 transport notifications, the sequence's time and the audio dev
 **exactly** the same number in more than 99% of them, the rest being readings where the audio clock
 ticked over while the rest of the app was still being told.
 
-Not yet: per-track gain, mute and solo, audio scrubbing, loop, frame stepping, compositing more than
-one clip at a time, and a cut that does not re-open a source — the index is cached, but the
-*decoder* is still torn down and rebuilt when the playhead crosses one.
+#### Level, mute and solo
+
+Each audio track carries a level in decibels, a mute and a solo, and all three are part of the
+sequence — so they are the user's edit, and they are saved with the project. **Decibels** rather than
+a multiplier because that is what the number means to whoever sets it: -6 is half as loud, and a
+project file that says `"gain": -6` can be read. The mixer converts once, where it hands the number
+to the audio device.
+
+**Solo picks the subset, mute silences within it.** A track that is both soloed and muted stays
+silent. That is the rule that surprises nobody, because each button keeps meaning exactly one thing
+rather than one of them quietly overruling the other. In the header, a track dims when it is silent
+*for any reason* — muted, or something else soloed — while the M button keeps showing only what it
+is itself doing.
+
+The level is **dragged, not typed**, the way every parameter in a compositor is: a fader is a
+gesture, and stopping to select a number and commit it is not how anyone rides a level.
+Double-click puts it back to unity.
+
+Each track gets a `GainNode` between its clips and the master. A muted track is **still decoded and
+still scheduled** — which sounds wasteful and is the only way unmuting can be instant, because
+skipping the work would mean nothing was in the pipe and the sound would arrive a scheduling window
+after the button was pressed. Levels ramp over about twelve milliseconds rather than being assigned,
+since a gain that steps from 1 to 0 partway through a waveform is a discontinuity, and a
+discontinuity is a click.
+
+> **A ramp lies about where it is.** For the milliseconds a ramp is running, `gain.value` still
+> reports the value it is *leaving*. Deciding whether anything changed by reading it therefore
+> compares a new request against a number already on its way somewhere else — so a second change
+> arriving mid-ramp looks like no change and is dropped, and the first one wins. That is not an
+> exotic case: it is unmute-then-mute, and it is every fader drag. The mixer remembers what each
+> fader was last *told* to be, which is a different number from what it currently is.
+
+Not yet: audio scrubbing, loop, frame stepping, compositing more than one clip at a time, and a cut
+that does not re-open a source — the index is cached, but the *decoder* is still torn down and
+rebuilt when the playhead crosses one.
 
 ---
 

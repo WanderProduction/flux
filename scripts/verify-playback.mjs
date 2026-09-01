@@ -1019,6 +1019,14 @@ try {
     const voice = assets.getAssets().find(a => a.name === 'voice_over.mp4');
     const probed = await assets.ensureProbed(voice.id);
     sequence.clearSequence();
+    // Clips *and* track state. clearSequence empties the timeline; a mute set
+    // by a check above it would otherwise still be in force, which is how one
+    // check silently decides another one's outcome.
+    for (const track of sequence.getSequence().tracks) {
+      sequence.setTrackMuted(track.id, false);
+      sequence.setTrackSolo(track.id, false);
+      sequence.setTrackGain(track.id, 0);
+    }
     sequence.addLinkedClips(
       { assetId: voice.id, trackId: 'V1', start: 0, duration: probed.duration }, true);
     playback.seek(0);
@@ -1140,7 +1148,13 @@ try {
            if (mixed !== null) gaps.push(playback.getTime() - mixed);
          });
          playback.play();
-         await new Promise(r => setTimeout(r, 1800));
+         // Until there are enough readings, not for a fixed time: the transport
+         // notifies on animation frames, and how many of those arrive in a
+         // second is a fact about the machine rather than about the clock.
+         const deadline = performance.now() + 8000;
+         while (gaps.length < 30 && performance.now() < deadline) {
+           await new Promise(r => setTimeout(r, 50));
+         }
          playback.pause();
          stop();
          return { gaps: gaps.map(g => +g.toFixed(6)), voices: mixer.mixerStats().voices };`,
@@ -1256,6 +1270,169 @@ try {
     assert.ok(
       state.decoded < 12,
       `${state.decoded} frames were decoded to produce the one at 50s`,
+    )
+  })
+
+  /** Plays, waits for the level to settle, and reports it. */
+  const LEVEL_AFTER = (setup) => `
+    playback.seek(0);
+    playback.play();
+    await new Promise(r => setTimeout(r, 700));
+    const before = window.__fluxDev.mixer.mixerLevel();
+    ${setup}
+    // The ramp is a few milliseconds and the meter averages over about forty,
+    // so this is waiting for the measurement, not for the change.
+    await new Promise(r => setTimeout(r, 400));
+    const after = window.__fluxDev.mixer.mixerLevel();
+    playback.pause();
+    return { before, after };`
+
+  await check('muting a track silences it', async () => {
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND + LEVEL_AFTER(`sequence.setTrackMuted('A1', true);`),
+    )
+    assert.ok(state.before > LOUD_RMS * 0.8, `it was not playing to begin with (${state.before})`)
+    assert.ok(state.after < 0.005, `a muted track was still heard at ${state.after.toFixed(4)}`)
+  })
+
+  await check('unmuting brings it straight back', async () => {
+    // Straight back matters: the audio for a muted track is still decoded and
+    // still scheduled, precisely so that unmuting does not have to wait a
+    // scheduling window for anything to arrive.
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `sequence.setTrackMuted('A1', true);
+         playback.seek(0);
+         playback.play();
+         await new Promise(r => setTimeout(r, 700));
+         const before = window.__fluxDev.mixer.mixerLevel();
+         sequence.setTrackMuted('A1', false);
+         // Barely longer than the ramp and the meter's own window.
+         await new Promise(r => setTimeout(r, 120));
+         const after = window.__fluxDev.mixer.mixerLevel();
+         playback.pause();
+         return { before, after };`,
+    )
+    assert.ok(state.before < 0.005, `it was not muted to begin with (${state.before})`)
+    assert.ok(
+      state.after > LOUD_RMS * 0.5,
+      `a tenth of a second after unmuting it was still at ${state.after.toFixed(4)}`,
+    )
+  })
+
+  await check('the last of several quick level changes is the one that sticks', async () => {
+    /*
+     * Levels ramp over a few milliseconds, and for those milliseconds the gain
+     * node still reports the value it is leaving. Anything deciding "has this
+     * changed?" by reading it therefore compares against a number already on
+     * its way somewhere else — so a second change arriving mid-ramp looks like
+     * no change and is dropped, and the first one wins.
+     *
+     * That is not an exotic case. It is unmute-then-mute, and it is every
+     * fader drag, where changes arrive far faster than the ramp is long.
+     */
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `sequence.setTrackMuted('A1', true);
+         playback.seek(0);
+         playback.play();
+         await new Promise(r => setTimeout(r, 700));
+         // Off, then on again, inside one ramp. The direction matters: from a
+         // muted start the fader reads 0 for the whole of the ramp back up, so
+         // the second change is the one that looks like nothing and gets lost.
+         sequence.setTrackMuted('A1', false);
+         sequence.setTrackMuted('A1', true);
+         await new Promise(r => setTimeout(r, 400));
+         const level = window.__fluxDev.mixer.mixerLevel();
+         const gains = window.__fluxDev.mixer.mixerStats().gains;
+         playback.pause();
+         return { level, gain: gains.A1 };`,
+    )
+    assert.equal(state.gain, 0, `the fader ended at ${state.gain}, not where it was last sent`)
+    assert.ok(state.level < 0.005, `and it was still heard at ${state.level.toFixed(4)}`)
+  })
+
+  await check('soloing a track silences the others', async () => {
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `sequence.addClip({ assetId: voice.id, trackId: 'A2', start: 0, duration: probed.duration });
+         await new Promise(r => setTimeout(r, 300));` +
+        LEVEL_AFTER(`sequence.setTrackSolo('A1', true);`),
+    )
+    // Two copies of one signal sum to twice the amplitude; soloing one leaves
+    // exactly one of them.
+    assert.ok(
+      state.before > LOUD_RMS * 1.6,
+      `both tracks were not playing to begin with (${state.before.toFixed(3)})`,
+    )
+    assert.ok(
+      Math.abs(state.after - LOUD_RMS) < 0.06,
+      `soloing one of two left ${state.after.toFixed(3)}, not ${LOUD_RMS.toFixed(3)}`,
+    )
+  })
+
+  await check('a soloed track that is also muted stays silent', async () => {
+    // Each button keeps meaning one thing. Solo picks the subset, mute silences
+    // within it — the alternative is one control quietly overruling the other,
+    // which is the kind of rule nobody can predict from the buttons.
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        LEVEL_AFTER(`sequence.setTrackSolo('A1', true); sequence.setTrackMuted('A1', true);`),
+    )
+    assert.ok(state.before > LOUD_RMS * 0.8, `it was not playing to begin with (${state.before})`)
+    assert.ok(state.after < 0.005, `soloed and muted still made ${state.after.toFixed(4)}`)
+  })
+
+  await check('a track turned down by the amount it was turned down', async () => {
+    // -6dB is half the amplitude, near enough: 10^(-6/20) = 0.5012. A gain
+    // control that was applied in the wrong unit — or not applied at all — has
+    // nowhere to hide against a number that exact.
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND + LEVEL_AFTER(`sequence.setTrackGain('A1', -6);`),
+    )
+    const expected = LOUD_RMS * 10 ** (-6 / 20)
+    assert.ok(state.before > LOUD_RMS * 0.8, `it was not playing to begin with (${state.before})`)
+    assert.ok(
+      Math.abs(state.after - expected) < 0.02,
+      `-6dB gave ${state.after.toFixed(4)}, not ${expected.toFixed(4)}`,
+    )
+  })
+
+  await check('the bottom of the fader is silence, not nearly silence', async () => {
+    // -60dB is a thousandth of the signal, which is inaudible but not zero —
+    // and a fader pulled all the way down means off.
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND + LEVEL_AFTER(`sequence.setTrackGain('A1', -60);`),
+    )
+    assert.ok(state.before > LOUD_RMS * 0.8, `it was not playing to begin with (${state.before})`)
+    assert.equal(state.after, 0, `the fader bottom left ${state.after} coming out`)
+  })
+
+  await check('a level set while paused is in force when play is pressed', async () => {
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `sequence.setTrackGain('A1', -12);
+         await new Promise(r => setTimeout(r, 200));
+         playback.seek(0);
+         playback.play();
+         await new Promise(r => setTimeout(r, 700));
+         const level = window.__fluxDev.mixer.mixerLevel();
+         playback.pause();
+         sequence.setTrackGain('A1', 0);
+         return level;`,
+    )
+    const expected = LOUD_RMS * 10 ** (-12 / 20)
+    assert.ok(
+      Math.abs(state - expected) < 0.02,
+      `-12dB set before play gave ${state.toFixed(4)}, not ${expected.toFixed(4)}`,
     )
   })
 
