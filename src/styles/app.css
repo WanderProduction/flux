@@ -711,6 +711,39 @@ kbd {
 }
 
 /*
+ * The grab zones at either end of a clip.
+ *
+ * Eight pixels, which is the width Premiere and Resolve both land on: wide
+ * enough to hit without aiming, narrow enough that the middle of even a short
+ * clip is still a place to grab it and move it. Invisible until the pointer is
+ * over the clip — a timeline of blocks with permanent bars down both sides
+ * reads as chrome rather than as footage.
+ */
+.clip-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 2;
+}
+.clip-handle--start {
+  left: 0;
+}
+.clip-handle--end {
+  right: 0;
+}
+.clip:hover .clip-handle,
+.clip--selected .clip-handle {
+  background: color-mix(in srgb, var(--flux-text) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--flux-text) 30%, transparent);
+}
+.clip-handle:hover {
+  background: color-mix(in srgb, var(--flux-accent) 70%, transparent) !important;
+}
+
+/*
  * Follows the pointer without being committed.
  *
  * A transform rather than a new `left`: the clip is still where it was in the

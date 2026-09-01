@@ -354,9 +354,11 @@ async function tick() {
       const opened = await AudioSource.open(asset.path)
       if (!opened.ok) continue
       // Where in the file this clip's sound starts, given where the playhead
-      // already is. A clip joined halfway through starts halfway through.
+      // already is. A clip joined halfway through starts halfway through — and
+      // a trimmed clip starts at its in point rather than at the top of the
+      // file, which is the whole of what a trim means to the mixer.
       const from = Math.max(0, now - clip.start)
-      opened.source.seek(from)
+      opened.source.seek(clip.offset + from)
       voice = { clipId: clip.id, source: opened.source, until: clip.start + from, nodes: new Set(), busy: false, done: false }
       voices.set(clip.id, voice)
     }
@@ -372,7 +374,9 @@ async function tick() {
         }
         if (!running || !voices.has(clip.id)) break
 
-        const at = clip.start + frame.time
+        // Source time back to sequence time. The in point is subtracted
+        // because the frame knows where it is in the file, not in the edit.
+        const at = clip.start + frame.time - clip.offset
         const end = clip.start + clip.duration
         if (at >= end) {
           voice.done = true

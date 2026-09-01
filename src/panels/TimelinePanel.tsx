@@ -51,6 +51,9 @@ import {
   setTrackSolo,
   withLinked,
   addTrack,
+  allowedTrim,
+  trimClips,
+  type TrimEdge,
   findFreeStart,
   moveClips,
   snapDelta,
@@ -169,6 +172,9 @@ const DRAG_THRESHOLD_PX = 3
 /** How close, in pixels, an edge has to be before a drag snaps to it. */
 const SNAP_PX = 8
 
+/** Floating-point slack, for deciding whether a clip is trimmed at all. */
+const EPS_UI = 1e-6
+
 /** What the panel needs to *draw* a drag in progress. The rest lives in the
     handler's own closure — see beginClipDrag. */
 interface ClipDrag {
@@ -177,6 +183,18 @@ interface ClipDrag {
   moved: boolean
   deltaTime: number
   deltaTracks: number
+}
+
+/**
+ * A trim in progress, held for the same reason a move is: the clip in the
+ * sequence is not touched until the pointer comes up, so an abandoned trim
+ * needs no undoing. `delta` is already clamped to what the edge can take, so
+ * what is drawn is what will be committed.
+ */
+interface ClipTrim {
+  ids: string[]
+  edge: TrimEdge
+  delta: number
 }
 
 export function TimelinePanel() {
@@ -190,6 +208,7 @@ export function TimelinePanel() {
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
   const [drag, setDrag] = useState<ClipDrag | null>(null)
+  const [trim, setTrim] = useState<ClipTrim | null>(null)
   /**
    * Why the last drop did less than it looked like it should.
    *
@@ -328,6 +347,93 @@ export function TimelinePanel() {
       return best
     },
     [sequence, zoom, snapTargets],
+  )
+
+  /**
+   * Nudges a trim so the edge being dragged lands on a nearby target.
+   *
+   * One edge, not two: a trim moves the head or the tail, and offering the
+   * other one would snap the edge to a target it is not travelling towards.
+   */
+  const snapTrimToEdges = useCallback(
+    (rawDelta: number, edge: TrimEdge, movingIds: Set<string>): number => {
+      const moving = sequence.clips.filter((clip) => movingIds.has(clip.id))
+      if (moving.length === 0) return rawDelta
+
+      const at =
+        edge === 'start'
+          ? Math.min(...moving.map((clip) => clip.start)) + rawDelta
+          : Math.max(...moving.map((clip) => clip.start + clip.duration)) + rawDelta
+      const tolerance = SNAP_PX / zoom
+
+      let best = rawDelta
+      let bestGap = tolerance
+      for (const target of snapTargets(movingIds)) {
+        const gap = Math.abs(target - at)
+        if (gap < bestGap) {
+          bestGap = gap
+          best = rawDelta + (target - at)
+        }
+      }
+      return best
+    },
+    [sequence, zoom, snapTargets],
+  )
+
+  /**
+   * Press an edge, drag, release — a trim.
+   *
+   * Deliberately not the move gesture with a flag. A move asks where a clip
+   * should *land*, and resolves overlap by sliding and reordering; a trim asks
+   * how much of a clip should *play*, and stops dead at its neighbour, at the
+   * ends of the file, and at one frame. Sharing a path would mean one of the
+   * two behaving like the other somewhere.
+   *
+   * The clip pressed, plus whatever is linked to it — not the selection. An
+   * edge belongs to one clip, and trimming everything selected because an edge
+   * happened to be dragged is not a gesture anybody asked for.
+   */
+  const beginClipTrim = useCallback(
+    (event: React.PointerEvent, clip: Clip, edge: TrimEdge) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+
+      const ids = withLinked([clip.id])
+      // Selected as well as trimmed, so what is about to change is visible
+      // before it changes.
+      const chosen = new Set(ids)
+      setSelected(chosen)
+      selectedRef.current = chosen
+
+      const startX = event.clientX
+      let delta = 0
+      setTrim({ ids, edge, delta })
+
+      const onMove = (move: PointerEvent) => {
+        const raw = (move.clientX - startX) / zoom
+        // Alt turns snapping off, as it does for a move.
+        const wanted = move.altKey ? raw : snapTrimToEdges(raw, edge, chosen)
+        // Clamped here rather than only on commit: an edge that keeps following
+        // the pointer past the end of its own file and then springs back on
+        // release is a lie about what the edit will be.
+        delta = allowedTrim(ids, edge, wanted)
+        setTrim({ ids, edge, delta })
+      }
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+        if (delta !== 0) trimClips(ids, edge, delta)
+        setTrim(null)
+      }
+
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+    },
+    [zoom, snapTrimToEdges],
   )
 
   /**
@@ -857,6 +963,7 @@ export function TimelinePanel() {
                   .filter((clip) => clip.trackId === track.id)
                   .map((clip) => {
                     const dragging = drag?.moved === true && drag.ids.includes(clip.id)
+                    const trimming = trim?.ids.includes(clip.id) ? trim : null
                     return (
                       <ClipBlock
                         key={clip.id}
@@ -865,6 +972,15 @@ export function TimelinePanel() {
                         zoom={zoom}
                         selected={selected.has(clip.id)}
                         dragging={dragging}
+                        // The head takes the clip's front with it and gives back
+                        // the same amount of length; the tail only changes the
+                        // length. Same arithmetic as the kernel's trim, so what
+                        // is drawn is what will be committed.
+                        trimStart={trimming?.edge === 'start' ? trimming.delta : 0}
+                        trimDuration={
+                          trimming ? (trimming.edge === 'start' ? -trimming.delta : trimming.delta) : 0
+                        }
+                        onTrim={(event, edge) => beginClipTrim(event, clip, edge)}
                         // Offset rather than re-placed: the move is not
                         // committed until the pointer comes up, so the clip in
                         // the sequence is still where it was.
@@ -1249,26 +1365,46 @@ function SequenceSettingsDialog({
   )
 }
 
+/**
+ * How narrow a clip can get before its trim handles are in the way.
+ *
+ * Below this the whole block is barely a grab target, and two handles either
+ * side of it would leave nothing in the middle to press for a move.
+ */
+const HANDLE_MIN_WIDTH = 22
+
 function ClipBlock({
   clip,
   asset,
   zoom,
   selected,
   dragging,
+  trimStart,
+  trimDuration,
   offsetX,
   offsetY,
   onPointerDown,
+  onTrim,
 }: {
   clip: Clip
   asset: Asset | undefined
   zoom: number
   selected: boolean
   dragging: boolean
+  trimStart: number
+  trimDuration: number
   offsetX: number
   offsetY: number
   onPointerDown: (event: React.PointerEvent) => void
+  onTrim: (event: React.PointerEvent, edge: TrimEdge) => void
 }) {
-  const width = Math.max(2, clip.duration * zoom)
+  // What the clip is *while the pointer is down*. The sequence still holds the
+  // untrimmed clip until the trim is committed, so this is drawn from the
+  // in-flight delta rather than from the sequence.
+  const start = clip.start + trimStart
+  const duration = clip.duration + trimDuration
+  const offset = clip.offset + trimStart
+  const width = Math.max(2, duration * zoom)
 
   // The asset can be gone while the clip remains: removing something from the
   // bin must not silently delete the editing work that used it.
@@ -1280,6 +1416,9 @@ function ClipBlock({
 
   const label = orphaned ? 'missing asset' : asset.name
   const state = orphaned || asset.missing ? ' clip--orphan' : ''
+  // Says so only when it is: a clip playing its whole file has nothing to
+  // report, and a badge on every clip would say nothing at all.
+  const trimmed = offset > EPS_UI || offset + duration < clip.sourceDuration - EPS_UI
 
   return (
     <div
@@ -1287,19 +1426,39 @@ function ClipBlock({
         dragging ? ' clip--dragging' : ''
       }`}
       style={{
-        left: clip.start * zoom,
+        left: start * zoom,
         width,
         transform: dragging ? `translate(${offsetX}px, ${offsetY}px)` : undefined,
       }}
-      title={`${label} · ${clip.duration.toFixed(2)}s`}
+      title={`${label} · ${duration.toFixed(2)}s${
+        trimmed ? ` · from ${offset.toFixed(2)}s of ${clip.sourceDuration.toFixed(2)}s` : ''
+      }`}
       onPointerDown={onPointerDown}
     >
       {clip.kind === 'audio' ? (
-        <Waveform path={asset?.path} width={width} start={0} duration={clip.duration} />
+        <Waveform path={asset?.path} width={width} start={offset} duration={duration} />
       ) : (
         thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />
       )}
       <span className="clip-label">{label}</span>
+
+      {/* Handles last, so they sit above the label and the waveform. Their
+          own pointerdown stops the block's, which would otherwise start a
+          move: an edge is not a place to grab a clip from. */}
+      {!orphaned && width >= HANDLE_MIN_WIDTH && (
+        <>
+          <span
+            className="clip-handle clip-handle--start"
+            title="Drag to trim the head"
+            onPointerDown={(event) => onTrim(event, 'start')}
+          />
+          <span
+            className="clip-handle clip-handle--end"
+            title="Drag to trim the tail"
+            onPointerDown={(event) => onTrim(event, 'end')}
+          />
+        </>
+      )}
     </div>
   )
 }

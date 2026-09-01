@@ -1282,6 +1282,110 @@ try {
     assert.ok(state.stats.scheduled > 200, `only ${state.stats.scheduled} buffers were scheduled`)
   })
 
+  /*
+   * Trimming, from the only place it can actually be believed: what came out.
+   *
+   * A trim writes three numbers, and the timeline suite checks all three. None
+   * of that says the picture and the sound moved with them — an in point the
+   * decoder ignores is a clip that looks trimmed on the timeline and plays the
+   * frames it used to. Both checks below put the clip's in point three seconds
+   * into the file and its start back at zero, so the two are different numbers
+   * and reading the wrong one cannot come out right by accident.
+   */
+  const TRIMMED_IN = `
+    const first = sequence.getSequence().clips[0].id;
+    // Both halves: they are linked, which is the point of doing it this way.
+    sequence.trimClips([first], 'start', 3);
+    sequence.moveClips([first], -3, 0);
+    const clip = sequence.getSequence().clips.find(c => c.kind === 'video');
+    if (clip.start !== 0 || clip.offset !== 3) {
+      throw new Error('setup: clip is at ' + clip.start + ' from ' + clip.offset);
+    }
+  `
+
+  await check('a trimmed clip shows the frame at its in point', async () => {
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        TRIMMED_IN +
+        `playback.seek(0.5);
+         // Waits for the picture, not for a duration: the first frame after a
+         // seek is a real decode from a keyframe.
+         let shown = null;
+         for (let i = 0; i < 60; i++) {
+           await new Promise(r => setTimeout(r, 100));
+           const canvas = document.querySelector('canvas.viewer-media');
+           const t = canvas && canvas.dataset.frameTime ? Number(canvas.dataset.frameTime) : null;
+           if (t !== null) { shown = t; if (Math.abs(t - 3.5) < 0.2) break; }
+         }
+         return { shown, at: playback.getTime() };`,
+    )
+    assert.ok(state.shown !== null, 'the pipeline never drew a frame')
+    assert.ok(
+      Math.abs(state.shown - 3.5) < 0.15,
+      `half a second into a clip cut from three seconds in, the picture should be at 3.5s ` +
+        `and it is at ${state.shown}s — 0.5s would mean the in point was ignored`,
+    )
+  })
+
+  await check('a trimmed clip plays the sound at its in point', async () => {
+    /*
+     * The fixture is loud for two seconds then quiet for two, three times over.
+     * Cut three seconds off its head and the clip now begins one second before
+     * the end of a quiet stretch: quiet until a second in, loud for the two
+     * after that. Untrimmed it would start loud, which is what makes this
+     * measurable rather than merely consistent.
+     */
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        TRIMMED_IN +
+        `playback.seek(0);
+         await new Promise(r => setTimeout(r, 400));
+         playback.play();
+         const readings = [];
+         for (let i = 0; i < 32; i++) {
+           await new Promise(r => setTimeout(r, 100));
+           readings.push([+playback.getTime().toFixed(2),
+                          +window.__fluxDev.mixer.mixerLevel().toFixed(4)]);
+         }
+         playback.pause();
+         return { readings, stats: window.__fluxDev.mixer.mixerStats() };`,
+    )
+
+    /*
+     * Late frames, as well as the level.
+     *
+     * There are two halves to reading an in point — where the source is seeked
+     * to, and where each decoded frame is placed back on the timeline — and
+     * getting only the second right still ends up sounding correct: the mixer
+     * decodes its way from the top of the file, throws every frame away as
+     * having missed its moment, and arrives at the in point by brute force.
+     * The sound is the same and the work is not, so the work is what says which
+     * happened.
+     */
+    assert.equal(state.stats.late, 0, `${state.stats.late} frames arrived after their moment — ` +
+      'the mixer is decoding from the top of the file and discarding its way to the in point')
+
+    const within = (t, a, b) => t >= a && t <= b
+    const quiet = state.readings.filter(([t]) => within(t, 0.3, 0.8)).map(([, level]) => level)
+    const loud = state.readings.filter(([t]) => within(t, 1.3, 2.7)).map(([, level]) => level)
+    assert.ok(quiet.length > 2, `only ${quiet.length} readings in the quiet stretch`)
+    assert.ok(loud.length > 5, `only ${loud.length} readings in the loud stretch`)
+
+    const worstQuiet = Math.max(...quiet)
+    const worstLoud = Math.min(...loud)
+    assert.ok(
+      worstQuiet < QUIET_RMS + 0.05,
+      `the trimmed clip should open quiet and it read ${worstQuiet.toFixed(3)} — ` +
+        `${LOUD_RMS.toFixed(3)} would mean it played from the top of the file`,
+    )
+    assert.ok(
+      Math.abs(worstLoud - LOUD_RMS) < 0.06,
+      `and the loud stretch a second later read ${worstLoud.toFixed(3)}, not ${LOUD_RMS.toFixed(3)}`,
+    )
+  })
+
   await check('two clips at once are heard together, not one of them', async () => {
     /*
      * The whole claim of the word "mixer".

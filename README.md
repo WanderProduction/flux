@@ -50,6 +50,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Panel focus** | `Ctrl 1`–`Ctrl 3`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
+| **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 | **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
@@ -324,6 +325,80 @@ frames short and leave a gap you cannot see and cannot close by hand.
 Nothing is committed until the pointer comes up: the block follows the cursor as a transform while
 the clip is still where it was, so an abandoned drag needs no undoing.
 
+#### Trimming clips
+
+Drag either edge of a clip. The head sets where in the file it starts, the tail sets where it ends,
+and the clip's block on the timeline is what it will play.
+
+A clip therefore carries **three numbers, not one**: where it sits on the timeline, how much of the
+source it plays, and where in the source that begins. The third is the in point, and moving it is
+the whole of what separates a trim from the two edits it resembles:
+
+|  | `start` | `offset` | `duration` |
+|---|---|---|---|
+| **Move** | changes | — | — |
+| **Trim the head** | changes | changes by the same amount | changes by the same amount |
+| **Slip** *(not built)* | — | changes | — |
+
+Trimming the head moves `start` and `offset` together, which is what keeps the frames still in the
+clip exactly where they were on the timeline. Only the frames outside it stop being played. A trim
+that moved `offset` alone would be a slip — the same block playing different footage — and one that
+moved `start` alone would be a move that ate frames.
+
+**Four things stop an edge**, and each is a different fact about the edit:
+
+- **The source.** The head cannot go before the first frame of the file, and the tail cannot go past
+  the last. This is why a clip records how long its source was when it was cut: without that, a
+  trimmed edge could never be pulled back out. It is written on the clip rather than looked up from
+  the bin for the same reason a link is — it has to be a fact about the sequence, not something the
+  panel that happens to be in front knows.
+- **The neighbour.** An edge stops where the next clip on that track begins. Trimming is not moving:
+  nothing slides out of the way and nothing is overwritten.
+- **One frame.** A clip is a thing that plays, so the floor is the smallest amount of time that can
+  be played. A zero-length clip is an invisible object on the timeline that still catches drops and
+  still has to be found to be deleted.
+- **The start of the sequence.** Nothing lives before zero.
+
+The edge is **clamped while you drag it**, not on release. An edge that keeps following the pointer
+past the end of its own file and then springs back when you let go is a lie about what the edit will
+be. Snapping works as it does for a move — the moving edge only, since offering the other one would
+snap the edge to a target it is not travelling towards — and `Alt` turns it off.
+
+**A linked pair trims by one amount.** The limits of every clip in the pair are intersected first,
+so the picture and its sound lose the same frames and stay in sync. Clamped rather than refused,
+which is the opposite of what a *move* does with a pair: an edge that stops when it reaches the
+file's end is what a hand expects, where a pair that ignores the drag entirely reads as a broken
+handle.
+
+Nothing is committed until the pointer comes up, as with a move: the block is drawn from the
+in-flight delta while the sequence still holds the untrimmed clip.
+
+Everything downstream reads the in point rather than assuming a clip starts at the top of its file —
+the compositor asks its decoder for `now - start + offset`, the mixer seeks its source to
+`offset + into the clip` and maps each decoded frame back the other way, and the waveform is drawn
+from `offset` for `duration`. That last one is the cheapest thing here to get wrong and the easiest
+to see: a waveform drawn from the top of the file looks completely normal, and is showing sound the
+clip does not play.
+
+The mixer's two halves — where it seeks to, and where it puts each decoded frame back — are
+**redundant in what you hear and not in what they cost**. Get only the placement right and the mixer
+decodes its way from the top of the file, throws every frame away as having missed its moment, and
+reaches the in point by brute force. It sounds the same. So the check that a trimmed clip plays from
+its in point also asserts that *no frame arrived late*, which is the only thing that tells the two
+apart — a canary that broke the seek and left the placement alone passed a level meter perfectly.
+
+> **The picture kept showing the frames from before the trim**, and the sound did not. The
+> compositor's drawing was reading its layers out of a closure renewed only when the *set* of layers
+> changed — so trimming a clip already under the playhead changed three numbers that nothing
+> redrew. Placement and identity are now separate dependencies: an edit to a clip on screen redraws
+> it, without tearing down and restarting a decoder that had not moved.
+
+A clip saved before trimming existed played its whole file from the top, so it reads back with an in
+point of zero and a source length equal to its duration — which is not a default standing in for an
+unknown, it is what that clip actually was.
+
+Not yet: rolling and slip edits, ripple trimming, and trimming with the keyboard.
+
 #### Moving the playhead
 
 Drag the ruler, or the playhead itself — it carries a narrow handle down the length of the line. The
@@ -419,8 +494,8 @@ its buckets and closed in the same breath. What does need throttling is the *que
 is 150,000 chunks, and submitting them all before the decoder caught up would hold the whole
 compressed track in memory.
 
-Not yet: trimming clips, and any UI for removing a track (the kernel refuses to remove
-the last one, since a sequence with none has nowhere to drop).
+Not yet: any UI for removing a track (the kernel refuses to remove the last one, since a sequence
+with none has nowhere to drop).
 
 ### Serving media
 

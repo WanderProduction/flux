@@ -68,8 +68,30 @@ export interface Clip {
   trackId: string
   /** Seconds from the start of the sequence. */
   start: number
-  /** Seconds. Currently always the asset's full length; trimming comes later. */
+  /** Seconds of the source this clip plays. Not the source's length. */
   duration: number
+  /**
+   * Seconds into the source where this clip begins — the in point.
+   *
+   * Trimming the head moves this and `start` together and shortens `duration`
+   * by the same amount, which is what makes it a trim rather than a slip: the
+   * frames that remain stay exactly where they were on the timeline, and only
+   * the ones outside the clip stop being played.
+   */
+  offset: number
+  /**
+   * How long the source is, as it was when this clip was cut.
+   *
+   * Written down rather than looked up, for the same reason a link lives on the
+   * clip: it is what decides whether an edge can be pulled back out, and that
+   * has to be a fact about the sequence rather than something the panel happens
+   * to know. It also survives the asset being removed from the bin, which the
+   * clip itself already does.
+   *
+   * A clip saved before trimming existed was the whole file, so an older
+   * document reads back with this equal to its duration — which is true.
+   */
+  sourceDuration: number
   /** Which half of the file this clip plays. Must match its track. */
   kind: TrackKind
   /**
@@ -434,9 +456,18 @@ function normalise(next: SequenceState): SequenceState {
   }))
 
   const kindOf = new Map(tracks.map((track) => [track.id, track.kind]))
-  const clips = next.clips.map((clip) =>
-    clip.kind ? clip : { ...clip, kind: kindOf.get(clip.trackId) ?? 'video' },
-  )
+  const clips = next.clips.map((clip) => ({
+    ...clip,
+    kind: clip.kind ?? kindOf.get(clip.trackId) ?? 'video',
+    // A clip saved before trimming existed played its whole file from the top,
+    // so these are not defaults standing in for unknowns — they are what that
+    // clip actually was.
+    offset: Number.isFinite(clip.offset) ? Math.max(0, clip.offset) : 0,
+    sourceDuration:
+      Number.isFinite(clip.sourceDuration) && clip.sourceDuration > 0
+        ? clip.sourceDuration
+        : (Number.isFinite(clip.offset) ? Math.max(0, clip.offset) : 0) + clip.duration,
+  }))
 
   /*
    * Settings, from wherever this arrived with them.
@@ -554,11 +585,24 @@ export interface NewClip {
   trackId: string
   start: number
   duration: number
+  /** Seconds into the source. Defaults to the top of the file. */
+  offset?: number
+  /** The source's full length. Defaults to what is being played, which is what
+      a drop means: the whole file. */
+  sourceDuration?: number
   /** Ties this clip to the one that came out of the same file. */
   linkId?: string
 }
 
-export function addClip({ assetId, trackId, start, duration, linkId }: NewClip): Clip | null {
+export function addClip({
+  assetId,
+  trackId,
+  start,
+  duration,
+  offset,
+  sourceDuration,
+  linkId,
+}: NewClip): Clip | null {
   const track = sequence.tracks.find((t) => t.id === trackId)
   if (!track || duration <= 0) return null
 
@@ -568,6 +612,8 @@ export function addClip({ assetId, trackId, start, duration, linkId }: NewClip):
     trackId,
     start: findFreeStart(trackId, start, duration),
     duration,
+    offset: Math.max(0, offset ?? 0),
+    sourceDuration: Math.max(duration, sourceDuration ?? (offset ?? 0) + duration),
     // Taken from the track rather than passed in. A clip's kind and the track
     // it sits on cannot disagree, so there is no point offering a way for them
     // to.
@@ -935,6 +981,115 @@ export function moveClips(ids: string[], deltaSeconds: number, deltaTracks: numb
   if (!changed) return false
 
   sequence = { ...sequence, clips: next }
+  emit()
+  return true
+}
+
+/** Which end of a clip a trim is dragging. */
+export type TrimEdge = 'start' | 'end'
+
+/**
+ * The shortest a clip may be trimmed to: one frame.
+ *
+ * Not zero, and not "a few frames". A clip is a thing that plays, so the floor
+ * is the smallest amount of time that can be played — and a zero-length clip is
+ * an invisible object on the timeline that still catches drops and still has to
+ * be selected to be deleted.
+ */
+function minDuration(): number {
+  return 1 / sequence.settings.frameRate
+}
+
+/**
+ * How far an edge can travel, in the direction it was dragged.
+ *
+ * Positive is later in time for both edges, which is what the hand means: the
+ * head moving right shortens the clip and the tail moving right lengthens it.
+ * Four things can stop it, and each is a different fact:
+ *
+ *   - **the source.** The head cannot go before the first frame of the file and
+ *     the tail cannot go past the last. This is why a clip records how long its
+ *     source was: without it, a trimmed clip could never be pulled back out.
+ *   - **the neighbour.** An edge stops where the next clip on that track
+ *     begins. Trimming is not a move, so nothing slides out of the way and
+ *     nothing is overwritten.
+ *   - **one frame.** See above.
+ *   - **the start of the sequence.** Nothing lives before zero.
+ *
+ * A group is clamped to what *every* member can take, so a linked pair trims by
+ * one amount and stays in sync. Clamped, not refused: an edge that stops moving
+ * when it reaches the file's end is exactly what a hand expects, where a pair
+ * that ignores the drag entirely reads as a broken handle.
+ *
+ * The result lands on the frame grid — inside the limit, never past it, since
+ * the last fraction of a frame at the end of a file is not a frame you can play.
+ */
+export function allowedTrim(ids: string[], edge: TrimEdge, deltaSeconds: number): number {
+  const wanted = new Set(withLinked(ids))
+  const chosen = sequence.clips.filter((clip) => wanted.has(clip.id))
+  if (chosen.length === 0) return 0
+
+  const min = minDuration()
+  let low = -Infinity
+  let high = Infinity
+
+  for (const clip of chosen) {
+    const siblings = clipsOnTrack(clip.trackId).filter((other) => !wanted.has(other.id))
+    if (edge === 'start') {
+      const before = siblings
+        .filter((other) => other.start + other.duration <= clip.start + EPS)
+        .reduce((end, other) => Math.max(end, other.start + other.duration), 0)
+      low = Math.max(low, -clip.offset, before - clip.start, -clip.start)
+      high = Math.min(high, clip.duration - min)
+    } else {
+      const after = siblings
+        .filter((other) => other.start >= clip.start + clip.duration - EPS)
+        .reduce((start, other) => Math.min(start, other.start), Infinity)
+      low = Math.max(low, min - clip.duration)
+      high = Math.min(
+        high,
+        clip.sourceDuration - clip.offset - clip.duration,
+        after - clip.start - clip.duration,
+      )
+    }
+  }
+
+  const fps = sequence.settings.frameRate
+  // Onto the grid from the inside: ceil the floor, floor the ceiling. Rounding
+  // either the other way would offer a frame that is not there.
+  const lowFrame = Math.ceil(low * fps - EPS) / fps
+  const highFrame = Math.floor(high * fps + EPS) / fps
+  if (lowFrame > highFrame) return 0
+
+  return Math.min(highFrame, Math.max(lowFrame, snapDelta(deltaSeconds)))
+}
+
+/**
+ * Trims one edge of a clip and everything linked to it.
+ *
+ * The head takes `offset` with it — the frames left in the clip do not move on
+ * the timeline, which is what separates a trim from a slip and from a move.
+ *
+ * @returns true when anything actually changed.
+ */
+export function trimClips(ids: string[], edge: TrimEdge, deltaSeconds: number): boolean {
+  const delta = allowedTrim(ids, edge, deltaSeconds)
+  if (delta === 0) return false
+
+  const wanted = new Set(withLinked(ids))
+  const clips = sequence.clips.map((clip) => {
+    if (!wanted.has(clip.id)) return clip
+    return edge === 'start'
+      ? {
+          ...clip,
+          start: clip.start + delta,
+          offset: clip.offset + delta,
+          duration: clip.duration - delta,
+        }
+      : { ...clip, duration: clip.duration + delta }
+  })
+
+  sequence = { ...sequence, clips }
   emit()
   return true
 }

@@ -151,6 +151,21 @@ export function ViewerPanel() {
   const layers = useMemo(() => layersAt(sequence, time), [sequence, time])
   /** Identity of the stack, so effects fire when it changes and not every tick. */
   const stack = layers.map((layer) => layer.id).join('|')
+  /**
+   * Where each layer sits, which is a different question from which layers
+   * there are.
+   *
+   * The drawing depends on both — a clip's start and its in point are what turn
+   * the playhead into a moment in a file — while the decoders depend only on
+   * the identities. Keeping them apart means an edit to a clip already on
+   * screen redraws it without tearing down and restarting its decoder.
+   *
+   * This was one identity until trimming arrived, and the drawing was reading
+   * placement out of a closure the stack alone decided when to renew: trim the
+   * head of the clip under the playhead and the picture went on showing the
+   * frames from before the trim, because the ids had not changed.
+   */
+  const placement = layers.map((layer) => `${layer.id}@${layer.start}+${layer.offset}`).join('|')
   const clip = layers.at(-1) ?? null
   const assetById = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets])
   const asset = clip ? assetById.get(clip.assetId) : undefined
@@ -276,7 +291,11 @@ export function ViewerPanel() {
         const frames = await Promise.all(
           layers.map((layer) => {
             const source = sourcesRef.current.get(layer.id)
-            return source ? source.frameFor(now - layer.start) : Promise.resolve(null)
+            // Sequence time to source time: where the playhead is within the
+            // clip, plus where in the file the clip was cut from.
+            return source
+              ? source.frameFor(now - layer.start + layer.offset)
+              : Promise.resolve(null)
           }),
         )
         if (stopped) return
@@ -318,9 +337,10 @@ export function ViewerPanel() {
       stopped = true
       unsubscribe()
     }
-    // `ready` is here so the first draw happens once the sources are open.
+    // `ready` is here so the first draw happens once the sources are open,
+    // and `placement` so an edit to a clip already on screen is drawn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stack, ready, sequence.settings.width, sequence.settings.height])
+  }, [stack, placement, ready, sequence.settings.width, sequence.settings.height])
 
   // ── the media element: sound, and the clock ───────────────────
 
@@ -335,7 +355,7 @@ export function ViewerPanel() {
     const media = mediaRef.current
     if (!media || !clip) return
     if (media.readyState === 0) return
-    const target = getTime() - clip.start
+    const target = getTime() - clip.start + clip.offset
     if (Math.abs(media.currentTime - target) > SYNC_TOLERANCE) media.currentTime = target
     // seekToken is the dependency that matters: this must fire on a seek, not
     // on the clock advancing.
@@ -361,7 +381,7 @@ export function ViewerPanel() {
     setClockSource('element', () => {
       const media = mediaRef.current
       if (!media || media.paused || media.readyState < 2) return null
-      return clip.start + media.currentTime
+      return clip.start + media.currentTime - clip.offset
     })
     return () => setClockSource('element', null)
   }, [clip, playable, decoding])

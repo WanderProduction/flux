@@ -2015,6 +2015,365 @@ try {
     assert.equal(state, 0)
   })
 
+  // ── trimming ──────────────────────────────────────────────────
+
+  /*
+   * A trim is a gesture, so it is checked as one: the handle is pressed, the
+   * pointer travels, and the pointer comes up — through the same window
+   * listeners a hand drives. Calling the kernel directly would leave the whole
+   * question of whether an edge can be grabbed at all unchecked, which is where
+   * the feature actually lives.
+   */
+  const TRIM_HELPERS = `
+     const r3 = (n) => Math.round(n * 1000) / 1000;
+     window.__shape = () => window.__fluxDev.sequence.getSequence().clips
+       .slice().sort((a, b) => a.start - b.start || a.kind.localeCompare(b.kind))
+       .map(c => ({ track: c.trackId, kind: c.kind, start: r3(c.start), dur: r3(c.duration),
+                    off: r3(c.offset), src: r3(c.sourceDuration) }));
+
+     window.__grabTrim = (index, edge, opts = {}) => {
+       const el = [...document.querySelectorAll('.tl-lane .clip')][index];
+       if (!el) throw new Error('no clip at index ' + index);
+       const handle = el.querySelector('.clip-handle--' + edge);
+       if (!handle) throw new Error('no ' + edge + ' handle on clip ' + index);
+       const box = handle.getBoundingClientRect();
+       const x = box.left + box.width / 2, y = box.top + box.height / 2;
+       const mk = (type, px) => new PointerEvent(type, {
+         bubbles: true, cancelable: true, button: 0, pointerId: 8,
+         clientX: px, clientY: y, altKey: !!opts.altKey,
+       });
+       handle.dispatchEvent(mk('pointerdown', x));
+       return {
+         el,
+         move: async (dx) => {
+           window.dispatchEvent(mk('pointermove', x + dx));
+           await new Promise(r => setTimeout(r, 60));
+         },
+         up: async (dx) => {
+           window.dispatchEvent(mk('pointerup', x + dx));
+           await new Promise(r => setTimeout(r, 300));
+         },
+       };
+     };
+
+     window.__trimClip = async (index, edge, dx, opts = {}) => {
+       const grab = window.__grabTrim(index, edge, opts);
+       for (let i = 1; i <= 4; i++) await grab.move((dx * i) / 4);
+       await grab.up(dx);
+       return window.__shape();
+     };
+     return true;`
+  await evaluate(cdp, TRIM_HELPERS)
+
+  /** One clip on V1, its whole file, at 60px per second. */
+  const seedTrim = `
+    const { assets, sequence, view } = window.__fluxDev;
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 60 } });
+    const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    const probed = await assets.ensureProbed(a.id);
+    sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: probed.duration });
+    await new Promise(r => setTimeout(r, 400));
+  `
+
+  await check('dragging the tail in shortens the clip and leaves its head alone', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `const before = window.__shape();
+         // Alt off the snapping, so this measures the drag and nothing else.
+         const after = await window.__trimClip(0, 'end', -120, { altKey: true });
+         return { before: before[0], after: after[0] };`,
+    )
+    assert.equal(
+      state.after.dur,
+      Math.round((state.before.dur - 2) * 1000) / 1000,
+      'a 120px drag at 60px/s is two seconds off the tail',
+    )
+    assert.equal(state.after.start, state.before.start, 'the head must not move')
+    assert.equal(state.after.off, 0, 'nor may the in point')
+    assert.equal(state.after.src, state.before.src, 'the file is still as long as it was')
+  })
+
+  await check('dragging the head in takes the in point with it', async () => {
+    /*
+     * The difference between a trim and a slip, in three numbers. The frames
+     * still in the clip do not move on the timeline: start goes forward, the in
+     * point goes forward by the same amount, and the tail stays exactly where
+     * it was. Anything else is a different edit wearing a trim's handle.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `const before = window.__shape();
+         const after = await window.__trimClip(0, 'start', 120, { altKey: true });
+         return { before: before[0], after: after[0] };`,
+    )
+    assert.equal(state.after.start, state.before.start + 2, 'the head moved two seconds in')
+    assert.equal(state.after.off, state.before.off + 2, 'and it took the in point with it')
+    assert.equal(
+      Math.round((state.after.start + state.after.dur) * 1000) / 1000,
+      Math.round((state.before.start + state.before.dur) * 1000) / 1000,
+      'the tail must not move: the frames left in the clip stay where they were',
+    )
+  })
+
+  await check('an edge stops at the end of the file', async () => {
+    // An untrimmed clip is already playing every frame there is. Dragging its
+    // tail further does nothing, rather than inventing footage.
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `const before = window.__shape();
+         const after = await window.__trimClip(0, 'end', 600, { altKey: true });
+         return { before: before[0], after: after[0] };`,
+    )
+    assert.deepEqual(state.after, state.before)
+  })
+
+  await check('a trimmed edge can be pulled back out, and no further', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `const trimmed = await window.__trimClip(0, 'start', 120, { altKey: true });
+         const back = await window.__trimClip(0, 'start', -120, { altKey: true });
+         const further = await window.__trimClip(0, 'start', -120, { altKey: true });
+         return { trimmed: trimmed[0], back: back[0], further: further[0] };`,
+    )
+    assert.equal(state.trimmed.off, 2, 'setup: the head should be two seconds in')
+    assert.equal(state.back.off, 0, 'and it comes all the way back')
+    assert.equal(state.back.start, 0)
+    assert.deepEqual(state.further, state.back, 'there is nothing before the first frame')
+  })
+
+  await check('a clip cannot be trimmed away to nothing', async () => {
+    // One frame, not zero: a clip is a thing that plays, and a zero-length one
+    // is an invisible object that still has to be found to be deleted.
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `const after = await window.__trimClip(0, 'start', 4000, { altKey: true });
+         return { clip: after[0], fps: window.__fluxDev.sequence.getSequence().settings.frameRate };`,
+    )
+    assert.equal(state.clip.dur, Math.round((1 / state.fps) * 1000) / 1000, 'one frame is the floor')
+    assert.ok(state.clip.dur > 0)
+  })
+
+  await check('an edge stops at its neighbour', async () => {
+    /*
+     * Trimming is not moving: nothing slides out of the way and nothing is
+     * overwritten. The tail here has two seconds of file left and one second of
+     * room, and the room is what decides it.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `await window.__trimClip(0, 'end', -120, { altKey: true });
+         const b = assets.getAssets().find(x => x.name === 'shot_B.mp4');
+         const pb = await assets.ensureProbed(b.id);
+         sequence.addClip({ assetId: b.id, trackId: 'V1', start: 3, duration: pb.duration });
+         await new Promise(r => setTimeout(r, 300));
+         const after = await window.__trimClip(0, 'end', 300, { altKey: true });
+         return after[0];`,
+    )
+    assert.equal(state.dur, 3, 'the tail should stop where the next clip begins')
+    assert.equal(state.start, 0)
+  })
+
+  await check('trimming the picture trims the sound with it', async () => {
+    // The same rule as moving: a pair is one thing to the hand. Two halves
+    // trimmed by different amounts is a sync error that looks like an edit.
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const before = window.__shape();
+         const video = [...document.querySelectorAll('.tl-lane .clip')]
+           .findIndex(el => el.className.includes('clip--video'));
+         const after = await window.__trimClip(video, 'end', -120, { altKey: true });
+         return { before, after };`,
+    )
+    assert.equal(state.after.length, 2, 'setup: expected a pair')
+    for (const kind of ['video', 'audio']) {
+      const was = state.before.find((c) => c.kind === kind)
+      const now = state.after.find((c) => c.kind === kind)
+      assert.equal(
+        now.dur,
+        Math.round((was.dur - 2) * 1000) / 1000,
+        `the ${kind} half should have lost the same two seconds`,
+      )
+    }
+  })
+
+  await check('trimming one half of a pair trims both, whoever asks', async () => {
+    /*
+     * The panel expands a press through the link before it trims anything, so
+     * the gesture above would pass with or without the rule in the kernel —
+     * exactly as it does for moving. This is the rule itself, asked for by id:
+     * anything that trims a clip gets it, because it is a fact about the
+     * sequence rather than a courtesy of the panel that happens to be in front.
+     *
+     * Both directions, because a link is not directional. Trimming the sound
+     * has to take the picture with it as surely as the other way round.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const half = (kind) => sequence.getSequence().clips.find(c => c.kind === kind);
+         const before = window.__shape();
+         sequence.trimClips([half('video').id], 'end', -2);
+         const afterVideo = window.__shape();
+         sequence.trimClips([half('audio').id], 'start', 1);
+         return { before, afterVideo, afterAudio: window.__shape() };`,
+    )
+    const of = (shape, kind) => shape.find((c) => c.kind === kind)
+    for (const kind of ['video', 'audio']) {
+      assert.equal(
+        Math.round((of(state.afterVideo, kind).dur - of(state.before, kind).dur) * 1000) / 1000,
+        -2,
+        `asked through the picture, the ${kind} half should have lost two seconds`,
+      )
+      assert.equal(
+        Math.round((of(state.afterAudio, kind).off - of(state.afterVideo, kind).off) * 1000) / 1000,
+        1,
+        `asked through the sound, the ${kind} half's in point should have moved a second`,
+      )
+    }
+  })
+
+  await check('a pair is trimmed by what the tighter half allows', async () => {
+    /*
+     * The limits of a pair are intersected before anything moves, and this is
+     * the case that says so: the video track is clear, and the sound's track is
+     * not. Trimming to each half's own limit would put the picture two seconds
+     * past its own sound — a sync error produced by an edit that looked like it
+     * worked.
+     *
+     * Asked for by the picture's id alone, for the reason above: the limits
+     * have to be gathered through the link by whatever is doing the trimming.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const video = sequence.getSequence().clips.find(c => c.kind === 'video');
+         // Four seconds off the tail of both, so there is file left to pull out.
+         sequence.trimClips([video.id], 'end', -4);
+         const audio = sequence.getSequence().clips.find(c => c.kind === 'audio');
+         // ...and two seconds of room on the audio track, and only there.
+         sequence.addClip({ assetId: audio.assetId, trackId: 'A1',
+                            start: audio.start + audio.duration + 2, duration: 3 });
+         await new Promise(r => setTimeout(r, 300));
+         const before = window.__shape();
+         sequence.trimClips([video.id], 'end', 4);
+         await new Promise(r => setTimeout(r, 200));
+         return { before, after: window.__shape() };`,
+    )
+    const grew = (shape, kind) => shape.find((c) => c.kind === kind && c.start === 0)
+    for (const kind of ['video', 'audio']) {
+      const was = grew(state.before, kind)
+      const now = grew(state.after, kind)
+      assert.equal(
+        Math.round((now.dur - was.dur) * 1000) / 1000,
+        2,
+        `the ${kind} half should have gained the two seconds the sound had room for, ` +
+          `not the four the drag asked for`,
+      )
+    }
+  })
+
+  await check('a trim is not committed until the pointer comes up', async () => {
+    /*
+     * The block on screen follows the pointer while the clip in the sequence
+     * stays as it was, which is what makes an abandoned trim need no undoing.
+     * Both halves are checked here: a preview that does not move is a dead
+     * handle, and a sequence that moves early is an edit nobody committed.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTrim +
+        `const el = document.querySelector('.tl-lane .clip');
+         const widthBefore = el.getBoundingClientRect().width;
+         const grab = window.__grabTrim(0, 'end', { altKey: true });
+         await grab.move(-120);
+         const mid = {
+           width: grab.el.getBoundingClientRect().width,
+           dur: window.__shape()[0].dur,
+         };
+         await grab.up(-120);
+         return { widthBefore, mid, after: window.__shape()[0].dur };`,
+    )
+    assert.ok(
+      Math.abs(state.mid.width - (state.widthBefore - 120)) < 2,
+      `the block should be 120px narrower mid-drag, it is ${state.mid.width} against ${state.widthBefore}`,
+    )
+    assert.equal(
+      state.mid.dur,
+      Math.round((state.widthBefore / 60) * 1000) / 1000,
+      'the sequence must still hold the untrimmed clip',
+    )
+    assert.equal(
+      state.after,
+      Math.round(((state.widthBefore - 120) / 60) * 1000) / 1000,
+      'and the trim lands on release',
+    )
+  })
+
+  await check('the waveform is drawn from the new in point', async () => {
+    /*
+     * The fixture is loud for two seconds, then quiet for two, three times
+     * over. Trim two seconds off its head and the clip now begins in the quiet
+     * stretch — so the first column of the waveform has to change. A drawing
+     * that ignored the in point would look identical, and would be showing
+     * sound the clip no longer plays.
+     */
+    const state = await evaluate(
+      cdp,
+      withWaveform +
+        `const loudFirst = window.__waveColumn(0.5);
+         const audio = [...document.querySelectorAll('.tl-lane .clip')]
+           .findIndex(el => el.className.includes('clip--audio'));
+         await window.__trimClip(audio, 'start', 120, { altKey: true });
+         await new Promise(r => setTimeout(r, 400));
+         return {
+           loudFirst,
+           quietFirst: window.__waveColumn(0.5),
+           loudAgain: window.__waveColumn(2.5),
+           off: window.__shape().find(c => c.kind === 'audio').off,
+         };`,
+    )
+    assert.equal(state.off, 2, 'setup: the audio should be two seconds in')
+    assert.ok(state.loudFirst > 8, `setup: the untrimmed clip starts loud (${state.loudFirst}px)`)
+    assert.ok(
+      state.quietFirst < state.loudFirst / 2,
+      `the trimmed clip starts in the quiet stretch, but its first column is ${state.quietFirst}px ` +
+        `against ${state.loudFirst}px before the trim`,
+    )
+    assert.ok(
+      state.loudAgain > state.quietFirst * 2,
+      'and the loud stretch that follows it is still drawn loud',
+    )
+  })
+
+  await check('a clip saved before trimming existed plays its whole file', async () => {
+    // Nothing about such a clip was wrong, only older: it played the file from
+    // the top, so that is what it reads back as — and it can be trimmed from
+    // there like any other.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence({
+         id: 'vintage', name: 'Vintage', createdAt: 1000, settings: { frameRate: 25 },
+         tracks: [{ id: 'V1', kind: 'video', name: 'V1' }, { id: 'A1', kind: 'audio', name: 'A1' }],
+         clips: [{ id: 'old', assetId: 'a1', trackId: 'V1', start: 0, duration: 5, kind: 'video' }],
+       });
+       await new Promise(r => setTimeout(r, 250));
+       const clip = sequence.getSequence().clips[0];
+       return { off: clip.offset, src: clip.sourceDuration, dur: clip.duration };`,
+    )
+    assert.equal(state.off, 0, 'it started at the top of its file')
+    assert.equal(state.src, 5, 'and it was the whole of it')
+    assert.equal(state.dur, 5)
+  })
+
   await check('a linked pair survives a save and a reload', async () => {
     // The promise the project format makes: everything on the timeline comes
     // back. A pair that reloads as two unrelated clips would still look right
@@ -2094,6 +2453,52 @@ try {
        }
        return true;`,
     )
+  })
+
+  await check('a trimmed clip survives a save and a reload', async () => {
+    // Put back after the reloads above, which take every page-side helper with
+    // them.
+    await evaluate(cdp, TRIM_HELPERS)
+    const before = await evaluate(
+      cdp,
+      seedTrim +
+        `const { store, project } = window.__fluxDev;
+         await window.__trimClip(0, 'start', 60, { altKey: true });
+         await window.__trimClip(0, 'end', -60, { altKey: true });
+         const shape = window.__shape();
+         /*
+          * The setup is checked here rather than after the reload, and the
+          * difference is not tidiness. An assertion that fails between
+          * location.reload() and the re-open below leaves the app sitting at
+          * the launcher with no project, and every check after this one then
+          * fails for that reason instead of its own — including the top-level
+          * setup between them, which takes the whole run down with no summary.
+          * Found exactly that way, by a canary whose real failure was invisible
+          * behind it.
+          */
+         if (Math.abs(shape[0].off - 1) > 1e-6) {
+           throw new Error('setup: expected a clip trimmed at both ends, got ' + JSON.stringify(shape[0]));
+         }
+         const saved = await project.saveProject();
+         if (!saved.ok) throw new Error('save failed: ' + saved.error);
+         await store.flushStores();
+         location.reload();
+         return shape;`,
+    )
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       const r3 = (n) => Math.round(n * 1000) / 1000;
+       return seq.getSequence().clips.map(c => ({ track: c.trackId, kind: c.kind, start: r3(c.start),
+         dur: r3(c.duration), off: r3(c.offset), src: r3(c.sourceDuration) }));`,
+    )
+    assert.deepEqual(after, before, 'a trim that does not survive a save is not an edit')
   })
 
   // ── sequences, and the tabs ───────────────────────────────────
