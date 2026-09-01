@@ -171,7 +171,16 @@ function remember(key: string, token: string, track: VideoTrack) {
  */
 export async function forgetIndex(path: string, kind: TrackKind = 'video'): Promise<void> {
   const key = `${kind}:${path}`
-  // Anything already on its way to disk has to land before it can be deleted.
+  /*
+   * Both halves of what might already be under way, in order.
+   *
+   * A read in flight has not issued its write yet, so waiting only for writes
+   * deletes the entry and then watches the read put it straight back. That is
+   * not a test artifact: the Viewer opens a source the moment a clip appears,
+   * so "delete the media cache" pressed while a project is loading would leave
+   * behind exactly the entries the user was trying to be rid of.
+   */
+  await inflight.get(key)?.catch(() => {})
   await writing.get(key)?.catch(() => {})
   memory.delete(key)
   refused.delete(key)

@@ -80,6 +80,9 @@ export function peaksStats(): PeaksStats {
  * askable more than once, which a cache is otherwise very good at preventing.
  */
 export async function forgetPeaks(path: string): Promise<void> {
+  // The build first, then its write — see media/indexCache.ts. A waveform being
+  // built when the cache is emptied would otherwise store itself afterwards.
+  await inflight.get(path)?.catch(() => {})
   await writing.get(path)?.catch(() => {})
   memory.delete(path)
   refused.delete(path)
