@@ -47,11 +47,26 @@ import { sequenceDuration, subscribeSequence } from './sequence'
  */
 export type ClockSource = () => number | null
 
+/**
+ * Who can be the clock, in the order they are asked.
+ *
+ * The mixer first, because it is playing the sequence's own audio and every
+ * clip in it against one device. The Viewer's media element second, and only
+ * because a file the pipeline cannot read is played by the browser, sound and
+ * all — one source, its own device, nothing the mixer can reach.
+ *
+ * Both can be sounding at once (a webm on V1, a wav on A1) and they will drift,
+ * because they are two devices with no way to agree. Someone still has to be
+ * the clock; the mixer is the one that speaks for the sequence.
+ */
+const CLOCK_ORDER = ['mixer', 'element'] as const
+export type ClockName = (typeof CLOCK_ORDER)[number]
+
 let playing = false
 let time = 0
 let frame: number | null = null
 let lastTick = 0
-let source: ClockSource | null = null
+const sources = new Map<ClockName, ClockSource>()
 
 /**
  * A timer that keeps the clock honest when nothing is painting.
@@ -106,11 +121,23 @@ export function getSeekToken(): number {
 /**
  * Hands the clock to whatever is playing, or takes it back with null.
  *
- * One source at a time: there is one playhead, so there is one thing that can
- * be authoritative about where it is.
+ * Named rather than a single slot, because there are two things that can be
+ * playing and they must not clobber each other by registering in an order
+ * nobody controls. There is still only one clock at a time — see CLOCK_ORDER
+ * for which one, and why.
  */
-export function setClockSource(next: ClockSource | null): void {
-  source = next
+export function setClockSource(name: ClockName, next: ClockSource | null): void {
+  if (next) sources.set(name, next)
+  else sources.delete(name)
+}
+
+/** The first source that can say where it is, in priority order. */
+function reported(): number | null {
+  for (const name of CLOCK_ORDER) {
+    const value = sources.get(name)?.()
+    if (value !== null && value !== undefined) return value
+  }
+  return null
 }
 
 function stopLoop() {
@@ -124,7 +151,7 @@ function tick(now: number) {
   if (!playing) return
   lastFrame = performance.now()
 
-  const reported = source?.()
+  const said = reported()
   const elapsed = (now - lastTick) / 1000
   lastTick = now
 
@@ -132,7 +159,7 @@ function tick(now: number) {
   // The source's own position when it has one, and only otherwise the wall
   // clock. Reading rather than accumulating is what makes a throttled animation
   // frame cost smoothness instead of accuracy.
-  const next = reported ?? time + elapsed
+  const next = said ?? time + elapsed
 
   if (next >= end) {
     // Park exactly on the last frame rather than running past it into empty
@@ -216,7 +243,7 @@ export function resetPlayback(): void {
   stopLoop()
   time = 0
   seekToken += 1
-  source = null
+  sources.clear()
   emit()
 }
 

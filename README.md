@@ -54,6 +54,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 | **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
 | **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
+| **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
@@ -568,14 +569,55 @@ This is a *player*, not a renderer — it shows the source directly, because the
 yet to composite anything. When the engine lands, the Viewer becomes the surface it draws into and
 the clip lookup moves into the graph. What must not change is who owns the time.
 
-Sound is drawn on the timeline but not yet *mixed*: the Viewer plays the audio belonging to the
-clip it is showing, so an audio clip on its own under the playhead shows no picture and makes no
-noise. A sequence whose sound comes from several audio clips at once needs a mixer, which is the
-audio half of the same gap the compositor fills for picture.
+#### The mixer, and the clock moving into it
 
-Not yet: a mixer, audio scrubbing, loop, frame stepping, compositing more than one clip at a time,
-and a cut that does not re-open a source — the index is cached, but the *decoder* is still torn down
-and rebuilt when the playhead crosses one.
+Every audio clip under the playhead is decoded and played, summed on one `AudioContext`. See
+[`src/kernel/media/mixer.ts`](src/kernel/media/mixer.ts).
+
+A media element could not do this. It plays one file, starting when you ask and arriving when it
+feels like it; two of them told to start together do not, and nothing can be done about that from
+outside, because the scheduling happens where you cannot reach. `AudioContext.currentTime` is the
+audio device's own clock, and a buffer scheduled against it starts at that time to the sample. That
+is the only way several sources stay together.
+
+**So the clock moved here.** FLUX has always said audio is the master clock; up to now that meant an
+`<audio>` element in the Viewer, which worked because there was only ever one of them. With several
+clips playing there is no "the" element to ask, and the context's clock is a better answer than any
+of them — it is what the samples are actually being played against. The Viewer keeps the picture and
+makes no sound at all on the pipeline path.
+
+There are now two things that could be the clock, so
+[`playback.ts`](src/kernel/playback.ts) names them instead of holding one slot: the mixer first, and
+the Viewer's element only as the fallback for a file the pipeline cannot read, which the browser
+plays sound and all. Both can be sounding at once, and they will drift, because they are two devices
+with no way to agree — but something has to speak for the sequence, and the mixer does.
+
+[`src/kernel/media/audioSource.ts`](src/kernel/media/audioSource.ts) is the audio twin of
+`videoSource.ts`, and deliberately narrower: sound is only ever wanted in order and only ever wanted
+once, so it is a cursor rather than a buffer. Frames come out whole — an AAC frame is 1024 samples,
+and each is scheduled at its own timestamp rather than spliced to fit, which is sample-accurate
+without anyone doing arithmetic on sample offsets. An off-by-one in the seam between two frames is a
+click, forty-seven times a second.
+
+Scheduling runs on a timer about a second ahead of the playhead. Too short and a slow decode arrives
+after the moment it was meant for, which is a gap you can hear; too long and every seek throws away
+more than it needed to.
+
+**Checked by listening.** A tap on the master bus reports the level, and `verify:playback` reads it
+rather than computing what it ought to be — a mixer that scheduled nothing, or scheduled the wrong
+thing, cannot move a meter measuring what came out. `voice_over.mp4` is two seconds at 0.9 then two
+at 0.02, and a sine at amplitude A has RMS A/√2, so the loud passages must read **0.636** and the
+quiet ones **0.014**: numbers with one explanation. The same file on both audio tracks must read
+about **1.27**, because two identical signals sum — a mixer that played whichever clip it noticed
+last would read 0.636 and look perfectly healthy.
+
+Measured over 222 transport notifications, the sequence's time and the audio device's own are
+**exactly** the same number in more than 99% of them, the rest being readings where the audio clock
+ticked over while the rest of the app was still being told.
+
+Not yet: per-track gain, mute and solo, audio scrubbing, loop, frame stepping, compositing more than
+one clip at a time, and a cut that does not re-open a source — the index is cached, but the
+*decoder* is still torn down and rebuilt when the playhead crosses one.
 
 ---
 
@@ -620,6 +662,7 @@ src/
                 importPipeline · thumbnails · mediaProbe          (the seams)
     media/      the decode pipeline: demux index -> VideoDecoder -> frames
                 audio peaks -> the waveform on a clip
+                the mixer: every audio clip under the playhead, summed
                 and the cache that means a file is read once, not once per open
   launcher/     the project chooser, shown until a project is open
   panels/       the three built-in panels, registered via the SDK

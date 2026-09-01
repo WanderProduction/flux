@@ -431,34 +431,40 @@ try {
     assert.ok(lit.count > lit.of / 4, `only ${lit.count} of ${lit.of} sampled pixels had any light`)
   })
 
-  await check('playing a long clip does not re-seek the decoder', async () => {
-    // The element is the clock while it plays; nothing should be moving it.
-    // Correcting it every frame flushes the decoder every frame, which cost
-    // about 95% of the animation frames and put the playhead a second behind
-    // the picture.
+  await check('playing does not restart what is playing', async () => {
+    /*
+     * Whatever holds the clock, nothing should be moving it while it runs.
+     *
+     * This used to watch the media element for `seeking`, because the element
+     * was the clock. The mixer is now, and the same mistake there looks like
+     * re-anchoring: throwing away everything scheduled and starting the
+     * decoders again. Either version of it costs what the original cost —
+     * about 95% of the animation frames, and a playhead a second behind the
+     * picture.
+     */
     const state = await evaluate(
       cdp,
-      `const { playback, commands } = window.__fluxDev;
+      `const { playback, commands, mixer } = window.__fluxDev;
        playback.pause();
        playback.seek(20);
        await new Promise(r => setTimeout(r, 900));
 
-       // The element is the clock in both paths — under the pipeline it is the
-       // audio, under the fallback the video. Either way nothing should be
-       // moving it while it plays.
        const media = document.querySelector('audio, video');
        let seeks = 0;
        const count = () => seeks++;
-       media.addEventListener('seeking', count);
+       media?.addEventListener('seeking', count);
 
        await commands.run('playback.play');
+       const anchorsAtStart = mixer.mixerStats().anchors;
        await new Promise(r => setTimeout(r, 2500));
+       const anchors = mixer.mixerStats().anchors - anchorsAtStart;
        await commands.run('playback.pause');
-       media.removeEventListener('seeking', count);
-       return { seeks, reached: playback.getTime() };`,
+       media?.removeEventListener('seeking', count);
+       return { seeks, anchors, reached: playback.getTime() };`,
     )
     assert.ok(state.reached > 21, `the playhead only reached ${state.reached}s`)
-    assert.equal(state.seeks, 0, 'playing must not seek')
+    assert.equal(state.seeks, 0, 'nothing should be seeking a media element while it plays')
+    assert.equal(state.anchors, 0, 'the mix was re-anchored mid-playback')
   })
 
   await check('the playhead tracks the picture across a long run', async () => {
@@ -523,7 +529,9 @@ try {
     assert.equal(state.via, 'pipeline')
     assert.equal(state.canvas, true, 'the pipeline draws to a canvas')
     assert.equal(state.video, false, 'and no video element should be doing the drawing')
-    assert.equal(state.audio, true, 'sound and the clock still come from an element')
+    // Nor any element at all. The sound is the mixer's now, and a second copy
+    // of it here would play the same audio twice, a beat apart.
+    assert.equal(state.audio, false, 'the pipeline path should hold no media element')
     assert.equal(state.label, 'pipeline', 'and the toolbar should say which path is in use')
   })
 
@@ -987,6 +995,299 @@ try {
     assert.deepEqual(state.clips, ['audio:A1'], 'setup: expected one audio clip')
     assert.equal(state.via, 'none', `the viewer drew a picture via ${state.via}`)
     assert.equal(state.placeholder, true, 'and it should say there is nothing to show')
+  })
+
+  // ── the mixer, listened to ────────────────────────────────────
+
+  /*
+   * Everything below reads the level off a tap on the master bus rather than
+   * computing what it ought to be. That is the point: a mixer that scheduled
+   * nothing, scheduled silence, or scheduled the wrong moment cannot move a
+   * meter that is measuring what actually came out.
+   *
+   * voice_over.mp4 is two seconds at 0.9 then two at 0.02, three times. A sine
+   * at amplitude A has RMS A/√2, so the loud passages should read about 0.636
+   * and the quiet ones about 0.014 — numbers with only one explanation.
+   */
+  const LOUD_RMS = 0.9 / Math.SQRT2
+  const QUIET_RMS = 0.02 / Math.SQRT2
+
+  /** Puts voice_over on the timeline as a linked pair and returns its length. */
+  const WITH_SOUND = `
+    const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+    await importPipeline.importFiles([{ path: ${VOICE}, kind: 'video' }], 'link');
+    const voice = assets.getAssets().find(a => a.name === 'voice_over.mp4');
+    const probed = await assets.ensureProbed(voice.id);
+    sequence.clearSequence();
+    sequence.addLinkedClips(
+      { assetId: voice.id, trackId: 'V1', start: 0, duration: probed.duration }, true);
+    playback.seek(0);
+    await new Promise(r => setTimeout(r, 500));`
+
+  await check('the mixer can reach an audio device at all', async () => {
+    // Guarded rather than assumed: without one, every check below would fail
+    // for a reason that has nothing to do with the mixer.
+    const state = await evaluate(
+      cdp,
+      `const { mixer } = window.__fluxDev;
+       return { output: mixer.hasAudioOutput(), stats: mixer.mixerStats() };`,
+    )
+    assert.equal(state.output, true, 'no AudioContext — nothing below can be believed')
+    assert.ok(state.stats.sampleRate > 0, 'the context reports no sample rate')
+  })
+
+  await check('playing a clip makes the sound the waveform promised', async () => {
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `playback.play();
+         const readings = [];
+         for (let i = 0; i < 70; i++) {
+           await new Promise(r => setTimeout(r, 100));
+           readings.push([+playback.getTime().toFixed(2), +window.__fluxDev.mixer.mixerLevel().toFixed(4)]);
+         }
+         const stats = window.__fluxDev.mixer.mixerStats();
+         playback.pause();
+         return { readings, stats };`,
+    )
+
+    // The fixture's own schedule, with a little clear of each edge so a reading
+    // straddling a transition is not counted as either.
+    const inAny = (t, windows) => windows.some(([a, b]) => t >= a && t <= b)
+    const loud = state.readings
+      .filter(([t]) => inAny(t, [[0.3, 1.8], [4.3, 5.8]]))
+      .map(([, level]) => level)
+    const quiet = state.readings
+      .filter(([t]) => inAny(t, [[2.3, 3.8], [6.3, 6.9]]))
+      .map(([, level]) => level)
+
+    assert.ok(loud.length > 10, `only ${loud.length} readings in the loud passages`)
+    assert.ok(quiet.length > 10, `only ${quiet.length} readings in the quiet passages`)
+
+    const worstLoud = Math.min(...loud)
+    const worstQuiet = Math.max(...quiet)
+    assert.ok(
+      Math.abs(worstLoud - LOUD_RMS) < 0.06,
+      `a full-scale passage came out at ${worstLoud.toFixed(3)}, not ${LOUD_RMS.toFixed(3)}`,
+    )
+    assert.ok(
+      Math.abs(worstQuiet - QUIET_RMS) < 0.01,
+      `a near-silent passage came out at ${worstQuiet.toFixed(4)}, not ${QUIET_RMS.toFixed(4)}`,
+    )
+    assert.equal(state.stats.late, 0, `${state.stats.late} frames arrived after their moment`)
+    assert.ok(state.stats.scheduled > 200, `only ${state.stats.scheduled} buffers were scheduled`)
+  })
+
+  await check('two clips at once are heard together, not one of them', async () => {
+    /*
+     * The whole claim of the word "mixer".
+     *
+     * The same file on both audio tracks at the same moment: two identical
+     * signals sum to exactly twice the amplitude, so the meter should read
+     * about 1.27 where one clip reads 0.636. A mixer that plays whichever clip
+     * it noticed last would read 0.636 and look perfectly healthy.
+     */
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `const second = sequence.addClip(
+           { assetId: voice.id, trackId: 'A2', start: 0, duration: probed.duration });
+         if (!second) throw new Error('could not place a second audio clip');
+         await new Promise(r => setTimeout(r, 300));
+
+         playback.seek(0);
+         playback.play();
+         const readings = [];
+         for (let i = 0; i < 16; i++) {
+           await new Promise(r => setTimeout(r, 100));
+           readings.push([+playback.getTime().toFixed(2), +window.__fluxDev.mixer.mixerLevel().toFixed(4)]);
+         }
+         const stats = window.__fluxDev.mixer.mixerStats();
+         playback.pause();
+         return { readings, stats, clips: sequence.getSequence().clips.length };`,
+    )
+    assert.equal(state.clips, 3, 'setup: expected a linked pair plus a second audio clip')
+    assert.equal(state.stats.voices, 2, `the mixer had ${state.stats.voices} clip(s) in hand`)
+
+    const during = state.readings.filter(([t]) => t >= 0.3 && t <= 1.8).map(([, l]) => l)
+    assert.ok(during.length > 5, `only ${during.length} readings while both clips played`)
+    const quietest = Math.min(...during)
+    assert.ok(
+      quietest > LOUD_RMS * 1.6,
+      `two clips together read ${quietest.toFixed(3)}, barely more than one at ${LOUD_RMS.toFixed(3)}`,
+    )
+  })
+
+  await check('the transport reads its time from the mixer', async () => {
+    /*
+     * Not merely "the playhead moves" — the wall clock would do that too, and
+     * to within a few tens of milliseconds it would agree, because two clocks
+     * started together take a while to disagree.
+     *
+     * So the comparison is made *inside* the transport's own notification,
+     * where the playhead has just been set from whatever it reads. If that is
+     * the mixer, the two numbers are the same call moments apart and agree to
+     * the microsecond. Sampling from outside would instead measure how long ago
+     * the last animation frame was, which is not a fact about the clock.
+     */
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `const { mixer } = window.__fluxDev;
+         const gaps = [];
+         const stop = playback.subscribePlayback(() => {
+           const mixed = mixer.mixerTime();
+           if (mixed !== null) gaps.push(playback.getTime() - mixed);
+         });
+         playback.play();
+         await new Promise(r => setTimeout(r, 1800));
+         playback.pause();
+         stop();
+         return { gaps: gaps.map(g => +g.toFixed(6)), voices: mixer.mixerStats().voices };`,
+    )
+    assert.ok(state.gaps.length > 20, `only ${state.gaps.length} readings while playing`)
+
+    /*
+     * The median, not the worst.
+     *
+     * Measured over 222 notifications: the gap is *exactly* zero for more than
+     * 99% of them, with the occasional reading at -10ms where the audio clock
+     * ticked over while the rest of the app was being notified. Zero is the
+     * fact worth asserting — it is the same number read twice. A clock that was
+     * not the mixer's would sit around 80ms out, the lead playback is anchored
+     * with, and no amount of outlier would look like this.
+     */
+    const sorted = state.gaps.map(Math.abs).sort((a, b) => a - b)
+    const median = sorted[Math.floor(sorted.length / 2)]
+    assert.ok(
+      median < 0.001,
+      `the playhead usually sits ${median.toFixed(4)}s from the audio device, not on it`,
+    )
+  })
+
+  await check('seeking while playing moves the sound with the playhead', async () => {
+    // From a loud passage into a quiet one. If the old audio were left to play
+    // out, or the new position never scheduled, the meter would not follow.
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `playback.play();
+         await new Promise(r => setTimeout(r, 900));
+         const before = window.__fluxDev.mixer.mixerLevel();
+         playback.seek(2.6);
+         await new Promise(r => setTimeout(r, 700));
+         const after = window.__fluxDev.mixer.mixerLevel();
+         playback.seek(4.6);
+         await new Promise(r => setTimeout(r, 700));
+         const back = window.__fluxDev.mixer.mixerLevel();
+         playback.pause();
+         return { before, after, back };`,
+    )
+    assert.ok(state.before > LOUD_RMS * 0.8, `started at ${state.before.toFixed(3)}, not loud`)
+    assert.ok(state.after < 0.1, `seeking into the quiet passage still read ${state.after.toFixed(3)}`)
+    assert.ok(state.back > LOUD_RMS * 0.8, `seeking back to loud read ${state.back.toFixed(3)}`)
+  })
+
+  await check('pausing stops the sound', async () => {
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `playback.play();
+         await new Promise(r => setTimeout(r, 900));
+         const playing = window.__fluxDev.mixer.mixerLevel();
+         playback.pause();
+         await new Promise(r => setTimeout(r, 500));
+         const paused = window.__fluxDev.mixer.mixerLevel();
+         return { playing, paused, stats: window.__fluxDev.mixer.mixerStats() };`,
+    )
+    assert.ok(state.playing > LOUD_RMS * 0.8, `it was not playing to begin with (${state.playing})`)
+    assert.ok(state.paused < 0.01, `sound was still coming out after pause (${state.paused})`)
+    assert.equal(state.stats.running, false)
+    assert.equal(state.stats.voices, 0, 'paused, but still holding decoders open')
+  })
+
+  await check('a deep seek does not decode everything before it', async () => {
+    /*
+     * Two separate things keep a seek honest, and only one of them is about
+     * speed.
+     *
+     * Dropping frames from before the seek point is what makes the sound
+     * *right*; starting the decoder near the seek point is what makes it
+     * *quick*. Take the second away and the first still works — every frame
+     * from the start of the file is decoded and thrown away — so nothing about
+     * the audio would sound wrong, it would just take a minute to arrive.
+     * Which is why this measures the clock rather than the meter.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { media } = window.__fluxDev;
+       const opened = await media.audioSource.AudioSource.open(${LONG});
+       if (!opened.ok) return { error: opened.reason };
+       const source = opened.source;
+       try {
+         source.seek(50);
+         const started = performance.now();
+         const frame = await source.next();
+         const ms = performance.now() - started;
+         return {
+           ms, decoded: source.decoded, total: source.info.duration,
+           time: frame ? frame.time : null,
+           end: frame ? frame.time + frame.duration : null,
+         };
+       } finally {
+         source.close();
+       }`,
+    )
+    assert.equal(state.error, undefined, state.error)
+    assert.ok(state.time !== null, 'no frame came back from a seek to 50s')
+
+    // The frame handed back must be the one covering the moment asked for.
+    // Two frames earlier is a fortieth of a second of the wrong audio at the
+    // head of every seek — inaudible on its own, and exactly the sort of thing
+    // that is never found later.
+    assert.ok(
+      state.time <= 50 && state.end > 50,
+      `a seek to 50s produced the frame covering ${state.time}s to ${state.end}s`,
+    )
+
+    // A minute of AAC is around 2,800 frames and decodes in a couple of
+    // hundred milliseconds, so a stopwatch would not reliably tell "started
+    // near 50s" from "decoded the lot". Counting does.
+    assert.ok(
+      state.decoded < 12,
+      `${state.decoded} frames were decoded to produce the one at 50s`,
+    )
+  })
+
+  await check('a stretch with no sound still passes at the right speed', async () => {
+    // The mixer says nothing when no clip is under the playhead, and the wall
+    // clock covers. A gap that ran at the wrong speed — or not at all — would
+    // be a sequence that stalls wherever the sound stops.
+    const state = await evaluate(
+      cdp,
+      WITH_SOUND +
+        `// Nothing at all until 6s. Cleared rather than picked apart: removing
+         // half a linked pair removes the other half, which is the point of
+         // linking and would leave nothing behind either way.
+         sequence.clearSequence();
+         sequence.addClip({ assetId: voice.id, trackId: 'A1', start: 6, duration: 2 });
+         await new Promise(r => setTimeout(r, 300));
+
+         playback.seek(0);
+         playback.play();
+         const started = performance.now();
+         await new Promise(r => setTimeout(r, 2000));
+         const reached = playback.getTime();
+         const level = window.__fluxDev.mixer.mixerLevel();
+         playback.pause();
+         return { reached, elapsed: (performance.now() - started) / 1000, level,
+                  voices: window.__fluxDev.mixer.mixerStats().voices };`,
+    )
+    assert.ok(state.level < 0.01, `silence was not silent (${state.level})`)
+    assert.ok(
+      Math.abs(state.reached - state.elapsed) < 0.3,
+      `two seconds of silence moved the playhead ${state.reached.toFixed(2)}s in ${state.elapsed.toFixed(2)}s`,
+    )
   })
 
   await check('a container the demuxer will not read falls back to the element', async () => {

@@ -125,6 +125,8 @@ export function ViewerPanel() {
 
   const [source, setSource] = useState<VideoSource | null>(null)
   const [why, setWhy] = useState<string | null>(null)
+  /** True when the pipeline is drawing, which is also when the mixer has the sound. */
+  const decoding = Boolean(source)
 
   useEffect(() => {
     setSource(null)
@@ -221,18 +223,27 @@ export function ViewerPanel() {
 
   useEffect(syncMedia, [syncMedia])
 
+  /*
+   * The element is a clock only when it is the thing playing.
+   *
+   * On the pipeline path there is no element at all any more — the sound comes
+   * from the mixer, and so does the time. This registers for the fallback case
+   * only, where a file the demuxer will not read is being played by the
+   * browser, sound and all. See kernel/playback.ts for who wins when both can
+   * answer.
+   */
   useEffect(() => {
-    if (!clip || !playable || playable.kind !== 'video') {
-      setClockSource(null)
+    if (!clip || !playable || playable.kind !== 'video' || decoding) {
+      setClockSource('element', null)
       return
     }
-    setClockSource(() => {
+    setClockSource('element', () => {
       const media = mediaRef.current
       if (!media || media.paused || media.readyState < 2) return null
       return clip.start + media.currentTime
     })
-    return () => setClockSource(null)
-  }, [clip, playable])
+    return () => setClockSource('element', null)
+  }, [clip, playable, decoding])
 
   useEffect(() => {
     const media = mediaRef.current
@@ -307,7 +318,6 @@ export function ViewerPanel() {
 
   const progress = duration > 0 ? Math.min(1, time / duration) : 0
   const url = playable ? assetUrl(playable.path) : undefined
-  const decoding = Boolean(source)
 
   return (
     <PanelFrame
@@ -356,15 +366,10 @@ export function ViewerPanel() {
                     className="viewer-media"
                     style={{ display: decoding ? 'block' : 'none' }}
                   />
-                  {decoding ? (
-                    <audio
-                      key={`audio-${playable.id}`}
-                      ref={mediaRef as React.RefObject<HTMLAudioElement>}
-                      src={url}
-                      preload="auto"
-                      onLoadedMetadata={syncMedia}
-                    />
-                  ) : (
+                  {/* Nothing but the canvas on the pipeline path: the sound
+                      is the mixer's, and a second copy of it here would play
+                      the same audio twice, a beat apart. */}
+                  {decoding ? null : (
                     <video
                       key={`video-${playable.id}`}
                       ref={mediaRef as React.RefObject<HTMLVideoElement>}

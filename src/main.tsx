@@ -22,10 +22,20 @@ import * as importPipeline from './kernel/importPipeline'
 import * as videoSource from './kernel/media/videoSource'
 import * as indexCache from './kernel/media/indexCache'
 import * as peaks from './kernel/media/peaks'
+import * as mixer from './kernel/media/mixer'
+import * as audioSource from './kernel/media/audioSource'
 
 // Panels register before the first render so the dock's component map is
 // complete on mount. Plugins will hook in here later, ahead of this call.
 registerBuiltinPanels()
+
+/**
+ * The mixer listens to the transport for the whole life of the app.
+ *
+ * Not inside a panel: sound is not something the Viewer happens to do while it
+ * is open, and closing a panel must not stop the sequence playing.
+ */
+mixer.connectMixer()
 
 const container = document.getElementById('root')
 if (!container) throw new Error('#root missing from index.html')
@@ -59,6 +69,8 @@ if (import.meta.env.DEV) {
       videoSource,
       indexCache,
       peaks,
+      mixer,
+      media: { audioSource },
     },
   })
 }
