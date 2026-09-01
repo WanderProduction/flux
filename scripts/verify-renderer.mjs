@@ -210,6 +210,8 @@ try {
     assert.deepEqual(names, [
       'clipA.mp4',
       'corrupt.mp4',
+      'layer_blue.mp4',
+      'layer_red.mp4',
       'long_take.mp4',
       'photo.png',
       'render.webm',

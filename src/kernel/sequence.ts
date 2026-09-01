@@ -28,6 +28,15 @@ export interface Track {
   gain: number
   muted: boolean
   solo: boolean
+  /**
+   * Kept out of the picture. Video tracks only — an audio track has mute.
+   *
+   * Two controls rather than one shared "enabled", because they are not the
+   * same thought. Hiding a video track is about what you are looking at while
+   * you work; muting one is about what the sequence sounds like. Every NLE
+   * gives them separate buttons for that reason.
+   */
+  hidden: boolean
 }
 
 export interface Clip {
@@ -67,6 +76,16 @@ export function clampGain(db: number): number {
 export interface SequenceState {
   name: string
   frameRate: number
+  /**
+   * The frame everything is composited into.
+   *
+   * A sequence needs its own size the moment more than one clip can be on
+   * screen at once: two clips of different shapes have to be drawn *into*
+   * something, and picking whichever happens to be on top would make the output
+   * change size as the playhead crosses a cut.
+   */
+  width: number
+  height: number
   tracks: Track[]
   clips: Clip[]
 }
@@ -84,6 +103,10 @@ function defaultSequence(): SequenceState {
   return {
     name: 'Sequence 1',
     frameRate: 24,
+    // Replaced by the first clip dropped into an empty sequence, which is what
+    // makes this a default rather than a setting nobody was offered.
+    width: 1920,
+    height: 1080,
     tracks: [
       makeTrack('V2', 'video'),
       makeTrack('V1', 'video'),
@@ -95,7 +118,7 @@ function defaultSequence(): SequenceState {
 }
 
 function makeTrack(id: string, kind: TrackKind): Track {
-  return { id, kind, name: id, gain: 0, muted: false, solo: false }
+  return { id, kind, name: id, gain: 0, muted: false, solo: false, hidden: false }
 }
 
 let sequence: SequenceState = defaultSequence()
@@ -156,6 +179,7 @@ function normalise(next: SequenceState): SequenceState {
     gain: typeof track.gain === 'number' ? clampGain(track.gain) : 0,
     muted: Boolean(track.muted),
     solo: Boolean(track.solo),
+    hidden: Boolean(track.hidden),
   }))
 
   const kindOf = new Map(tracks.map((track) => [track.id, track.kind]))
@@ -163,7 +187,12 @@ function normalise(next: SequenceState): SequenceState {
     clip.kind ? clip : { ...clip, kind: kindOf.get(clip.trackId) ?? 'video' },
   )
 
-  return { ...next, tracks, clips }
+  // A sequence saved before it had a size gets the default rather than a zero,
+  // which would composite into a frame with no pixels in it.
+  const width = Number(next.width) > 0 ? Math.round(Number(next.width)) : 1920
+  const height = Number(next.height) > 0 ? Math.round(Number(next.height)) : 1080
+
+  return { ...next, width, height, tracks, clips }
 }
 
 let idCounter = 0
@@ -435,6 +464,41 @@ export function setTrackMuted(trackId: string, muted: boolean): boolean {
 
 export function setTrackSolo(trackId: string, solo: boolean): boolean {
   return updateTrack(trackId, (track) => ({ ...track, solo }))
+}
+
+export function setTrackHidden(trackId: string, hidden: boolean): boolean {
+  const existing = sequence.tracks.find((track) => track.id === trackId)
+  if (!existing || existing.hidden === hidden) return false
+  sequence = {
+    ...sequence,
+    tracks: sequence.tracks.map((track) =>
+      track.id === trackId ? { ...track, hidden } : track,
+    ),
+  }
+  emit()
+  return true
+}
+
+/** Whether a video track is drawn. The picture's answer to mute. */
+export function isTrackVisible(track: Track): boolean {
+  return !track.hidden
+}
+
+/**
+ * Sets the frame everything is composited into.
+ *
+ * Called when the first clip lands in an empty sequence, so the output matches
+ * the footage without anyone being asked a question they have no way to answer
+ * yet. Once there is an edit, the size stays: changing it under someone
+ * halfway through would reframe every shot at once.
+ */
+export function setSequenceSize(width: number, height: number): boolean {
+  if (!(width > 0) || !(height > 0)) return false
+  const next = { width: Math.round(width), height: Math.round(height) }
+  if (sequence.width === next.width && sequence.height === next.height) return false
+  sequence = { ...sequence, ...next }
+  emit()
+  return true
 }
 
 /**

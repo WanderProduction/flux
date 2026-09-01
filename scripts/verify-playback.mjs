@@ -1044,6 +1044,154 @@ try {
     assert.equal(state.placeholder, true, 'and it should say there is nothing to show')
   })
 
+  // ── layers, looked at ─────────────────────────────────────────
+
+  /*
+   * Two clips on top of each other, and the only way to tell whether both were
+   * drawn is to look at the pixels.
+   *
+   * layer_red.mp4 is flat red and landscape; layer_blue.mp4 is flat blue and
+   * portrait. Composited into the red clip's own frame, the blue one is
+   * letterboxed — so a correct composite is blue down the middle with red
+   * showing at each side, and there is no way to produce that by drawing one
+   * layer.
+   */
+  const RED = JSON.stringify(path.join(MEDIA_DIR, 'layer_red.mp4'))
+  const BLUE = JSON.stringify(path.join(MEDIA_DIR, 'layer_blue.mp4'))
+
+  /** Puts red on V1 and blue on V2, both from zero, and settles. */
+  const LAYERED = `
+    const { importPipeline, assets, sequence, playback, peaks } = window.__fluxDev;
+    await importPipeline.importFiles(
+      [{ path: ${RED}, kind: 'video' }, { path: ${BLUE}, kind: 'video' }], 'link');
+    sequence.setSequence(null);
+    await new Promise(r => setTimeout(r, 200));
+    const place = async (name, track) => {
+      const a = assets.getAssets().find(x => x.name === name);
+      const probed = await assets.ensureProbed(a.id);
+      if (sequence.getSequence().clips.length === 0) sequence.setSequenceSize(a.width, a.height);
+      const info = await peaks.audioInfoFor(a.path);
+      return sequence.addLinkedClips(
+        { assetId: a.id, trackId: track, start: 0, duration: probed.duration }, Boolean(info));
+    };
+    await place('layer_red.mp4', 'V1');
+    await place('layer_blue.mp4', 'V2');
+    playback.seek(2);
+
+    // Queried fresh every time: a captured reference to a canvas that has been
+    // replaced keeps showing whatever it last held, which is how a check that
+    // hides a track can watch nothing happen and believe it.
+    window.__pixels = () => {
+      const canvas = document.querySelector('canvas.viewer-media');
+      if (!canvas || !canvas.width) return null;
+      const c = document.createElement('canvas');
+      c.width = canvas.width; c.height = canvas.height;
+      const g = c.getContext('2d');
+      g.drawImage(canvas, 0, 0);
+      const px = (fx) => {
+        const d = g.getImageData(Math.round(canvas.width * fx), Math.round(canvas.height / 2), 1, 1).data;
+        return [d[0], d[1], d[2]];
+      };
+      return { size: [canvas.width, canvas.height], layers: Number(canvas.dataset.layers),
+               left: px(0.06), centre: px(0.5), right: px(0.94) };
+    };
+    window.__settleLayers = async (want) => {
+      for (let i = 0; i < 120; i++) {
+        const p = window.__pixels();
+        if (p && p.layers === want) return p;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return window.__pixels();
+    };
+    await window.__settleLayers(2);`
+
+  /** Roughly this colour, allowing for what a video codec does to a flat field. */
+  const near = ([r, g, b], [wr, wg, wb]) =>
+    Math.abs(r - wr) < 40 && Math.abs(g - wg) < 40 && Math.abs(b - wb) < 40
+
+  await check('two clips at once are both drawn, the upper one in front', async () => {
+    const state = await evaluate(cdp, LAYERED + `return window.__pixels();`)
+    assert.equal(state.layers, 2, `${state.layers} layer(s) were drawn`)
+    assert.ok(near(state.centre, [0, 0, 255]), `the middle is ${state.centre}, not the upper layer`)
+    assert.ok(near(state.left, [255, 0, 0]), `the left edge is ${state.left}, not the lower layer`)
+    assert.ok(near(state.right, [255, 0, 0]), `the right edge is ${state.right}`)
+  })
+
+  await check('the sequence takes its frame from the first clip', async () => {
+    const state = await evaluate(
+      cdp,
+      LAYERED +
+        `const seq = sequence.getSequence();
+         return { frame: [seq.width, seq.height], canvas: window.__pixels().size };`,
+    )
+    // The landscape clip went down first, so that is the shape everything is
+    // composited into — not the portrait one that landed on top of it.
+    assert.deepEqual(state.frame, [1280, 720])
+    assert.deepEqual(state.canvas, [1280, 720], 'the canvas is not the sequence frame')
+  })
+
+  await check('hiding a video track takes it out of the picture', async () => {
+    const state = await evaluate(
+      cdp,
+      LAYERED +
+        `sequence.setTrackHidden('V2', true);
+         const hidden = await window.__settleLayers(1);
+         sequence.setTrackHidden('V2', false);
+         const back = await window.__settleLayers(2);
+         return { hidden, back };`,
+    )
+    assert.equal(state.hidden.layers, 1, 'the hidden layer was still drawn')
+    assert.ok(
+      near(state.hidden.centre, [255, 0, 0]),
+      `with the top track hidden the middle is ${state.hidden.centre}, not the layer beneath`,
+    )
+    assert.equal(state.back.layers, 2, 'showing it again did not bring it back')
+    assert.ok(near(state.back.centre, [0, 0, 255]), `it came back as ${state.back.centre}`)
+  })
+
+  await check('hiding the lower track leaves the frame black behind the upper one', async () => {
+    // Not "leaves the old pixels there". A layer that has gone must actually
+    // leave, or the composite is whatever happened to be drawn last.
+    const state = await evaluate(
+      cdp,
+      LAYERED +
+        `sequence.setTrackHidden('V1', true);
+         const hidden = await window.__settleLayers(1);
+         sequence.setTrackHidden('V1', false);
+         return hidden;`,
+    )
+    assert.equal(state.layers, 1)
+    assert.ok(near(state.centre, [0, 0, 255]), `the upper layer should still be there, got ${state.centre}`)
+    assert.ok(near(state.left, [0, 0, 0]), `behind it should be black, got ${state.left}`)
+    assert.ok(near(state.right, [0, 0, 0]), `behind it should be black, got ${state.right}`)
+  })
+
+  await check('both layers keep playing together', async () => {
+    // Not merely both present at a standstill: both have to be advancing, and
+    // against the same clock.
+    const state = await evaluate(
+      cdp,
+      LAYERED +
+        `const { commands } = window.__fluxDev;
+         playback.seek(0.5);
+         await window.__settleLayers(2);
+         await commands.run('playback.play');
+         await new Promise(r => setTimeout(r, 1400));
+         const during = window.__pixels();
+         const shown = Number(document.querySelector('canvas.viewer-media').dataset.frameTime);
+         const at = playback.getTime();
+         await commands.run('playback.pause');
+         return { during, shown, at };`,
+    )
+    assert.equal(state.during.layers, 2, 'a layer dropped out while playing')
+    assert.ok(near(state.during.centre, [0, 0, 255]) && near(state.during.left, [255, 0, 0]))
+    assert.ok(state.at > 1.2, `the playhead only reached ${state.at}s`)
+    assert.ok(
+      Math.abs(state.shown - state.at) < 0.15,
+      `the picture was at ${state.shown}s with the playhead at ${state.at}s`,
+    )
+  })
+
   // ── the mixer, listened to ────────────────────────────────────
 
   /*

@@ -401,6 +401,16 @@ kbd {
   background: var(--flux-audio);
   border-color: var(--flux-audio);
 }
+/* The eye reads the other way round: lit is the normal state, and a hidden
+   track is the one that has been turned off. */
+.track-toggle--eye {
+  color: var(--flux-accent);
+  font-size: 10px;
+}
+.track-toggle--eye.track-toggle--off {
+  color: var(--flux-text-dim);
+  background: transparent;
+}
 /* Dragged, not typed: a fader is a gesture. */
 .track-gain {
   min-width: 32px;

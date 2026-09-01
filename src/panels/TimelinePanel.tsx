@@ -29,6 +29,8 @@ import {
   isTrackAudible,
   MAX_GAIN_DB,
   MIN_GAIN_DB,
+  setSequenceSize,
+  setTrackHidden,
   setTrackGain,
   setTrackMuted,
   setTrackSolo,
@@ -536,6 +538,20 @@ export function TimelinePanel() {
         const hasAudio = Boolean(await audioInfoFor(asset.path))
 
         /*
+         * The first clip into an empty sequence decides the frame everything is
+         * composited into.
+         *
+         * Premiere asks; FLUX takes the answer from the footage, because the
+         * question can only be answered by looking at the footage and the user
+         * has not been shown any sequence settings to answer it with. Once
+         * there is an edit the size stays put — changing it under someone
+         * halfway through would reframe every shot at once.
+         */
+        if (getSequence().clips.length === 0 && asset.width && asset.height) {
+          setSequenceSize(asset.width, asset.height)
+        }
+
+        /*
          * Dropped on an audio track, a file arrives as its sound alone — which
          * is what an audio track is for, and what Premiere does. A file with no
          * sound is refused rather than laid down as a silent block: an audio
@@ -680,8 +696,10 @@ export function TimelinePanel() {
                 style={{ height: TRACK_HEIGHT }}
               >
                 <span className="track-name">{track.name}</span>
-                {track.kind === 'audio' && (
+                {track.kind === 'audio' ? (
                   <TrackControls track={track} silent={!isTrackAudible(track, sequence.tracks)} />
+                ) : (
+                  <VideoTrackControls track={track} />
                 )}
               </div>
             ))}
@@ -765,6 +783,29 @@ export function TimelinePanel() {
         )}
       </div>
     </PanelFrame>
+  )
+}
+
+/**
+ * Whether a video track is drawn.
+ *
+ * One button, where an audio track has three. Video has no level to ride and
+ * nothing to solo against — a layer is either in the picture or it is not, and
+ * the eye says which.
+ */
+function VideoTrackControls({ track }: { track: Track }) {
+  return (
+    <span className={`track-controls${track.hidden ? ' track-controls--silent' : ''}`}>
+      <button
+        className={`track-toggle track-toggle--eye${track.hidden ? ' track-toggle--off' : ''}`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => setTrackHidden(track.id, !track.hidden)}
+        title={`${track.hidden ? 'Show' : 'Hide'} ${track.name}`}
+        aria-pressed={!track.hidden}
+      >
+        {track.hidden ? '⦸' : '◉'}
+      </button>
+    </span>
   )
 }
 

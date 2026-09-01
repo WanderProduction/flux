@@ -248,7 +248,17 @@ export async function requireFixtures(cdp, mediaDir) {
   // is required because its audio gets loud and quiet on a schedule, and a
   // waveform drawn from audio that never changes proves nothing about whether
   // it follows the audio at all.
-  for (const required of ['clipA.mp4', 'still.jpg', 'long_take.mp4', 'voice_over.mp4']) {
+  // layer_red and layer_blue are a landscape clip and a portrait one, in flat
+  // colours: the only way to see whether a composite drew both layers is for
+  // the layers to be told apart at a glance.
+  for (const required of [
+    'clipA.mp4',
+    'still.jpg',
+    'long_take.mp4',
+    'voice_over.mp4',
+    'layer_red.mp4',
+    'layer_blue.mp4',
+  ]) {
     if (!names.includes(required)) {
       throw new Error(`fixture ${required} missing from ${mediaDir}`)
     }

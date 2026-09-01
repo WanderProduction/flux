@@ -1543,6 +1543,92 @@ try {
     )
   })
 
+  await check('a video track has an eye, and it toggles', async () => {
+    // One button where an audio track has three: video has no level to ride and
+    // nothing to solo against. A layer is in the picture or it is not.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const header = [...document.querySelectorAll('.tl-header')]
+         .find(h => h.querySelector('.track-name').textContent === 'V2');
+       const eye = header.querySelector('.track-toggle--eye');
+       if (!eye) throw new Error('no eye on a video track');
+       const audioControls = [...document.querySelectorAll('.tl-header--audio')][0]
+         .querySelectorAll('.track-toggle').length;
+
+       eye.click();
+       await new Promise(r => setTimeout(r, 150));
+       const off = sequence.getSequence().tracks.find(t => t.id === 'V2');
+       eye.click();
+       await new Promise(r => setTimeout(r, 150));
+       const on = sequence.getSequence().tracks.find(t => t.id === 'V2');
+       return { hiddenAfterFirst: off.hidden, hiddenAfterSecond: on.hidden,
+                videoButtons: header.querySelectorAll('.track-toggle').length,
+                audioButtons: audioControls };`,
+    )
+    assert.equal(state.hiddenAfterFirst, true, 'clicking the eye should hide the track')
+    assert.equal(state.hiddenAfterSecond, false, 'and clicking it again should show it')
+    assert.equal(state.videoButtons, 1, 'a video track has one control')
+    assert.equal(state.audioButtons, 2, 'an audio track has mute and solo')
+  })
+
+  await check('a track saved before it could be hidden opens visible', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence({
+         name: 'Old', frameRate: 24,
+         tracks: [{ id: 'V1', kind: 'video', name: 'V1' }],
+         clips: [],
+       });
+       await new Promise(r => setTimeout(r, 250));
+       const s = sequence.getSequence();
+       return { hidden: s.tracks.map(t => t.hidden), frame: [s.width, s.height] };`,
+    )
+    assert.ok(
+      state.hidden.every((h) => h === false),
+      'an older project must not open with its tracks switched off',
+    )
+    // And a sequence saved before it had a size gets a real one rather than a
+    // frame with no pixels in it.
+    assert.deepEqual(state.frame, [1920, 1080])
+  })
+
+  await check('the sequence frame survives a save and a reload', async () => {
+    const before = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 200));
+       sequence.setSequenceSize(1280, 720);
+       sequence.setTrackHidden('V2', true);
+       await new Promise(r => setTimeout(r, 200));
+       const s = sequence.getSequence();
+       return { frame: [s.width, s.height], hidden: s.tracks.map(t => [t.id, t.hidden]) };`,
+    )
+    assert.deepEqual(before.frame, [1280, 720])
+
+    const after = await evaluate(
+      cdp,
+      `const { sequence, store, project } = window.__fluxDev;
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+       const doc = await window.flux.project.open(project.getProject().root);
+       const s = doc.project.sequence;
+       // Read back out of the document on disk, not out of memory.
+       return { frame: [s.width, s.height], hidden: s.tracks.map(t => [t.id, t.hidden]) };`,
+    )
+    assert.deepEqual(after, before, 'the frame and the hidden tracks did not reach the file')
+
+    await evaluate(
+      cdp,
+      `window.__fluxDev.sequence.setTrackHidden('V2', false); return true;`,
+    )
+  })
+
   await check('a level cannot be pushed past the ends of the fader', async () => {
     const state = await evaluate(
       cdp,

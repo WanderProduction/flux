@@ -21,6 +21,7 @@ import {
 } from '../kernel/playback'
 import {
   getSequence,
+  isTrackVisible,
   sequenceDuration,
   subscribeSequence,
   type Clip,
@@ -33,11 +34,25 @@ import { PanelFrame } from './PanelFrame'
  *
  * ## Two ways to put a picture on screen
  *
- * **The pipeline.** An mp4 whose index we can read is demuxed, decoded through
- * WebCodecs and drawn to a canvas: see kernel/media/videoSource.ts. We hold the
- * frames, so we know exactly which one is on screen, and the canvas is the
- * surface a compositor will eventually draw into. Sound comes from an `<audio>`
- * element alongside, which is also the clock — see below.
+ * **The pipeline.** Every mp4 whose index we can read is demuxed, decoded
+ * through WebCodecs and drawn to a canvas: see kernel/media/videoSource.ts. We
+ * hold the frames, so we know exactly which one is on screen, and the canvas is
+ * the surface they are composited into. Sound comes from the mixer — see
+ * kernel/media/mixer.ts.
+ *
+ * ## Layers
+ *
+ * Every visible video track with a clip at the playhead is drawn, bottom track
+ * first, into the sequence's own frame. That the output has a size of its own
+ * is the thing that makes this a composite rather than a picture: two clips of
+ * different shapes have to be drawn *into* something, and taking the size from
+ * whichever happens to be on top would make the output change shape as the
+ * playhead crossed a cut.
+ *
+ * Each frame is scaled to fit that output, centred, keeping its aspect — so a
+ * portrait clip over a landscape one shows the layer beneath it down each side.
+ * There is no per-clip transform yet: no position, no scale, no opacity, and no
+ * blending. A layer covers what is under it wherever it has pixels.
  *
  * **The element.** Anything else — webm, a container the demuxer will not
  * guess at, a build without WebCodecs — falls back to a plain `<video>`, which
@@ -67,29 +82,44 @@ import { PanelFrame } from './PanelFrame'
 const SYNC_TOLERANCE = 0.01 + 1 / 96
 
 /**
- * The clip visible at `time`, or null.
+ * Every clip to be drawn at `time`, bottom layer first.
  *
- * Topmost *video* track wins: tracks are stored in the order they are drawn, V2
- * above V1, so the first match down the list is the one covering the others.
- *
- * Audio tracks are skipped, and not merely because a waveform is not a picture.
- * The sound this panel plays comes from the same file as the clip it is
- * showing, so treating an audio clip as the thing to show would put the Viewer
- * on the audio half of a linked pair — the same file, the same moment, and a
- * decode of a video track that nothing asked for. What is missing is a mixer:
- * a sequence whose sound comes from several audio clips at once is a thing FLUX
- * cannot yet play, and pretending otherwise here would hide that.
+ * Tracks are stored in the order they stack, V2 above V1, so this walks them
+ * backwards — the last one drawn is the one in front. Hidden tracks are left
+ * out, and audio tracks never had a picture to contribute.
  */
-export function clipAt(sequence: SequenceState, time: number): Clip | null {
-  for (const track of sequence.tracks) {
-    if (track.kind !== 'video') continue
+export function layersAt(sequence: SequenceState, time: number): Clip[] {
+  const layers: Clip[] = []
+  for (const track of [...sequence.tracks].reverse()) {
+    if (track.kind !== 'video' || !isTrackVisible(track)) continue
     const found = sequence.clips.find(
       (clip) =>
         clip.trackId === track.id && time >= clip.start && time < clip.start + clip.duration,
     )
-    if (found) return found
+    if (found) layers.push(found)
   }
-  return null
+  return layers
+}
+
+/**
+ * The clip in front at `time`, or null.
+ *
+ * What the toolbar names, and what the fallback element plays when the pipeline
+ * cannot read one of the layers. Audio tracks are skipped, and not merely
+ * because a waveform is not a picture: the audio half of a linked pair is the
+ * same file at the same moment, so showing it would mean decoding a video track
+ * nothing asked for.
+ */
+export function clipAt(sequence: SequenceState, time: number): Clip | null {
+  return layersAt(sequence, time).at(-1) ?? null
+}
+
+/** A frame scaled to fit `width` by `height`, centred, keeping its shape. */
+function fitted(frame: { displayWidth: number; displayHeight: number }, width: number, height: number) {
+  const scale = Math.min(width / frame.displayWidth, height / frame.displayHeight)
+  const w = frame.displayWidth * scale
+  const h = frame.displayHeight * scale
+  return { x: (width - w) / 2, y: (height - h) / 2, w, h }
 }
 
 export function ViewerPanel() {
@@ -118,16 +148,31 @@ export function ViewerPanel() {
   )
 
   const duration = sequenceDuration()
-  const clip = useMemo(() => clipAt(sequence, time), [sequence, time])
-  const asset = clip ? assets.find((a) => a.id === clip.assetId) : undefined
+  const layers = useMemo(() => layersAt(sequence, time), [sequence, time])
+  /** Identity of the stack, so effects fire when it changes and not every tick. */
+  const stack = layers.map((layer) => layer.id).join('|')
+  const clip = layers.at(-1) ?? null
+  const assetById = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets])
+  const asset = clip ? assetById.get(clip.assetId) : undefined
   const playable = asset && !asset.missing && !asset.unreadable ? asset : undefined
 
   // ── the pipeline, when the file allows it ─────────────────────
 
-  const [source, setSource] = useState<VideoSource | null>(null)
+  /**
+   * One source per layer, kept across changes to the stack.
+   *
+   * Reopening every layer when any one of them changes would tear down and
+   * restart decoders that had not moved — and restarting a decoder means
+   * finding a keyframe and running up to the playhead again, which is the one
+   * genuinely expensive thing in the pipeline. So the map is reconciled: open
+   * what is new, close what has gone, leave the rest alone.
+   */
+  const sourcesRef = useRef(new Map<string, VideoSource>())
+  const [ready, setReady] = useState(0)
   const [why, setWhy] = useState<string | null>(null)
-  /** True when the pipeline is drawing, which is also when the mixer has the sound. */
-  const decoding = Boolean(source)
+
+  /** True when every layer can be drawn by the pipeline. */
+  const decoding = layers.length > 0 && layers.every((layer) => sourcesRef.current.has(layer.id))
 
   /*
    * What sound this clip's file has, if any.
@@ -156,65 +201,112 @@ export function ViewerPanel() {
   }, [playable?.id, playable?.path])
 
   useEffect(() => {
-    setSource(null)
-    setWhy(null)
-    if (!playable || playable.kind !== 'video') return
-
     let live = true
-    let opened: VideoSource | null = null
-    void VideoSource.open(playable.path).then((result) => {
-      if (!live) {
-        if (result.ok) result.source.close()
-        return
+    const held = sourcesRef.current
+    const wanted = new Set(layers.map((layer) => layer.id))
+
+    for (const [id, source] of held) {
+      if (!wanted.has(id)) {
+        source.close()
+        held.delete(id)
       }
-      if (result.ok) {
-        opened = result.source
-        setSource(result.source)
-      } else {
-        // Not an error to report at the user — the element path will show the
-        // file. Kept for the toolbar, which says which path is in use.
-        setWhy(result.reason)
-      }
+    }
+
+    void Promise.all(
+      layers.map(async (layer) => {
+        if (held.has(layer.id)) return
+        const file = assetById.get(layer.assetId)
+        if (!file || file.missing || file.unreadable || file.kind !== 'video') return
+        const result = await VideoSource.open(file.path)
+        if (!live || !result.ok) {
+          if (result.ok) result.source.close()
+          // Not an error to put in front of the user — the element path will
+          // show the file. Kept for the toolbar, which says which path is in
+          // use and why.
+          if (!result.ok) setWhy(result.reason)
+          return
+        }
+        held.set(layer.id, result.source)
+      }),
+    ).then(() => {
+      if (live) setReady((n) => n + 1)
     })
 
     return () => {
       live = false
-      opened?.close()
     }
-  }, [playable?.id, playable?.path])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stack, assetById])
+
+  // Everything goes when the panel does; the reconcile above only closes what
+  // has left the stack.
+  useEffect(() => {
+    const held = sourcesRef.current
+    return () => {
+      for (const source of held.values()) source.close()
+      held.clear()
+    }
+  }, [])
 
   /**
-   * Draws whichever frame belongs at the playhead.
+   * Draws the stack, bottom layer first.
    *
    * Reads the clock itself rather than taking `time` as a dependency, and skips
    * a draw while one is in flight. A decode that has not finished must not
    * queue another behind it — at sixty notifications a second that is how a
    * scrub turns into a backlog of stale frames arriving in the wrong order.
+   *
+   * Every layer is asked for its frame before anything is drawn. Drawing each
+   * one as it arrives would show the composite half-built, and a layer that
+   * decoded slowly would flicker in and out from one notification to the next.
    */
   useEffect(() => {
-    if (!source || !clip) return
     const canvas = canvasRef.current
-    if (!canvas) return
+    if (!canvas || layers.length === 0) return
 
     let stopped = false
     let drawing = false
+    const { width, height } = sequence
 
     const draw = async () => {
       if (stopped || drawing) return
       drawing = true
       try {
-        const at = getTime() - clip.start
-        const frame = await source.frameFor(at)
-        if (stopped || !frame) return
+        const now = getTime()
+        const frames = await Promise.all(
+          layers.map((layer) => {
+            const source = sourcesRef.current.get(layer.id)
+            return source ? source.frameFor(now - layer.start) : Promise.resolve(null)
+          }),
+        )
+        if (stopped) return
+
         const context = canvas.getContext('2d')
         if (!context) return
-        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-          canvas.width = frame.displayWidth
-          canvas.height = frame.displayHeight
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width
+          canvas.height = height
         }
-        context.drawImage(frame, 0, 0, canvas.width, canvas.height)
-        // What is *actually* on screen, for anything that needs to check.
-        canvas.dataset.frameTime = ((frame.timestamp ?? 0) / 1e6).toFixed(3)
+        // Cleared, not painted over: a layer that has gone must leave, and the
+        // frame behind the bottom one is the sequence's own black.
+        context.clearRect(0, 0, width, height)
+        context.fillStyle = '#000'
+        context.fillRect(0, 0, width, height)
+
+        let drawn = 0
+        let front: VideoFrame | null = null
+        for (const frame of frames) {
+          if (!frame) continue
+          const box = fitted(frame, width, height)
+          context.drawImage(frame, box.x, box.y, box.w, box.h)
+          drawn += 1
+          front = frame
+        }
+
+        // What is *actually* on screen, for anything that needs to check. The
+        // front layer's moment, since that is the one being looked at.
+        if (front) canvas.dataset.frameTime = ((front.timestamp ?? 0) / 1e6).toFixed(3)
+        canvas.dataset.layers = String(drawn)
       } finally {
         drawing = false
       }
@@ -226,7 +318,9 @@ export function ViewerPanel() {
       stopped = true
       unsubscribe()
     }
-  }, [source, clip])
+    // `ready` is here so the first draw happens once the sources are open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stack, ready, sequence.width, sequence.height])
 
   // ── the media element: sound, and the clock ───────────────────
 
@@ -292,7 +386,7 @@ export function ViewerPanel() {
     } else {
       media.pause()
     }
-  }, [playing, playable?.id, source, syncMedia])
+  }, [playing, playable?.id, decoding, syncMedia])
 
   // ── commands ──────────────────────────────────────────────────
 
@@ -403,10 +497,15 @@ export function ViewerPanel() {
                 <img className="viewer-media" src={url} alt={playable.name} />
               ) : (
                 <>
-                  {/* The pipeline draws here; the element below is then only
-                      sound and a clock, and is never seen. */}
+                  {/* The stack is composited here.
+
+                      Deliberately not keyed on the clip in front. The canvas
+                      is the *sequence's* frame now, not one clip's picture, so
+                      remounting it whenever the front layer changed would
+                      throw away the surface every layer draws into — and hand
+                      whatever was holding it a detached node still showing the
+                      last composite. */}
                   <canvas
-                    key={`canvas-${playable.id}`}
                     ref={canvasRef}
                     className="viewer-media"
                     style={{ display: decoding ? 'block' : 'none' }}

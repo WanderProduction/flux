@@ -56,6 +56,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 | **Level, mute, solo** | Per track, in decibels, saved with the project. |
+| **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
@@ -481,9 +482,34 @@ Three things about it were only obvious after being wrong:
 - **A `flush()` demands a keyframe afterwards.** Calling it at the end of every batch makes the next
   batch — which starts on a delta frame — fail outright.
 
-What the pipeline buys, beyond a picture: we hold the frames, so we know exactly which one is on
-screen, and a canvas is a surface a compositor can draw into. What it does not buy yet is any
-compositing — one clip is still one source, and a cut is still a source change.
+#### Layers
+
+Every visible video track with a clip at the playhead is drawn, bottom track first, into the
+sequence's own frame. Two clips stacked on V1 and V2 both play, and their sound stacks the same way
+onto A1 and A2 — where each has a level, a mute and a solo, and each video track has an eye.
+
+**The sequence has a size of its own**, and that is the thing that makes this a composite rather
+than a picture. Two clips of different shapes have to be drawn *into* something, and taking the size
+from whichever happens to be on top would make the output change shape as the playhead crossed a
+cut. The first clip dropped into an empty sequence decides it: Premiere asks, and FLUX takes the
+answer from the footage, because the question can only be answered by looking at the footage and
+nobody has been shown any sequence settings to answer it with. After that it stays — changing it
+under someone halfway through would reframe every shot at once.
+
+Each frame is scaled to fit that output, centred, keeping its aspect. So a portrait clip over a
+landscape one shows the layer beneath it down each side, which is also how the checks can tell that
+both layers were drawn: `layer_red.mp4` is flat red and landscape, `layer_blue.mp4` is flat blue and
+portrait, and a correct composite is blue down the middle with red at the edges. There is no way to
+produce that by drawing one layer.
+
+Sources are kept across changes to the stack rather than reopened. Reopening a layer that had not
+moved would restart its decoder, and restarting a decoder means finding a keyframe and running up to
+the playhead again — the one genuinely expensive thing in the pipeline.
+
+Not yet, and each is a real absence rather than an oversight: **no per-clip transform** (no position,
+scale, rotation or opacity), **no blend modes**, and **no effects**. A layer covers what is under it
+wherever it has pixels. Compositing several sources is the machinery those need; they are the next
+thing it makes possible, not something it already does.
 
 #### Indexing once
 
@@ -556,9 +582,11 @@ actually asking for.
 5. **Proxies** — low-resolution stand-ins swapped in for editing and swapped back out for export.
 6. **Quality throttling** — 1/2 and 1/4 playback resolution, and a lower quality while scrubbing.
 
-FLUX now has 1 and 3: a sample-table index, built on first sight of a file and kept on disk after
-that, frames decoded into a buffer we own, and audio as the master clock. It has **none of 2, 4, 5
-or 6** — no compositing, no effects, no preview render files, no proxies.
+FLUX now has 1, 2 and 3: a sample-table index, built on first sight of a file and kept on disk
+after that; frames decoded into a buffer we own and composited into the sequence's frame; and audio
+as the master clock, with every audio clip under the playhead summed on one AudioContext. It has
+**none of 4, 5 or 6** — no preview render files, no proxies, no quality throttling — and item 2 is
+present only as layering: there are no effects and no per-clip transform to render.
 
 One difference from Premiere worth naming: Premiere indexes on *import*, which is what its
 conforming progress bar is doing. FLUX indexes on first sight of a file and keeps the result, which
@@ -666,9 +694,8 @@ discontinuity is a click.
 > exotic case: it is unmute-then-mute, and it is every fader drag. The mixer remembers what each
 > fader was last *told* to be, which is a different number from what it currently is.
 
-Not yet: audio scrubbing, loop, frame stepping, compositing more than one clip at a time, and a cut
-that does not re-open a source — the index is cached, but the *decoder* is still torn down and
-rebuilt when the playhead crosses one.
+Not yet: audio scrubbing, loop, frame stepping, and a cut that does not re-open a source — the index
+is cached, but the *decoder* is still torn down and rebuilt when the playhead crosses one.
 
 ---
 
@@ -714,6 +741,7 @@ src/
     media/      the decode pipeline: demux index -> VideoDecoder -> frames
                 audio peaks -> the waveform on a clip
                 the mixer: every audio clip under the playhead, summed
+                (the compositor lives in the Viewer, which owns the canvas)
                 and the cache that means a file is read once, not once per open
   launcher/     the project chooser, shown until a project is open
   panels/       the three built-in panels, registered via the SDK
@@ -826,6 +854,18 @@ can tell you about playback it can also tell you while a completely broken serve
 
 ```bash
 ffmpeg -y -f lavfi -i "testsrc2=size=640x360:rate=25:duration=60" -f lavfi -i "sine=frequency=440:duration=60" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 700k -g 50 -c:a aac -b:a 64k -shortest ~/flux-media-test/long_take.mp4
+```
+
+Two fixtures are flat colours in different shapes. `layer_red.mp4` is red and landscape,
+`layer_blue.mp4` is blue and portrait — composited, the blue one is letterboxed over the red, and
+that is the only way to see from the pixels that both layers were drawn:
+
+```bash
+ffmpeg -y -f lavfi -i "color=c=red:size=1280x720:rate=25:duration=6" -f lavfi -i "sine=frequency=300:duration=6" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k -g 25 -c:a aac -b:a 96k -shortest ~/flux-media-test/layer_red.mp4
+```
+
+```bash
+ffmpeg -y -f lavfi -i "color=c=blue:size=480x640:rate=25:duration=6" -f lavfi -i "sine=frequency=900:duration=6" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k -g 25 -c:a aac -b:a 96k -shortest ~/flux-media-test/layer_blue.mp4
 ```
 
 One fixture is loud and quiet on a schedule. `voice_over.mp4` alternates two seconds at 0.9 with two
