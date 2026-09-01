@@ -11,12 +11,19 @@ import {
   isProjectFile,
   makeDocument,
 } from '../shared/projectFormat.js'
+import {
+  SEQUENCE_EXTENSION,
+  SEQUENCES_DIR,
+  isSequenceFile,
+  sequenceProblem,
+} from '../shared/sequenceFormat.js'
 
 /**
  * Project creation, and reading and writing the project document.
  *
  *   <root>/
  *     project_files/<Project Name>.flux   the document — this IS the project
+ *     sequences/<Sequence Name>.fluxseq   one file per sequence
  *     imports/                            media copied into the project
  *     exports/                            renders — nothing writes here yet
  *
@@ -24,7 +31,7 @@ import {
  * exercise it against a real temp directory.
  */
 
-export const PROJECT_DIRS = ['project_files', 'imports', 'exports']
+export const PROJECT_DIRS = ['project_files', SEQUENCES_DIR, 'imports', 'exports']
 export const PROJECT_FILES_DIR = DOCUMENT_DIR
 export const IMPORTS_DIR = 'imports'
 
@@ -37,6 +44,10 @@ export function projectFilesPath(root) {
 
 export function importsPath(root) {
   return path.join(root, IMPORTS_DIR)
+}
+
+export function sequencesPath(root) {
+  return path.join(root, SEQUENCES_DIR)
 }
 
 /** Where this project's document belongs, given the project's name. */
@@ -291,6 +302,114 @@ export async function saveProject(file, document) {
   }
 
   return { ok: true, savedAt: document.savedAt, replaced }
+}
+
+// ── sequences ─────────────────────────────────────────────────
+//
+// One file per sequence, in the project's sequences folder. The folder *is* the
+// list: dropping a .fluxseq into it puts that sequence in the project, and
+// there is no second register of what exists that could disagree with it.
+
+/**
+ * Every readable sequence in a project, with the file it came from.
+ *
+ * A file that will not parse is skipped rather than failing the lot: one
+ * damaged sequence must not stop a project opening, and the others are still
+ * perfectly good.
+ */
+export async function listSequences(root) {
+  let names
+  try {
+    names = (await fs.readdir(sequencesPath(root))).filter(isSequenceFile).sort()
+  } catch {
+    return []
+  }
+
+  const found = []
+  for (const name of names) {
+    const file = path.join(sequencesPath(root), name)
+    const doc = await readJson(file).catch(() => null)
+    if (!doc || sequenceProblem(doc)) continue
+    found.push({ ...doc, file })
+  }
+  return found
+}
+
+/** Where a sequence with this name belongs. */
+export function sequenceFilePath(root, name) {
+  return path.join(sequencesPath(root), `${safeFolderName(name)}${SEQUENCE_EXTENSION}`)
+}
+
+/**
+ * Writes one sequence, and removes the file it used to live in when it has been
+ * renamed.
+ *
+ * The name is part of the path, so a rename moves the file. Leaving the old one
+ * behind would put the sequence in the project twice, under two names, one of
+ * them stale — and the folder is the list, so both would show up.
+ */
+export async function saveSequence(root, document, previousFile) {
+  const file = sequenceFilePath(root, document.name)
+  try {
+    await fs.mkdir(sequencesPath(root), { recursive: true })
+    await writeJsonAtomic(file, document)
+  } catch (err) {
+    return {
+      ok: false,
+      error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'write-failed',
+    }
+  }
+
+  if (previousFile && path.resolve(previousFile) !== path.resolve(file)) {
+    const older = await readJson(previousFile).catch(() => null)
+    // By id, not by being a .fluxseq that is now unused: deleting someone's
+    // file because it shares an extension is not a tidy-up worth the risk.
+    if (older?.id === document.id) await fs.rm(previousFile, { force: true }).catch(() => {})
+  }
+
+  return { ok: true, file }
+}
+
+/** Removes a sequence's file. The clips are gone with it; the media is not. */
+export async function deleteSequence(root, file) {
+  const resolved = path.resolve(file)
+  if (path.dirname(resolved) !== path.resolve(sequencesPath(root))) {
+    return { ok: false, error: 'outside-project' }
+  }
+  try {
+    await fs.rm(resolved)
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'write-failed' }
+  }
+}
+
+/**
+ * Copies a sequence file into a project, so one made elsewhere opens here.
+ *
+ * Named apart rather than overwritten: two projects can easily hold a
+ * "Sequence 1", and importing one must not quietly replace the other.
+ */
+export async function importSequence(root, sourcePath) {
+  const doc = await readJson(sourcePath).catch(() => null)
+  if (!doc || sequenceProblem(doc)) {
+    return { ok: false, error: sequenceProblem(doc) === 'newer-format' ? 'newer-format' : 'unreadable' }
+  }
+
+  await fs.mkdir(sequencesPath(root), { recursive: true }).catch(() => {})
+  const base = safeFolderName(doc.name || 'Sequence')
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const name = attempt === 0 ? base : `${base} (${attempt})`
+    const file = path.join(sequencesPath(root), `${name}${SEQUENCE_EXTENSION}`)
+    try {
+      await fs.writeFile(file, JSON.stringify({ ...doc, name }, null, 2), { flag: 'wx' })
+      return { ok: true, file, sequence: { ...doc, name, file } }
+    } catch (err) {
+      if (err.code === 'EEXIST') continue
+      return { ok: false, error: 'write-failed' }
+    }
+  }
+  return { ok: false, error: 'too-many-collisions' }
 }
 
 /** Splits `clip.mp4` into `['clip', '.mp4']`, handling dotfiles and no-extension names. */

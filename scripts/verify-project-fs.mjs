@@ -26,8 +26,15 @@ import {
   plannedProjectPath,
   rootForDocument,
   saveProject,
+  deleteSequence,
+  importSequence,
+  listSequences,
+  saveSequence,
+  sequenceFilePath,
+  sequencesPath,
 } from '../electron/project.js'
 import { makeDocument } from '../shared/projectFormat.js'
+import { SEQUENCE_FORMAT, makeSequenceDocument } from '../shared/sequenceFormat.js'
 
 let passed = 0
 async function check(name, fn) {
@@ -96,7 +103,7 @@ try {
   await check('the document is named after the project and lives in project_files', async () => {
     assert.deepEqual(
       (await fs.readdir(projectA)).sort(),
-      ['exports', 'imports', 'project_files'],
+      ['exports', 'imports', 'project_files', 'sequences'],
       'the project root holds folders only',
     )
     assert.deepEqual(await fs.readdir(path.join(projectA, 'project_files')), ['Project A.flux'])
@@ -275,7 +282,7 @@ try {
     assert.equal(saved.ok, true, `save failed: ${saved.error}`)
     assert.deepEqual(saved.replaced, [path.join(old, 'Vintage.flux')])
 
-    assert.deepEqual((await fs.readdir(old)).sort(), ['exports', 'imports', 'project_files'])
+    assert.deepEqual((await fs.readdir(old)).sort(), ['exports', 'imports', 'project_files', 'sequences'])
     const again = await openProject(old)
     assert.equal(again.dirty, false, 'once moved, the project opens clean')
     assert.equal(again.relocated, false)
@@ -405,6 +412,170 @@ try {
     assert.equal(result.ok, true)
     assert.equal(path.basename(result.path), 'RAWCLIP.mov')
   })
+
+  // ── sequences as files ────────────────────────────────────────
+
+  /*
+   * The sequences folder *is* the list of sequences. There is no second
+   * register of what exists, so a file dropped in is in the project and a file
+   * removed is gone — which is what makes a sequence portable between
+   * projects, and what these checks are really about.
+   */
+
+  const seqRoot = path.join(tmp, 'seq-project')
+  await createProject(tmp, 'seq-project', '0.0.0')
+
+  const madeSequence = (name, extra = {}) =>
+    makeSequenceDocument({
+      id: extra.id ?? `s-${name}`,
+      name,
+      settings: extra.settings ?? { width: 1280, height: 720, frameRate: 25 },
+      tracks: [{ id: 'V1', kind: 'video', name: 'V1', gain: 0, muted: false, solo: false, hidden: false }],
+      clips: extra.clips ?? [],
+      media: extra.media ?? [],
+    })
+
+  await check('a new project has a sequences folder', async () => {
+    const stat = await fs.stat(sequencesPath(seqRoot))
+    assert.equal(stat.isDirectory(), true)
+    assert.ok(PROJECT_DIRS.includes('sequences'), 'and it is one of the folders a project has')
+  })
+
+  await check('a sequence is written to a file named after it', async () => {
+    const written = await saveSequence(seqRoot, madeSequence('Opening titles'))
+    assert.equal(written.ok, true, written.error)
+    assert.equal(path.basename(written.file), 'Opening titles.fluxseq')
+
+    const back = JSON.parse(await fs.readFile(written.file, 'utf8'))
+    assert.equal(back.flux.format, SEQUENCE_FORMAT)
+    assert.equal(back.name, 'Opening titles')
+    assert.equal(back.settings.frameRate, 25)
+  })
+
+  await check('the folder is the list', async () => {
+    await saveSequence(seqRoot, madeSequence('Rough cut'))
+    const found = await listSequences(seqRoot)
+    assert.deepEqual(
+      found.map((one) => one.name).sort(),
+      ['Opening titles', 'Rough cut'],
+    )
+    assert.ok(
+      found.every((one) => one.file.startsWith(sequencesPath(seqRoot))),
+      'each should say which file it came from',
+    )
+  })
+
+  await check('renaming a sequence moves its file rather than copying it', async () => {
+    const first = await saveSequence(seqRoot, madeSequence('Working', { id: 'move-me' }))
+    const moved = await saveSequence(
+      seqRoot,
+      madeSequence('Final', { id: 'move-me' }),
+      first.file,
+    )
+    assert.equal(moved.ok, true)
+
+    const names = (await listSequences(seqRoot)).map((one) => one.name)
+    assert.ok(names.includes('Final'), 'the new name should be there')
+    assert.ok(!names.includes('Working'), 'and the old one should not — the folder is the list')
+  })
+
+  await check('a rename does not delete a different sequence that shares the path', async () => {
+    // The old file is removed by *id*, not by being a .fluxseq that is now
+    // unused. Deleting someone's sequence because it happens to sit where
+    // another one used to is not a tidy-up worth the risk.
+    const other = await saveSequence(seqRoot, madeSequence('Shared name', { id: 'theirs' }))
+    await saveSequence(seqRoot, madeSequence('Something else', { id: 'mine' }), other.file)
+
+    const names = (await listSequences(seqRoot)).map((one) => one.name)
+    assert.ok(names.includes('Shared name'), 'the other sequence must survive')
+    assert.ok(names.includes('Something else'))
+  })
+
+  await check('a damaged sequence is skipped, not fatal', async () => {
+    // One unreadable file must not stop a project opening; the others are still
+    // perfectly good.
+    const before = (await listSequences(seqRoot)).length
+    // Two kinds of damage, because they fail in different places: one will not
+    // parse at all, and one parses perfectly and is simply not a sequence —
+    // which is what a stray file renamed to .fluxseq looks like.
+    await fs.writeFile(path.join(sequencesPath(seqRoot), 'broken.fluxseq'), '{ not json')
+    await fs.writeFile(
+      path.join(sequencesPath(seqRoot), 'not-a-sequence.fluxseq'),
+      JSON.stringify({ hello: 'world' }),
+    )
+
+    const found = await listSequences(seqRoot)
+    assert.equal(found.length, before, `${found.length} came back, expected ${before}`)
+    assert.ok(
+      found.every((one) => one.name !== 'broken' && one.hello === undefined),
+      'a damaged file must not appear as a sequence',
+    )
+    await fs.rm(path.join(sequencesPath(seqRoot), 'broken.fluxseq'))
+    await fs.rm(path.join(sequencesPath(seqRoot), 'not-a-sequence.fluxseq'))
+  })
+
+  await check('a sequence from another project is copied in, not opened in place', async () => {
+    const elsewhere = path.join(tmp, 'elsewhere.fluxseq')
+    await fs.writeFile(elsewhere, JSON.stringify(madeSequence('Borrowed')))
+
+    const imported = await importSequence(seqRoot, elsewhere)
+    assert.equal(imported.ok, true, imported.error)
+    assert.equal(path.dirname(imported.file), sequencesPath(seqRoot))
+    // The original is left where it was.
+    await fs.access(elsewhere)
+  })
+
+  await check('importing a second copy names it apart rather than overwriting', async () => {
+    // Two projects can easily both hold a "Sequence 1".
+    const elsewhere = path.join(tmp, 'again.fluxseq')
+    await fs.writeFile(elsewhere, JSON.stringify(madeSequence('Borrowed')))
+    const imported = await importSequence(seqRoot, elsewhere)
+    assert.equal(imported.ok, true)
+    assert.equal(path.basename(imported.file), 'Borrowed (1).fluxseq')
+
+    const names = (await listSequences(seqRoot)).map((one) => one.name)
+    assert.ok(names.includes('Borrowed') && names.includes('Borrowed (1)'))
+  })
+
+  await check('a sequence from a newer FLUX is refused rather than half-read', async () => {
+    const future = path.join(tmp, 'future.fluxseq')
+    const doc = madeSequence('From tomorrow')
+    doc.flux.format = SEQUENCE_FORMAT + 1
+    await fs.writeFile(future, JSON.stringify(doc))
+
+    const imported = await importSequence(seqRoot, future)
+    assert.equal(imported.ok, false)
+    assert.equal(imported.error, 'newer-format')
+  })
+
+  await check('a sequence outside the project is not deleted', async () => {
+    // deleteSequence is reached from "this sequence is no longer in the
+    // project", and a path that never was would be someone else's file.
+    const outside = path.join(tmp, 'not-ours.fluxseq')
+    await fs.writeFile(outside, JSON.stringify(madeSequence('Theirs')))
+    const removed = await deleteSequence(seqRoot, outside)
+    assert.equal(removed.ok, false)
+    assert.equal(removed.error, 'outside-project')
+    await fs.access(outside)
+  })
+
+  await check('deleting a sequence takes it out of the list', async () => {
+    const doomed = await saveSequence(seqRoot, madeSequence('Doomed', { id: 'doomed' }))
+    assert.equal((await deleteSequence(seqRoot, doomed.file)).ok, true)
+    const names = (await listSequences(seqRoot)).map((one) => one.name)
+    assert.ok(!names.includes('Doomed'))
+  })
+
+  await check('a sequence file is named the way a project folder is', async () => {
+    // Same safeFolderName, so a sequence called `A/B: "cut"` is a file that can
+    // actually exist on Windows.
+    const awkward = await saveSequence(seqRoot, madeSequence('A/B: "cut"', { id: 'odd' }))
+    assert.equal(awkward.ok, true, awkward.error)
+    assert.equal(path.dirname(awkward.file), sequencesPath(seqRoot))
+    assert.ok(!/[/\\:"]/.test(path.basename(awkward.file, '.fluxseq')))
+    assert.equal(awkward.file, sequenceFilePath(seqRoot, 'A/B: "cut"'))
+  })
+
 } finally {
   await fs.rm(tmp, { recursive: true, force: true })
 }

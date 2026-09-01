@@ -57,6 +57,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 | **Level, mute, solo** | Per track, in decibels, saved with the project. |
 | **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
+| **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
 
 Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
@@ -133,6 +134,9 @@ where a stray edit lands in whatever happened to be open, "which project am I in
 question you answer by looking at the timeline.
 
 *Not yet: autosave, Save As, and project folders for organising assets inside the bin.*
+
+The project folder now has a `sequences/` directory beside `project_files/`, `imports/` and
+`exports/` — see [Sequences](#sequences).
 
 ### Opening a project from Explorer
 
@@ -482,6 +486,59 @@ Three things about it were only obvious after being wrong:
 - **A `flush()` demands a keyframe afterwards.** Calling it at the end of every batch makes the next
   batch — which starts on a delta frame — fail outright.
 
+#### Sequences
+
+A project holds many sequences and exactly one is being edited. Each is a **file of its own**:
+
+```
+<root>/
+  project_files/<Project Name>.flux   the document
+  sequences/<Sequence Name>.fluxseq   one file per sequence
+  imports/                            media copied into the project
+  exports/                            renders
+```
+
+**The folder is the list.** There is no second register of which sequences exist, so a `.fluxseq`
+dropped into that folder is in the project and one removed is gone. Dropping a sequence file onto
+the timeline copies it in and opens it — copied rather than opened where it lies, because a sequence
+the project cannot find again tomorrow is not in the project.
+
+A sequence carries **the media its clips refer to**: path, name, kind, and what was probed. That is
+what makes it portable, because a clip references an asset by id and an id means nothing in another
+project. Opening one elsewhere matches those files by *path* — one already in the bin is used,
+anything new is linked where it lies — and then remaps the clips onto whatever id this project uses.
+Not the other way round: adopting the sequence's ids would mean two projects eventually claiming one
+id for two different files, and a clip pointing at the wrong footage is a worse failure than an extra
+pass over the clip list.
+
+**Settings in force, and settings recorded.** `width`, `height` and `frameRate` drive the app: they
+are the frame the compositor draws into and the grid the timeline snaps to. The audio and preview
+groups — sample rate, channels, preview codec, pixel format, frame caching — are written to the file
+and **acted on by nothing**, because FLUX has no exporter and no preview render files yet. The
+settings dialog says so under its own heading. A setting that appears to do something and does not is
+worse than one that is honestly labelled.
+
+**An empty sequence takes its shape from the first clip dropped into it** — size, rate, and the
+audio the file has. Premiere asks; FLUX takes the answer from the footage, because the question can
+only be answered by looking at the footage and nobody has been shown any sequence settings to answer
+it with. The rate is *counted* from the sample table rather than read off a container field, which an
+encoder can get wrong. Once there is an edit the settings stay: changing them halfway through would
+reframe and re-time every shot at once.
+
+Sequences live in `kernel/sequence.ts` beside the one being edited rather than in a module of their
+own. Every editing function works on `sequence`, so there is no way to mutate one that is not on
+screen, and switching tabs is the only thing that changes which that is. Switching is **not a
+commit** — the outgoing sequence goes back with its unsaved edits, because an edit that vanished
+because you looked at something else would be the worst kind of loss.
+
+On save, every sequence is written and the document records only which was open. The sequences go
+first: a document naming a sequence whose file had not been written would open to an empty timeline,
+where the other order fails safely — a file the document does not name yet is still found, because
+the folder is the list.
+
+A project written before sequences were files carries one inside the document. It is brought across
+on open and written out on the next save, which is why such a project opens with unsaved work.
+
 #### Layers
 
 Every visible video track with a clip at the playhead is drawn, bottom track first, into the
@@ -747,8 +804,8 @@ src/
   panels/       the three built-in panels, registered via the SDK
   shell/        command palette · the import-choice host
   styles/       theme tokens + app styles
-shared/         media types, project naming, the .flux format, the mp4 demuxer
-                and the on-disk shape of its index and of audio peaks
+shared/         media types, project naming, the .flux and .fluxseq formats,
+                the mp4 demuxer, and the on-disk shape of its index and of audio peaks
                 — imported by BOTH main and renderer, and by the harness
 build/          icons, generated by npm run icons (the script is the source)
 electron/       main process · preload bridge · filesystem reads · project layout

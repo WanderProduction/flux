@@ -1122,7 +1122,8 @@ try {
       cdp,
       LAYERED +
         `const seq = sequence.getSequence();
-         return { frame: [seq.width, seq.height], canvas: window.__pixels().size };`,
+         return { frame: [seq.settings.width, seq.settings.height],
+                  canvas: window.__pixels().size };`,
     )
     // The landscape clip went down first, so that is the shape everything is
     // composited into — not the portrait one that landed on top of it.

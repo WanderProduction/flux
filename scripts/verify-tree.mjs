@@ -165,7 +165,7 @@ try {
     )
   })
 
-  await check('the Project section shows the project folder and its three folders', async () => {
+  await check('the Project section shows the project folder and its folders', async () => {
     const rows = await evaluate(
       cdp,
       `const t = window.__tree;
@@ -179,7 +179,7 @@ try {
     )
     assert.equal(rows[0].depth, 0, 'the project folder is the root')
     const children = rows.filter((r) => r.depth === 1).map((r) => r.label).sort()
-    assert.deepEqual(children, ['exports', 'imports', 'project_files'])
+    assert.deepEqual(children, ['exports', 'imports', 'project_files', 'sequences'])
   })
 
   await check('every mounted drive is its own collapsed root', async () => {

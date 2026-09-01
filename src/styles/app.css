@@ -322,11 +322,165 @@ kbd {
 
 /* ── Timeline ──────────────────────────────────────────────── */
 
-.tl {
+/* The tabs and the tracks stack; the shell is what fills the panel body, which
+   is the only thing in here that is positioned against it. */
+.tl-shell {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+.tl {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  overflow: hidden;
+}
+
+/*
+ * One tab per sequence, above the tracks.
+ *
+ * Above rather than in the panel's own tab bar: dockview's tabs are panels, and
+ * a sequence is not a panel — closing the Timeline must not close a sequence,
+ * and having two rows of tabs mean two different things would be its own bug.
+ */
+.seq-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 3px 4px 0;
+  background: var(--flux-bg);
+  border-bottom: 1px solid var(--flux-border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 0 0 auto;
+}
+.seq-tabs::-webkit-scrollbar {
+  display: none;
+}
+.seq-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 9px;
+  max-width: 180px;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+  background: var(--flux-bg-panel);
+  border: 1px solid var(--flux-border);
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.seq-tab:hover {
+  color: var(--flux-text);
+}
+.seq-tab--active {
+  color: var(--flux-text);
+  background: var(--flux-bg-elevated);
+  border-color: color-mix(in srgb, var(--flux-accent) 45%, var(--flux-border));
+}
+.seq-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.seq-tab-name {
+  width: 110px;
+  font: inherit;
+  color: var(--flux-text);
+  background: var(--flux-bg);
+  border: 1px solid var(--flux-accent);
+  border-radius: 2px;
+  padding: 0 3px;
+}
+.seq-tab-close,
+.seq-tab-add {
+  padding: 0 4px;
+  font-family: var(--flux-font-mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--flux-text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.seq-tab-close:hover,
+.seq-tab-add:hover {
+  color: var(--flux-text);
+}
+.seq-tab-add {
+  align-self: center;
+  padding: 2px 8px;
+  font-size: 13px;
+}
+
+/* Settings sit over the panel rather than in a window: what they describe is
+   right behind them, and a change is visible the moment it is made. */
+.seq-settings-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.seq-settings {
+  width: min(420px, 92%);
+  max-height: 88%;
+  overflow: auto;
+  padding: 14px 16px 16px;
+  background: var(--flux-bg-elevated);
+  border: 1px solid var(--flux-border);
+  border-radius: 5px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+.seq-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.seq-settings-title {
+  font-size: var(--flux-text-md);
+  color: var(--flux-text);
+}
+.seq-settings-group {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--flux-border);
+}
+.seq-settings-legend {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+.seq-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text);
+}
+.seq-field input[type='number'],
+.seq-field select {
+  width: 140px;
+  padding: 2px 4px;
+  font: inherit;
+  font-family: var(--flux-font-mono);
+  color: var(--flux-text);
+  background: var(--flux-bg);
+  border: 1px solid var(--flux-border);
+  border-radius: 2px;
+}
+.seq-field--check {
+  justify-content: flex-start;
 }
 
 .tl-headers {

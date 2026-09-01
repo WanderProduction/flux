@@ -78,7 +78,7 @@ try {
     assert.equal(state.chip, 'Alpha')
   })
 
-  await check('a folder named after the project holds the three folders', async () => {
+  await check('a folder named after the project holds its folders', async () => {
     // The parent must contain the project folder, not the project's contents:
     // without this, picking Downloads once would scatter project_files /
     // imports / exports straight into Downloads.
@@ -90,7 +90,7 @@ try {
     )
 
     const entries = await fs.readdir(projectA)
-    assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files'])
+    assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files', 'sequences'])
   })
 
   await check('the project root is the named folder', async () => {
@@ -134,7 +134,7 @@ try {
     assert.deepEqual(await fs.readdir(path.join(projectA, 'project_files')), ['Alpha.flux'])
     assert.deepEqual(
       (await fs.readdir(projectA)).sort(),
-      ['exports', 'imports', 'project_files'],
+      ['exports', 'imports', 'project_files', 'sequences'],
       'the project root stays folders-only',
     )
   })
@@ -565,7 +565,7 @@ try {
 
     assert.deepEqual(
       (await fs.readdir(vintage)).sort(),
-      ['exports', 'imports', 'project_files'],
+      ['exports', 'imports', 'project_files', 'sequences'],
       'the stale document in the root should be gone',
     )
     const doc = JSON.parse(
@@ -574,7 +574,27 @@ try {
     assert.equal(doc.flux.format, DOCUMENT_FORMAT, 'saving should upgrade the format')
     assert.equal(doc.createdAt, 1000, 'the original creation date survives')
     assert.equal(doc.assets.length, 1)
-    assert.equal(doc.sequence.clips.length, 1)
+
+    /*
+     * The sequence has moved out of the document and into a file of its own.
+     *
+     * An embedded copy that stayed behind would be a second answer to what the
+     * timeline holds, and the two would drift the first time one was saved
+     * without the other — so the document must have let go of it, not merely
+     * gained a folder.
+     */
+    assert.ok(!doc.sequence, 'the document should no longer carry the sequence itself')
+    assert.ok(doc.activeSequence, 'it should say which sequence was open')
+
+    const files = (await fs.readdir(path.join(vintage, 'sequences'))).sort()
+    assert.deepEqual(files, ['Sequence 1.fluxseq'], 'the sequence should be a file now')
+    const moved = JSON.parse(
+      await fs.readFile(path.join(vintage, 'sequences', 'Sequence 1.fluxseq'), 'utf8'),
+    )
+    assert.equal(moved.clips.length, 1, 'with the clip it had')
+    assert.equal(moved.id, doc.activeSequence, 'and it is the one the document names')
+    assert.equal(moved.settings.frameRate, 24, 'its rate came across from the old shape')
+    assert.equal(moved.media.length, 1, 'along with the media its clip refers to')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

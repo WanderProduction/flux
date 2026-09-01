@@ -83,7 +83,7 @@ try {
       cdp,
       `const seq = window.__fluxDev.sequence;
        const s = seq.getSequence();
-       return { tracks: s.tracks.map(t => t.id), kinds: s.tracks.map(t => t.kind), clips: s.clips.length, fps: s.frameRate };`,
+       return { tracks: s.tracks.map(t => t.id), kinds: s.tracks.map(t => t.kind), clips: s.clips.length, fps: s.settings.frameRate };`,
     )
     // The order is the stacking order: video upward because a higher layer is
     // in front, audio downward because sound only ever sums.
@@ -1270,12 +1270,20 @@ try {
         `const video = sequence.getSequence().clips.find(c => c.kind === 'video');
          sequence.moveClips([video.id], 1.5, 0);
          await new Promise(r => setTimeout(r, 200));
-         return sequence.getSequence().clips
-           .map(c => ({ kind: c.kind, start: Math.round(c.start * 1000) / 1000 }));`,
+         return { clips: sequence.getSequence().clips
+                    .map(c => ({ kind: c.kind, start: Math.round(c.start * 1000) / 1000 })),
+                  // A move is quantised to the sequence's own frame grid, and
+                  // the sequence takes its rate from the footage — so what the
+                  // distance lands on is the grid's business, not this check's.
+                  expected: Math.round(sequence.snapDelta(1.5) * 1000) / 1000 };`,
     )
-    assert.equal(state.length, 2)
-    for (const clip of state) {
-      assert.equal(clip.start, 1.5, `the ${clip.kind} half ended up at ${clip.start}s`)
+    assert.equal(state.clips.length, 2)
+    for (const clip of state.clips) {
+      assert.equal(
+        clip.start,
+        state.expected,
+        `the ${clip.kind} half ended up at ${clip.start}s, not ${state.expected}s`,
+      )
     }
   })
 
@@ -1358,11 +1366,12 @@ try {
         `const pair = sequence.getSequence().clips.find(c => c.kind === 'video');
          sequence.moveClips([pair.id], 2.5, 0);
          await new Promise(r => setTimeout(r, 200));
-         return sequence.getSequence().clips.map(c => [c.kind, Math.round(c.start * 1000) / 1000]);`,
+         return { clips: sequence.getSequence().clips.map(c => [c.kind, Math.round(c.start * 1000) / 1000]),
+                  expected: Math.round(sequence.snapDelta(2.5) * 1000) / 1000 };`,
     )
     assert.deepEqual(
-      state.sort(),
-      [['audio', 2.5], ['video', 2.5]].sort(),
+      state.clips.sort(),
+      [['audio', state.expected], ['video', state.expected]].sort(),
       'with nothing in the way both halves should travel the full distance',
     )
   })
@@ -1375,11 +1384,12 @@ try {
         `const pair = sequence.getSequence().clips.find(c => c.kind === 'audio');
          sequence.moveClips([pair.id], 1.5, 0);
          await new Promise(r => setTimeout(r, 200));
-         return sequence.getSequence().clips.map(c => [c.kind, Math.round(c.start * 1000) / 1000]);`,
+         return { clips: sequence.getSequence().clips.map(c => [c.kind, Math.round(c.start * 1000) / 1000]),
+                  expected: Math.round(sequence.snapDelta(1.5) * 1000) / 1000 };`,
     )
     assert.deepEqual(
-      state.sort(),
-      [['audio', 1.5], ['video', 1.5]].sort(),
+      state.clips.sort(),
+      [['audio', state.expected], ['video', state.expected]].sort(),
       'grabbing the sound should move the picture the same distance',
     )
   })
@@ -1585,7 +1595,7 @@ try {
        });
        await new Promise(r => setTimeout(r, 250));
        const s = sequence.getSequence();
-       return { hidden: s.tracks.map(t => t.hidden), frame: [s.width, s.height] };`,
+       return { hidden: s.tracks.map(t => t.hidden), frame: [s.settings.width, s.settings.height] };`,
     )
     assert.ok(
       state.hidden.every((h) => h === false),
@@ -1602,11 +1612,12 @@ try {
       `const { sequence } = window.__fluxDev;
        sequence.setSequence(null);
        await new Promise(r => setTimeout(r, 200));
-       sequence.setSequenceSize(1280, 720);
+       sequence.updateSequenceSettings({ width: 1280, height: 720 });
        sequence.setTrackHidden('V2', true);
        await new Promise(r => setTimeout(r, 200));
        const s = sequence.getSequence();
-       return { frame: [s.width, s.height], hidden: s.tracks.map(t => [t.id, t.hidden]) };`,
+       return { frame: [s.settings.width, s.settings.height],
+                hidden: s.tracks.map(t => [t.id, t.hidden]) };`,
     )
     assert.deepEqual(before.frame, [1280, 720])
 
@@ -1616,10 +1627,11 @@ try {
        const saved = await project.saveProject();
        if (!saved.ok) throw new Error('save failed: ' + saved.error);
        await store.flushStores();
-       const doc = await window.flux.project.open(project.getProject().root);
-       const s = doc.project.sequence;
-       // Read back out of the document on disk, not out of memory.
-       return { frame: [s.width, s.height], hidden: s.tracks.map(t => [t.id, t.hidden]) };`,
+       const files = await window.flux.project.listSequences(project.getProject().root);
+       const s = files.find(one => one.id === sequence.getActiveSequenceId());
+       if (!s) throw new Error('the active sequence was not written');
+       return { frame: [s.settings.width, s.settings.height],
+                hidden: s.tracks.map(t => [t.id, t.hidden]) };`,
     )
     assert.deepEqual(after, before, 'the frame and the hidden tracks did not reach the file')
 
@@ -1974,6 +1986,353 @@ try {
        }
        return true;`,
     )
+  })
+
+  // ── sequences, and the tabs ───────────────────────────────────
+
+  /*
+   * A project holds several sequences and exactly one is being edited. The tab
+   * strip is the only place that changes which — which is what makes it safe
+   * for every editing function in kernel/sequence.ts to work on "the active
+   * one" without asking.
+   */
+
+  // A check above reloads the page, which takes every page-side helper with it.
+  await evaluate(cdp, DRAG_HELPER)
+  await evaluate(
+    cdp,
+    // The path is built here rather than joined inside the template: a
+    // backslash has to survive both this file's template literal and the
+    // page's, and one of the two eats it.
+    `const assets = window.__fluxDev.assets;
+     const file = ${JSON.stringify(path.join(MEDIA_DIR, 'layer_red.mp4'))};
+     if (!assets.getAssets().some(a => a.path === file)) {
+       assets.importAssets([{ path: file, kind: 'video' }]);
+     }
+     await Promise.all(assets.getAssets().map(a => assets.ensureProbed(a.id)));
+     await new Promise(r => setTimeout(r, 300));
+     return true;`,
+  )
+
+  const tabNames = () =>
+    evaluate(
+      cdp,
+      `return [...document.querySelectorAll('.seq-tab')]
+         .map(t => ({ name: t.textContent.replace(/\u00d7$/, '').trim(),
+                      active: t.className.includes('--active') }));`,
+    )
+
+  await check('a project starts with one sequence, and it has a tab', async () => {
+    const tabs = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 300));
+       return { model: sequence.listSequences().map(s => s.name),
+                tabs: [...document.querySelectorAll('.seq-tab')].length,
+                plus: Boolean(document.querySelector('.seq-tab-add')) };`,
+    )
+    assert.equal(tabs.model.length, 1)
+    assert.equal(tabs.tabs, 1, 'one tab per sequence')
+    assert.equal(tabs.plus, true, 'and a way to make another')
+  })
+
+  await check('the + button adds a sequence and switches to it', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 300));
+       const before = sequence.getActiveSequenceId();
+       document.querySelector('.seq-tab-add').click();
+       await new Promise(r => setTimeout(r, 300));
+       return { names: sequence.listSequences().map(s => s.name),
+                switched: sequence.getActiveSequenceId() !== before,
+                clips: sequence.getSequence().clips.length };`,
+    )
+    assert.deepEqual(state.names, ['Sequence 1', 'Sequence 2'])
+    assert.equal(state.switched, true, 'a new sequence is the one you are now editing')
+    assert.equal(state.clips, 0, 'and it starts empty')
+  })
+
+  await check('each sequence keeps its own clips', async () => {
+    // The whole point of several: an edit lands in the one on screen and
+    // nowhere else.
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+       const probed = await assets.ensureProbed(a.id);
+
+       const first = sequence.getActiveSequenceId();
+       sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: probed.duration });
+       const second = sequence.createSequence({ name: 'Other' });
+       sequence.addClip({ assetId: a.id, trackId: 'V1', start: 3, duration: probed.duration });
+
+       const onSecond = sequence.getSequence().clips.map(c => c.start);
+       sequence.activateSequence(first);
+       await new Promise(r => setTimeout(r, 200));
+       const onFirst = sequence.getSequence().clips.map(c => c.start);
+       sequence.activateSequence(second.id);
+       const backOnSecond = sequence.getSequence().clips.map(c => c.start);
+       return { onFirst, onSecond, backOnSecond,
+                counts: sequence.listSequences().map(s => s.clips.length) };`,
+    )
+    assert.deepEqual(state.onFirst, [0], 'the first sequence kept its own clip')
+    assert.deepEqual(state.onSecond, [3])
+    assert.deepEqual(state.backOnSecond, [3], 'and switching away and back changed nothing')
+    assert.deepEqual(state.counts, [1, 1])
+  })
+
+  await check('switching tabs keeps unsaved edits', async () => {
+    // Switching is not a commit. An edit that vanished because you looked at
+    // something else would be the worst kind of loss — silent, and blamed on
+    // yourself.
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+       const probed = await assets.ensureProbed(a.id);
+       const first = sequence.getActiveSequenceId();
+       sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: probed.duration });
+       const second = sequence.createSequence({ name: 'Scratch' });
+       sequence.activateSequence(first);
+       // Edit the first one *after* the second exists, then look away.
+       sequence.setTrackMuted('A1', true);
+       sequence.activateSequence(second.id);
+       sequence.activateSequence(first);
+       await new Promise(r => setTimeout(r, 200));
+       return sequence.getSequence().tracks.find(t => t.id === 'A1').muted;`,
+    )
+    assert.equal(state, true, 'an edit made before switching away must still be there')
+  })
+
+  await check('clicking a tab switches sequence', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       sequence.createSequence({ name: 'Second' });
+       await new Promise(r => setTimeout(r, 250));
+       const tabs = [...document.querySelectorAll('.seq-tab')];
+       tabs[0].click();
+       await new Promise(r => setTimeout(r, 250));
+       const firstActive = sequence.getSequence().name;
+       tabs[1].click();
+       await new Promise(r => setTimeout(r, 250));
+       return { firstActive, secondActive: sequence.getSequence().name };`,
+    )
+    assert.equal(state.firstActive, 'Sequence 1')
+    assert.equal(state.secondActive, 'Second')
+  })
+
+  await check('the last sequence cannot be closed', async () => {
+    // Same rule as the last track: a project with no sequence has no timeline,
+    // and that is a state with no way back out of it.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const only = sequence.getActiveSequenceId();
+       const refused = sequence.removeSequence(only);
+       return { refused: refused === null, left: sequence.listSequences().length,
+                closeButtons: document.querySelectorAll('.seq-tab-close').length };`,
+    )
+    assert.equal(state.refused, true)
+    assert.equal(state.left, 1)
+    assert.equal(state.closeButtons, 0, 'and there is no button offering to')
+  })
+
+  await check('closing a sequence leaves another one open', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const second = sequence.createSequence({ name: 'Doomed' });
+       sequence.removeSequence(second.id);
+       await new Promise(r => setTimeout(r, 250));
+       return { names: sequence.listSequences().map(s => s.name),
+                active: sequence.getSequence().name };`,
+    )
+    assert.deepEqual(state.names, ['Sequence 1'])
+    assert.equal(state.active, 'Sequence 1', 'closing the open one must land on another')
+  })
+
+  await check('a sequence can be renamed from its tab', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const tab = document.querySelector('.seq-tab');
+       tab.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+       await new Promise(r => setTimeout(r, 200));
+       const input = tab.querySelector('.seq-tab-name');
+       if (!input) throw new Error('double-click did not offer a name to type');
+       input.focus();
+       // React's onBlur is delegated from focusout, which bubbles; a plain
+       // 'blur' event does not, so setting the value and calling blur() is what
+       // a person clicking away actually produces.
+       const setter = Object.getOwnPropertyDescriptor(
+         window.HTMLInputElement.prototype, 'value').set;
+       setter.call(input, 'Director cut');
+       input.dispatchEvent(new Event('input', { bubbles: true }));
+       input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+       await new Promise(r => setTimeout(r, 300));
+       return sequence.listSequences().map(s => s.name);`,
+    )
+    assert.deepEqual(state, ['Director cut'])
+  })
+
+  await check('an empty sequence takes its settings from the first footage dropped on it', async () => {
+    /*
+     * Premiere asks; FLUX takes the answer from the footage, because the
+     * question can only be answered by looking at the footage and nobody has
+     * been shown any sequence settings to answer it with.
+     *
+     * layer_red.mp4 is 1280x720 at 25fps with mono 44.1kHz sound — none of
+     * which is the default, so every field here is evidence.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, view } = window.__fluxDev;
+       if (!assets.getAssets().some(a => a.name === 'layer_red.mp4')) {
+         assets.importAssets([{ path: ${dir} + '\\\\layer_red.mp4', kind: 'video' }]);
+         await Promise.all(assets.getAssets().map(a => assets.ensureProbed(a.id)));
+       }
+       sequence.setSequence(null);
+       view.recordView({ timeline: { zoom: 60 } });
+       await new Promise(r => setTimeout(r, 400));
+       const before = sequence.getSequence().settings;
+       await window.__drag('layer_red.mp4', 1, 0, 60);
+       await new Promise(r => setTimeout(r, 600));
+       const after = sequence.getSequence().settings;
+       return {
+         before: [before.width, before.height, before.frameRate],
+         after: [after.width, after.height, after.frameRate],
+         audio: after.audio,
+       };`,
+    )
+    assert.deepEqual(state.before, [1920, 1080, 24], 'the default, before anything was dropped')
+    assert.deepEqual(state.after, [1280, 720, 25], `it became ${state.after.join('x')}`)
+    assert.deepEqual(state.audio, { sampleRate: 44100, channels: 1 })
+  })
+
+  await check('a sequence with an edit keeps its settings when more is dropped in', async () => {
+    // Only the *first* clip decides. Changing the frame under someone halfway
+    // through would reframe and re-time every shot at once.
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       const before = sequence.getSequence().settings;
+       await window.__drag('clipA.mp4', 1, 8, 60);
+       await new Promise(r => setTimeout(r, 500));
+       const after = sequence.getSequence().settings;
+       return { before: [before.width, before.height], after: [after.width, after.height],
+                clips: sequence.getSequence().clips.length };`,
+    )
+    assert.ok(state.clips >= 2, 'setup: the second clip should have landed')
+    assert.deepEqual(state.after, state.before, 'the frame moved when it should not have')
+  })
+
+  await check('sequence settings can be changed, and the timeline follows', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       sequence.updateSequenceSettings({ frameRate: 30, width: 3840, height: 2160 });
+       await new Promise(r => setTimeout(r, 250));
+       const shown = [...document.querySelectorAll('.tool-value')].map(e => e.textContent);
+       return { settings: sequence.getSequence().settings, shown };`,
+    )
+    assert.equal(state.settings.frameRate, 30)
+    assert.equal(state.settings.width, 3840)
+    assert.ok(state.shown.includes('30 fps'), `the toolbar shows ${state.shown.join(' ')}`)
+    assert.ok(state.shown.includes('3840×2160'))
+  })
+
+  await check('settings that make no sense are refused, not stored', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       sequence.updateSequenceSettings({ width: 0, height: -5, frameRate: NaN });
+       const s = sequence.getSequence().settings;
+       return [s.width, s.height, s.frameRate];`,
+    )
+    assert.deepEqual(state, [1920, 1080, 24], 'a frame with no pixels in it is not a frame')
+  })
+
+  await check('every sequence in the project is written to its own file', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, project, store } = window.__fluxDev;
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 250));
+       const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+       const probed = await assets.ensureProbed(a.id);
+       sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: probed.duration });
+       sequence.renameSequence(sequence.getActiveSequenceId(), 'Reel one');
+       sequence.createSequence({ name: 'Reel two' });
+       sequence.addClip({ assetId: a.id, trackId: 'V1', start: 2, duration: probed.duration });
+
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+
+       const root = project.getProject().root;
+       const onDisk = await window.flux.project.listSequences(root);
+       return {
+         files: onDisk.map(s => ({ name: s.name, clips: s.clips.length, media: s.media.length })),
+         active: sequence.getSequence().name,
+       };`,
+    )
+    const byName = Object.fromEntries(state.files.map((one) => [one.name, one]))
+    assert.ok(byName['Reel one'], `only found ${state.files.map((f) => f.name).join(', ')}`)
+    assert.ok(byName['Reel two'])
+    assert.equal(byName['Reel one'].clips, 1)
+    assert.equal(byName['Reel two'].clips, 1)
+    assert.equal(byName['Reel one'].media, 1, 'the media a clip refers to travels with it')
+  })
+
+  await check('the sequences come back, and so does the one that was open', async () => {
+    const before = await evaluate(
+      cdp,
+      `const { sequence, project, store } = window.__fluxDev;
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+       const state = { names: sequence.listSequences().map(s => s.name).sort(),
+                       active: sequence.getSequence().name,
+                       clips: sequence.getSequence().clips.length };
+       location.reload();
+       return state;`,
+    )
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       return { names: seq.listSequences().map(s => s.name).sort(),
+                active: seq.getSequence().name,
+                clips: seq.getSequence().clips.length };`,
+    )
+    assert.deepEqual(after.names, before.names, 'the sequences did not all come back')
+    assert.equal(after.active, before.active, 'the one that was open should be the one that opens')
+    assert.equal(after.clips, before.clips)
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { commands } from '../kernel/commands'
 import { ensureProbed, getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import {
+  hasSequenceFile,
   isAssetDrag,
   isDroppableDrag,
   isFileDrag,
@@ -10,9 +11,11 @@ import {
   readAssetDragPayload,
   readFileDragPayload,
   readNativeFileDrag,
+  sequenceFilesIn,
   type DraggedFile,
 } from '../kernel/dragAssets'
 import { importFiles } from '../kernel/importPipeline'
+import { importSequenceFile } from '../kernel/project'
 import {
   formatTimecode,
   getTime,
@@ -21,15 +24,27 @@ import {
   subscribePlayback,
 } from '../kernel/playback'
 import { audioInfoFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
+import { videoInfoFor } from '../kernel/media/indexCache'
 import { peakRange } from '../../shared/peaks.js'
+import {
+  FRAME_RATES,
+  PIXEL_FORMATS,
+  PREVIEW_CODECS,
+  SAMPLE_RATES,
+} from '../../shared/sequenceFormat.js'
 import {
   addClip,
   addLinkedClips,
+  activateSequence,
   clampGain,
+  updateSequenceSettings,
+  createSequence,
   isTrackAudible,
+  listSequences,
+  removeSequence,
+  renameSequence,
   MAX_GAIN_DB,
   MIN_GAIN_DB,
-  setSequenceSize,
   setTrackHidden,
   setTrackGain,
   setTrackMuted,
@@ -66,6 +81,9 @@ import { useThumbnail } from './useThumbnail'
 
 const TRACK_HEIGHT = 46
 const HEADER_WIDTH = 118
+
+/** Frame rates are counted, so they land on things like 29.970029. */
+const round = (fps: number) => Math.round(fps * 1000) / 1000
 const MIN_ZOOM = 8
 const MAX_ZOOM = 400
 const DEFAULT_ZOOM = 60 // pixels per second
@@ -496,6 +514,20 @@ export function TimelinePanel() {
    * read the DataTransfer synchronously: it goes inert the moment the drop
    * handler yields, and the copy-or-link dialog is a very long yield.
    */
+  /**
+   * Imports any `.fluxseq` in a drop, and says whether that was the whole drop.
+   *
+   * Copied into the project's sequences folder rather than opened where it
+   * lies: the folder is the list, and a sequence the project cannot find again
+   * tomorrow is not in the project.
+   */
+  const importDroppedSequences = useCallback(async (event: React.DragEvent) => {
+    const files = sequenceFilesIn(event)
+    if (files.length === 0) return false
+    for (const file of files) await importSequenceFile(file)
+    return true
+  }, [])
+
   const idsFromDrop = useCallback(async (event: React.DragEvent): Promise<string[]> => {
     if (isAssetDrag(event)) return readAssetDragPayload(event)
 
@@ -519,9 +551,14 @@ export function TimelinePanel() {
 
   const onDrop = useCallback(
     async (event: React.DragEvent, track: Track) => {
-      if (!isDroppableDrag(event)) return
+      if (!isDroppableDrag(event) && !hasSequenceFile(event)) return
       event.preventDefault()
       setPreview(null)
+
+      // A sequence dropped in from outside is a sequence, not footage: it goes
+      // into the project's sequences folder and opens, rather than being
+      // laid on a track.
+      if (await importDroppedSequences(event)) return
 
       const dropTime = timeAt(event.clientX)
       const ids = await idsFromDrop(event)
@@ -538,17 +575,30 @@ export function TimelinePanel() {
         const hasAudio = Boolean(await audioInfoFor(asset.path))
 
         /*
-         * The first clip into an empty sequence decides the frame everything is
-         * composited into.
+         * The first clip into an empty sequence decides what the sequence is.
          *
          * Premiere asks; FLUX takes the answer from the footage, because the
          * question can only be answered by looking at the footage and the user
          * has not been shown any sequence settings to answer it with. Once
-         * there is an edit the size stays put — changing it under someone
-         * halfway through would reframe every shot at once.
+         * there is an edit the settings stay put — changing them under someone
+         * halfway through would reframe and re-time every shot at once.
+         *
+         * The rate is counted from the sample table rather than read off the
+         * container, for the reason media/indexCache.ts gives.
          */
-        if (getSequence().clips.length === 0 && asset.width && asset.height) {
-          setSequenceSize(asset.width, asset.height)
+        if (getSequence().clips.length === 0) {
+          const video = await videoInfoFor(asset.path)
+          const audio = await audioInfoFor(asset.path)
+          updateSequenceSettings({
+            ...(video
+              ? { width: video.width, height: video.height, frameRate: round(video.frameRate) }
+              : asset.width && asset.height
+                ? { width: asset.width, height: asset.height }
+                : {}),
+            ...(audio
+              ? { audio: { sampleRate: audio.sampleRate, channels: audio.channels } }
+              : {}),
+          })
         }
 
         /*
@@ -645,23 +695,34 @@ export function TimelinePanel() {
 
   const step = tickInterval(zoom)
   const tickCount = Math.ceil(contentWidth / (step * zoom)) + 1
+  const allSequences = listSequences()
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   return (
     <PanelFrame
       scroll={false}
       toolbar={
         <>
-          <span className="tool-label">{sequence.name}</span>
-          <span className="tool-value tool-value--dim">{sequence.frameRate} fps</span>
+          <span className="tool-value tool-value--dim">
+            {sequence.settings.width}×{sequence.settings.height}
+          </span>
+          <span className="tool-value tool-value--dim">{sequence.settings.frameRate} fps</span>
           <span className="tool-sep" />
           <span className="tool-value tool-value--dim">
             {sequence.clips.length} clip{sequence.clips.length === 1 ? '' : 's'}
           </span>
           <span className="tool-sep" />
           <span className="tool-value tool-value--mono">
-            {formatTimecode(time, sequence.frameRate)}
+            {formatTimecode(time, sequence.settings.frameRate)}
           </span>
           <span className="cb-toolbar-end">
+            <button
+              className="cb-btn"
+              onClick={() => setSettingsOpen(true)}
+              title="Sequence settings"
+            >
+              Settings
+            </button>
             {selected.size > 0 && (
               <button className="cb-btn" onClick={deleteSelected}>
                 Delete {selected.size}
@@ -685,6 +746,15 @@ export function TimelinePanel() {
         </>
       }
     >
+      <div className="tl-shell">
+      <SequenceTabs
+        sequences={allSequences}
+        activeId={sequence.id}
+        onRename={(id, name) => renameSequence(id, name)}
+      />
+      {settingsOpen && (
+        <SequenceSettingsDialog sequence={sequence} onClose={() => setSettingsOpen(false)} />
+      )}
       <div className="tl" ref={rootRef}>
         <div className="tl-headers" style={{ width: HEADER_WIDTH }}>
           <div className="tl-header-spacer" />
@@ -781,6 +851,7 @@ export function TimelinePanel() {
         {sequence.clips.length === 0 && (
           <div className="tl-hint">Drag media onto a track — from the browser, or from Explorer</div>
         )}
+      </div>
       </div>
     </PanelFrame>
   )
@@ -887,6 +958,233 @@ function TrackControls({ track, silent }: { track: Track; silent: boolean }) {
         {track.gain <= MIN_GAIN_DB ? '-∞' : `${track.gain > 0 ? '+' : ''}${track.gain.toFixed(1)}`}
       </span>
     </span>
+  )
+}
+
+/**
+ * One tab per sequence, and a `+`.
+ *
+ * The tab strip is the only place a sequence can be switched, which is what
+ * makes it safe for every editing function to work on "the active one" without
+ * asking which — see kernel/sequence.ts.
+ */
+function SequenceTabs({
+  sequences,
+  activeId,
+  onRename,
+}: {
+  sequences: SequenceState[]
+  activeId: string
+  onRename: (id: string, name: string) => void
+}) {
+  const [renaming, setRenaming] = useState<string | null>(null)
+
+  return (
+    <div className="seq-tabs">
+      {sequences.map((one) => (
+        <div
+          key={one.id}
+          className={`seq-tab${one.id === activeId ? ' seq-tab--active' : ''}`}
+          onClick={() => activateSequence(one.id)}
+          onDoubleClick={() => setRenaming(one.id)}
+          title={`${one.name} — ${one.settings.width}×${one.settings.height} at ${one.settings.frameRate}fps`}
+        >
+          {renaming === one.id ? (
+            <input
+              className="seq-tab-name"
+              defaultValue={one.name}
+              autoFocus
+              onFocus={(event) => event.currentTarget.select()}
+              onBlur={(event) => {
+                onRename(one.id, event.currentTarget.value)
+                setRenaming(null)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur()
+                if (event.key === 'Escape') setRenaming(null)
+                event.stopPropagation()
+              }}
+            />
+          ) : (
+            <span className="seq-tab-label">{one.name}</span>
+          )}
+          {sequences.length > 1 && (
+            <button
+              className="seq-tab-close"
+              title={`Close ${one.name}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                removeSequence(one.id)
+              }}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      ))}
+      <button
+        className="seq-tab-add"
+        title="New sequence"
+        onClick={() => createSequence()}
+      >
+        +
+      </button>
+    </div>
+  )
+}
+
+/**
+ * What the sequence *is*: the frame, the rate, and the settings recorded for
+ * later.
+ *
+ * The dialog says which is which. A setting that appears to do something and
+ * does not is worse than one that is honestly labelled, and FLUX has no
+ * exporter and no preview render files yet — so the audio and preview groups
+ * are written to the file and acted on by nothing.
+ */
+function SequenceSettingsDialog({
+  sequence,
+  onClose,
+}: {
+  sequence: SequenceState
+  onClose: () => void
+}) {
+  const s = sequence.settings
+  const number = (value: string, fallback: number) => {
+    const n = Number(value)
+    return Number.isFinite(n) && n > 0 ? n : fallback
+  }
+
+  return (
+    <div className="seq-settings-scrim" onClick={onClose}>
+      <div
+        className="seq-settings"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-label="Sequence settings"
+      >
+        <div className="seq-settings-head">
+          <span className="seq-settings-title">{sequence.name}</span>
+          <button className="cb-btn" onClick={onClose}>
+            Done
+          </button>
+        </div>
+
+        <div className="seq-settings-group">
+          <span className="seq-settings-legend">In force</span>
+          <label className="seq-field">
+            <span>Width</span>
+            <input
+              type="number"
+              value={s.width}
+              min={2}
+              onChange={(e) => updateSequenceSettings({ width: number(e.target.value, s.width) })}
+            />
+          </label>
+          <label className="seq-field">
+            <span>Height</span>
+            <input
+              type="number"
+              value={s.height}
+              min={2}
+              onChange={(e) => updateSequenceSettings({ height: number(e.target.value, s.height) })}
+            />
+          </label>
+          <label className="seq-field">
+            <span>Frame rate</span>
+            <select
+              value={String(s.frameRate)}
+              onChange={(e) => updateSequenceSettings({ frameRate: Number(e.target.value) })}
+            >
+              {[...new Set([...FRAME_RATES, s.frameRate])]
+                .sort((a, b) => a - b)
+                .map((rate) => (
+                  <option key={rate} value={String(rate)}>
+                    {rate} fps
+                  </option>
+                ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="seq-settings-group">
+          <span className="seq-settings-legend">
+            Recorded — saved with the sequence, not yet acted on
+          </span>
+          <label className="seq-field">
+            <span>Sample rate</span>
+            <select
+              value={String(s.audio.sampleRate)}
+              onChange={(e) =>
+                updateSequenceSettings({
+                  audio: { ...s.audio, sampleRate: Number(e.target.value) },
+                })
+              }
+            >
+              {SAMPLE_RATES.map((rate) => (
+                <option key={rate} value={String(rate)}>
+                  {rate} Hz
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="seq-field">
+            <span>Channels</span>
+            <select
+              value={String(s.audio.channels)}
+              onChange={(e) =>
+                updateSequenceSettings({ audio: { ...s.audio, channels: Number(e.target.value) } })
+              }
+            >
+              <option value="1">Mono</option>
+              <option value="2">Stereo</option>
+            </select>
+          </label>
+          <label className="seq-field">
+            <span>Preview codec</span>
+            <select
+              value={s.preview.codec}
+              onChange={(e) =>
+                updateSequenceSettings({ preview: { ...s.preview, codec: e.target.value } })
+              }
+            >
+              {PREVIEW_CODECS.map((codec) => (
+                <option key={codec} value={codec}>
+                  {codec}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="seq-field">
+            <span>Pixel format</span>
+            <select
+              value={s.preview.pixelFormat}
+              onChange={(e) =>
+                updateSequenceSettings({ preview: { ...s.preview, pixelFormat: e.target.value } })
+              }
+            >
+              {PIXEL_FORMATS.map((format) => (
+                <option key={format} value={format}>
+                  {format}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="seq-field seq-field--check">
+            <input
+              type="checkbox"
+              checked={s.preview.cacheFrames}
+              onChange={(e) =>
+                updateSequenceSettings({
+                  preview: { ...s.preview, cacheFrames: e.target.checked },
+                })
+              }
+            />
+            <span>Cache preview frames</span>
+          </label>
+        </div>
+      </div>
+    </div>
   )
 }
 

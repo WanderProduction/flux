@@ -65,6 +65,16 @@ contextBridge.exposeInMainWorld('flux', {
     copyIntoImports: (root, sourcePath) =>
       ipcRenderer.invoke('project:copyIntoImports', root, sourcePath),
     save: (file, document) => ipcRenderer.invoke('project:save', file, document),
+    /**
+     * Sequences are files of their own, in the project's sequences folder. The
+     * folder is the list — see electron/project.js.
+     */
+    listSequences: (root) => ipcRenderer.invoke('project:listSequences', root),
+    saveSequence: (root, document, previousFile) =>
+      ipcRenderer.invoke('project:saveSequence', root, document, previousFile),
+    deleteSequence: (root, file) => ipcRenderer.invoke('project:deleteSequence', root, file),
+    importSequence: (root, sourcePath) =>
+      ipcRenderer.invoke('project:importSequence', root, sourcePath),
     launchTarget: () => ipcRenderer.invoke('project:launchTarget'),
     /**
      * Whether closing would lose work. Pushed, not asked for: main needs the

@@ -266,7 +266,7 @@ export function ViewerPanel() {
 
     let stopped = false
     let drawing = false
-    const { width, height } = sequence
+    const { width, height } = sequence.settings
 
     const draw = async () => {
       if (stopped || drawing) return
@@ -320,7 +320,7 @@ export function ViewerPanel() {
     }
     // `ready` is here so the first draw happens once the sources are open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stack, ready, sequence.width, sequence.height])
+  }, [stack, ready, sequence.settings.width, sequence.settings.height])
 
   // ── the media element: sound, and the clock ───────────────────
 
@@ -545,7 +545,7 @@ export function ViewerPanel() {
         >
           {playing ? '❚❚' : '▶'}
         </button>
-        <span className="tc">{formatTimecode(time, sequence.frameRate)}</span>
+        <span className="tc">{formatTimecode(time, sequence.settings.frameRate)}</span>
         <div
           className="transport-bar"
           ref={barRef}
@@ -560,7 +560,7 @@ export function ViewerPanel() {
           <div className="transport-progress" style={{ width: `${progress * 100}%` }} />
           <div className="transport-playhead" style={{ left: `${progress * 100}%` }} />
         </div>
-        <span className="tc tc--dim">{formatTimecode(duration, sequence.frameRate)}</span>
+        <span className="tc tc--dim">{formatTimecode(duration, sequence.settings.frameRate)}</span>
       </div>
     </PanelFrame>
   )

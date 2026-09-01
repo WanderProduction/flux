@@ -113,6 +113,16 @@ export interface ImportCandidate {
   size?: number
   mtimeMs?: number
   inProject?: boolean
+  /**
+   * What was already known about the file, when the caller knows it.
+   *
+   * A sequence file carries what was probed from its media, so opening one from
+   * another project does not have to decode every clip again to find out how
+   * long it is. Absent, the probe fills them in as usual.
+   */
+  width?: number
+  height?: number
+  duration?: number
 }
 
 /** Returns the assets actually added — already-imported paths are skipped. */
@@ -132,6 +142,9 @@ export function importAssets(candidates: ImportCandidate[]): Asset[] {
       mtimeMs: candidate.mtimeMs ?? 0,
       addedAt: Date.now(),
       inProject: candidate.inProject,
+      ...(candidate.width ? { width: candidate.width } : {}),
+      ...(candidate.height ? { height: candidate.height } : {}),
+      ...(candidate.duration ? { duration: candidate.duration } : {}),
     })
   }
 

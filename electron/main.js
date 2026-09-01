@@ -19,7 +19,17 @@ import {
   sourceToken,
   writeDerived,
 } from './mediaCache.js'
-import { copyIntoImports, createProject, isProject, openProject, saveProject } from './project.js'
+import {
+  copyIntoImports,
+  createProject,
+  deleteSequence,
+  importSequence,
+  isProject,
+  listSequences,
+  openProject,
+  saveProject,
+  saveSequence,
+} from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -291,6 +301,13 @@ ipcMain.on('project:close-confirmed', (event) => {
   closing = true
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
+
+ipcMain.handle('project:listSequences', (_e, root) => listSequences(root))
+ipcMain.handle('project:saveSequence', (_e, root, document, previousFile) =>
+  saveSequence(root, document, previousFile),
+)
+ipcMain.handle('project:deleteSequence', (_e, root, file) => deleteSequence(root, file))
+ipcMain.handle('project:importSequence', (_e, root, sourcePath) => importSequence(root, sourcePath))
 
 ipcMain.handle('project:create', (_e, root, name) => createProject(root, name, app.getVersion()))
 ipcMain.handle('project:open', (_e, root) => openProject(root))

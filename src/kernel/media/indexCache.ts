@@ -187,6 +187,29 @@ export async function forgetIndex(path: string, kind: TrackKind = 'video'): Prom
   await mediaBridge()?.forget(path, ENTRY_NAME[kind]).catch(() => false)
 }
 
+export interface VideoInfo {
+  width: number
+  height: number
+  /** Frames per second, from the sample table rather than a container field. */
+  frameRate: number
+  duration: number
+}
+
+/**
+ * The shape of a file's picture, or null.
+ *
+ * The frame rate comes from counting: samples divided by duration, which is
+ * what the file actually contains. A container's declared rate is a hint an
+ * encoder may have got wrong, and a sequence built on the wrong rate puts every
+ * cut a fraction of a frame out.
+ */
+export async function videoInfoFor(path: string): Promise<VideoInfo | null> {
+  const index = await trackFor(path, 'video')
+  if (!index.ok || !(index.track.duration > 0)) return null
+  const { width, height, count, duration } = index.track
+  return { width, height, duration, frameRate: count / duration }
+}
+
 /** Reads bytes for the demuxer through the same ranged protocol the decoder uses. */
 function rangeReader(url: string) {
   let total: number | null = null

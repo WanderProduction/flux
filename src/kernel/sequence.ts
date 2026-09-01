@@ -1,5 +1,13 @@
+import {
+  defaultSettings,
+  makeSettings,
+  makeSequenceDocument,
+  mediaFor,
+} from '../../shared/sequenceFormat.js'
+
 /**
- * The sequence: tracks, and the clips laid out along them.
+ * Sequences: tracks, the clips laid out along them, and the shape of the thing
+ * being cut.
  *
  * A clip is the first thing in FLUX that *owns time*. In the model from
  * docs/INTERACTION-MODEL.md that is exactly what separates a Timeline-visible
@@ -9,6 +17,20 @@
  * this stays its time placement — not a second, competing source of truth.
  *
  * Times are in seconds throughout, snapped to the frame grid on write.
+ *
+ * ## Several of them, one at a time
+ *
+ * A project holds many sequences and exactly one is active. Everything below
+ * that talks about "the sequence" means the active one, which is what the
+ * timeline is showing — and every editing function works on it, so switching
+ * tabs is the only thing that changes what an edit lands in.
+ *
+ * They are held here together rather than in a module of their own because
+ * there would then be two answers to "what is the sequence": a collection and a
+ * current one, kept in step by hand. One list and one pointer cannot disagree.
+ *
+ * Each is a file: see shared/sequenceFormat.js for what that buys and
+ * kernel/project.ts for when it is written.
  */
 
 export type TrackKind = 'video' | 'audio'
@@ -73,9 +95,18 @@ export function clampGain(db: number): number {
   return Math.min(MAX_GAIN_DB, Math.max(MIN_GAIN_DB, db))
 }
 
-export interface SequenceState {
-  name: string
-  frameRate: number
+/**
+ * What a sequence *is*, as opposed to what is in it.
+ *
+ * The same shape in memory as in the file, deliberately: a settings object that
+ * had to be mapped between two layouts would be two places to add a field and
+ * one place to forget.
+ *
+ * `width`, `height` and `frameRate` drive the app today — the frame the
+ * compositor draws into and the grid the timeline snaps to. `audio` and
+ * `preview` are recorded and not yet acted on; see shared/sequenceFormat.js.
+ */
+export interface SequenceSettings {
   /**
    * The frame everything is composited into.
    *
@@ -86,8 +117,20 @@ export interface SequenceState {
    */
   width: number
   height: number
+  frameRate: number
+  audio: { sampleRate: number; channels: number }
+  preview: { codec: string; pixelFormat: string; cacheFrames: boolean }
+}
+
+export interface SequenceState {
+  id: string
+  name: string
+  settings: SequenceSettings
   tracks: Track[]
   clips: Clip[]
+  createdAt: number
+  /** Absolute path of its `.fluxseq`, once it has been written. */
+  file?: string
 }
 
 /**
@@ -99,14 +142,15 @@ export interface SequenceState {
  * *upward* because a higher layer is in front, audio stacks *downward* because
  * nothing is in front of anything, it all just sums.
  */
-function defaultSequence(): SequenceState {
+function defaultSequence(name = 'Sequence 1'): SequenceState {
   return {
-    name: 'Sequence 1',
-    frameRate: 24,
-    // Replaced by the first clip dropped into an empty sequence, which is what
-    // makes this a default rather than a setting nobody was offered.
-    width: 1920,
-    height: 1080,
+    id: nextId('s'),
+    name,
+    createdAt: Date.now(),
+    // The size is replaced by the first clip dropped into an empty sequence,
+    // which is what makes it a default rather than a setting nobody was
+    // offered.
+    settings: defaultSettings() as SequenceSettings,
     tracks: [
       makeTrack('V2', 'video'),
       makeTrack('V1', 'video'),
@@ -117,17 +161,57 @@ function defaultSequence(): SequenceState {
   }
 }
 
+/*
+ * Ids, defined before anything that makes one.
+ *
+ * The module builds a default sequence as it initialises, and that calls this —
+ * so a counter declared further down would be read before it exists. `let` in
+ * a temporal dead zone throws rather than reading undefined, which is the only
+ * reason this was a crash at startup and not a sequence with an id of `sNaN`.
+ */
+let idCounter = 0
+function nextId(prefix: string): string {
+  idCounter += 1
+  return `${prefix}${Date.now().toString(36)}${idCounter.toString(36)}`
+}
+
 function makeTrack(id: string, kind: TrackKind): Track {
   return { id, kind, name: id, gain: 0, muted: false, solo: false, hidden: false }
 }
 
+/**
+ * The sequence being edited, and every other one in the project.
+ *
+ * Split rather than a list with a pointer into it, and the split is the point:
+ * every editing function below works on `sequence`, so there is no way to
+ * mutate one that is not on screen. Switching tabs is the *only* thing that
+ * changes which that is.
+ *
+ * No sequence lives in both places, so there is nothing to keep in step.
+ * `order` is the tab order, which is the folder's order on load and then
+ * whatever the user has made of it — a list that reshuffled itself when a
+ * sequence was renamed would be its own small bug.
+ */
 let sequence: SequenceState = defaultSequence()
+const others = new Map<string, SequenceState>()
+let order: string[] = [sequence.id]
 let loaded = false
 const listeners = new Set<() => void>()
 
 /** Notifies only; kernel/project.ts owns writing the document. */
 function emit() {
   listeners.forEach((listener) => listener())
+}
+
+/** Every sequence in the project, in tab order. */
+export function listSequences(): SequenceState[] {
+  return order
+    .map((id) => (id === sequence.id ? sequence : others.get(id)))
+    .filter((found): found is SequenceState => Boolean(found))
+}
+
+export function getActiveSequenceId(): string {
+  return sequence.id
 }
 
 export function subscribeSequence(listener: () => void): () => void {
@@ -150,8 +234,175 @@ export function isSequenceLoaded(): boolean {
  */
 export function setSequence(next: SequenceState | null): void {
   sequence = next?.tracks?.length ? normalise(next) : defaultSequence()
+  others.clear()
+  order = [sequence.id]
   loaded = true
   listeners.forEach((listener) => listener())
+}
+
+/**
+ * Replaces every sequence in the project, without marking anything changed.
+ *
+ * The load path. An `active` that names nothing falls back to the first, which
+ * is what happens when a project remembers a sequence whose file has since been
+ * deleted — the alternative is a timeline showing nothing with no way to say
+ * why.
+ */
+export function setSequences(list: SequenceState[], active?: string): void {
+  const normalised = list.filter((one) => one?.tracks?.length).map(normalise)
+  if (normalised.length === 0) {
+    setSequence(null)
+    return
+  }
+
+  others.clear()
+  order = normalised.map((one) => one.id)
+  sequence = normalised.find((one) => one.id === active) ?? normalised[0]
+  for (const one of normalised) {
+    if (one.id !== sequence.id) others.set(one.id, one)
+  }
+  loaded = true
+  listeners.forEach((listener) => listener())
+}
+
+/**
+ * Makes another sequence the one being edited.
+ *
+ * The outgoing one goes back into the collection as it stands, unsaved edits
+ * and all: switching tabs is not a commit, and an edit that vanished because
+ * you looked at something else would be the worst kind of data loss — silent,
+ * and blamed on yourself.
+ */
+export function activateSequence(id: string): boolean {
+  if (id === sequence.id) return false
+  const wanted = others.get(id)
+  if (!wanted) return false
+
+  others.set(sequence.id, sequence)
+  others.delete(id)
+  sequence = wanted
+  emit()
+  return true
+}
+
+/**
+ * Adds a sequence and makes it the one being edited.
+ *
+ * Settings are inherited from the sequence in front unless given, which is
+ * almost always what a second sequence in the same project wants — the same
+ * footage, the same frame, a different cut of it.
+ */
+export function createSequence(options?: {
+  name?: string
+  settings?: Partial<SequenceSettings>
+  activate?: boolean
+}): SequenceState {
+  const taken = new Set(listSequences().map((one) => one.name))
+  let index = listSequences().length + 1
+  let name = options?.name
+  if (!name) {
+    while (taken.has(`Sequence ${index}`)) index += 1
+    name = `Sequence ${index}`
+  }
+
+  const made: SequenceState = {
+    ...defaultSequence(name),
+    settings: makeSettings({ ...sequence.settings, ...options?.settings }) as SequenceSettings,
+  }
+
+  if (options?.activate === false) {
+    others.set(made.id, made)
+  } else {
+    others.set(sequence.id, sequence)
+    sequence = made
+  }
+  order = [...order, made.id]
+  emit()
+  return made
+}
+
+/**
+ * Puts an already-made sequence into the project and opens it.
+ *
+ * The import path. Its id comes with it, and a clash means the same sequence is
+ * already here — so it is given a fresh one rather than replacing what is
+ * there, which is what importing a copy of something should do.
+ */
+export function addSequence(one: SequenceState): SequenceState {
+  const taken = new Set(listSequences().map((each) => each.id))
+  const made = normalise(taken.has(one.id) ? { ...one, id: nextId('s') } : one)
+  others.set(sequence.id, sequence)
+  sequence = made
+  order = [...order, made.id]
+  emit()
+  return made
+}
+
+/** Renames a sequence. Its file moves with it on the next save. */
+export function renameSequence(id: string, name: string): boolean {
+  const trimmed = name.trim()
+  if (!trimmed) return false
+  if (id === sequence.id) {
+    if (sequence.name === trimmed) return false
+    sequence = { ...sequence, name: trimmed }
+  } else {
+    const found = others.get(id)
+    if (!found || found.name === trimmed) return false
+    others.set(id, { ...found, name: trimmed })
+  }
+  emit()
+  return true
+}
+
+/**
+ * Removes a sequence.
+ *
+ * Refuses the last one, for the reason removeTrack refuses the last track: a
+ * project with no sequence has no timeline, and that is a state with no way
+ * back out of it.
+ */
+export function removeSequence(id: string): SequenceState | null {
+  if (order.length <= 1) return null
+  const removed = id === sequence.id ? sequence : others.get(id)
+  if (!removed) return null
+
+  order = order.filter((one) => one !== id)
+  others.delete(id)
+  if (id === sequence.id) {
+    const next = others.get(order[0])
+    if (!next) return null
+    others.delete(next.id)
+    sequence = next
+  }
+  emit()
+  return removed
+}
+
+/** A sequence as its file, with the media its clips refer to. */
+export function sequenceDocument(
+  one: SequenceState,
+  assets: Array<{ id: string }>,
+  appVersion?: string,
+): Record<string, unknown> {
+  return makeSequenceDocument({
+    id: one.id,
+    name: one.name,
+    createdAt: one.createdAt,
+    settings: one.settings,
+    tracks: one.tracks,
+    clips: one.clips,
+    media: mediaFor(one.clips, assets),
+    appVersion,
+  }) as Record<string, unknown>
+}
+
+/** Records where a sequence's file ended up, without counting as an edit. */
+export function noteSequenceFile(id: string, file: string): void {
+  if (id === sequence.id) sequence = { ...sequence, file }
+  else {
+    const found = others.get(id)
+    if (found) others.set(id, { ...found, file })
+  }
 }
 
 /**
@@ -187,22 +438,35 @@ function normalise(next: SequenceState): SequenceState {
     clip.kind ? clip : { ...clip, kind: kindOf.get(clip.trackId) ?? 'video' },
   )
 
-  // A sequence saved before it had a size gets the default rather than a zero,
-  // which would composite into a frame with no pixels in it.
-  const width = Number(next.width) > 0 ? Math.round(Number(next.width)) : 1920
-  const height = Number(next.height) > 0 ? Math.round(Number(next.height)) : 1080
+  /*
+   * Settings, from wherever this arrived with them.
+   *
+   * A sequence written before it was a file of its own carried its frame rate
+   * and size as its own fields; one written after carries a settings object.
+   * Both open, and both save forward in the current shape. makeSettings fills
+   * in whatever is missing, so nothing downstream has to ask which era a
+   * document came from.
+   */
+  const raw = next.settings ?? {
+    width: (next as unknown as { width?: number }).width,
+    height: (next as unknown as { height?: number }).height,
+    frameRate: (next as unknown as { frameRate?: number }).frameRate,
+  }
 
-  return { ...next, width, height, tracks, clips }
+  return {
+    ...next,
+    id: next.id || nextId('s'),
+    name: next.name || 'Sequence 1',
+    createdAt: next.createdAt || Date.now(),
+    settings: makeSettings(raw) as SequenceSettings,
+    tracks,
+    clips,
+  }
 }
 
-let idCounter = 0
-function nextId(prefix: string): string {
-  idCounter += 1
-  return `${prefix}${Date.now().toString(36)}${idCounter.toString(36)}`
-}
 
 /** Snap to the frame grid, so clips can never land on fractional frames. */
-export function snapToFrame(seconds: number, frameRate = sequence.frameRate): number {
+export function snapToFrame(seconds: number, frameRate = sequence.settings.frameRate): number {
   return Math.max(0, Math.round(seconds * frameRate) / frameRate)
 }
 
@@ -213,7 +477,7 @@ export function snapToFrame(seconds: number, frameRate = sequence.frameRate): nu
  * Running a drag delta through it would silently turn every leftward move into
  * a move to zero.
  */
-export function snapDelta(seconds: number, frameRate = sequence.frameRate): number {
+export function snapDelta(seconds: number, frameRate = sequence.settings.frameRate): number {
   return Math.round(seconds * frameRate) / frameRate
 }
 
@@ -485,6 +749,21 @@ export function isTrackVisible(track: Track): boolean {
 }
 
 /**
+ * Changes some of the active sequence's settings.
+ *
+ * A partial rather than the whole object, because almost every caller is
+ * changing one thing — and a settings dialog that had to hand back every field
+ * it did not touch is a dialog that can drop one.
+ */
+export function updateSequenceSettings(change: Partial<SequenceSettings>): boolean {
+  const settings = makeSettings({ ...sequence.settings, ...change }) as SequenceSettings
+  if (JSON.stringify(settings) === JSON.stringify(sequence.settings)) return false
+  sequence = { ...sequence, settings }
+  emit()
+  return true
+}
+
+/**
  * Sets the frame everything is composited into.
  *
  * Called when the first clip lands in an empty sequence, so the output matches
@@ -494,11 +773,7 @@ export function isTrackVisible(track: Track): boolean {
  */
 export function setSequenceSize(width: number, height: number): boolean {
   if (!(width > 0) || !(height > 0)) return false
-  const next = { width: Math.round(width), height: Math.round(height) }
-  if (sequence.width === next.width && sequence.height === next.height) return false
-  sequence = { ...sequence, ...next }
-  emit()
-  return true
+  return updateSequenceSettings({ width: Math.round(width), height: Math.round(height) })
 }
 
 /**
@@ -682,6 +957,8 @@ export function sequenceDuration(): number {
  */
 export function resetSequence(): void {
   sequence = defaultSequence()
+  others.clear()
+  order = [sequence.id]
   loaded = false
   listeners.forEach((listener) => listener())
 }

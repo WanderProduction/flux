@@ -28,12 +28,17 @@ import {
   type ImportMode,
 } from './importMode'
 import {
-  getSequence,
+  addSequence,
+  getActiveSequenceId,
+  listSequences,
+  noteSequenceFile,
   resetSequence,
-  setSequence,
+  sequenceDocument,
+  setSequences,
   subscribeSequence,
   type SequenceState,
 } from './sequence'
+import { importAssets, type ImportCandidate } from './assets'
 import { getView, resetView, setView, type ViewState } from './view'
 import { loadStore, saveStore } from './store'
 import { DOCUMENT_FORMAT } from '../../shared/projectFormat.js'
@@ -47,13 +52,37 @@ export interface ProjectDocument {
   /** Workspace, timeline zoom, where the browser was. Never marks work unsaved. */
   view?: ViewState
   assets: Asset[]
-  sequence: SequenceState | null
+  /**
+   * The sequence, for projects written before sequences were files.
+   *
+   * Read on open and never written again: an embedded copy that stayed would be
+   * a second answer to what the timeline holds, and the two would drift the
+   * first time one was saved without the other.
+   */
+  sequence?: SequenceState | null
+  /** Which sequence was open. The set of them is the sequences folder. */
+  activeSequence?: string
+}
+
+/** A media reference carried inside a sequence file. See shared/sequenceFormat.js. */
+export interface SequenceMedia {
+  id: string
+  path: string
+  name: string
+  kind: 'video' | 'image'
+  size?: number
+  mtimeMs?: number
+  width?: number
+  height?: number
+  duration?: number
 }
 
 export interface Project extends ProjectDocument {
   root: string
   /** Absolute path of the .flux document, inside project_files. */
   file: string
+  /** Read from the sequences folder on open, not from the document. */
+  sequences?: Array<SequenceState & { file: string; media?: SequenceMedia[] }>
 }
 
 export type ProjectError =
@@ -89,6 +118,17 @@ interface ProjectBridge {
   open: (target: string) => Promise<OpenResult>
   is: (root: string) => Promise<boolean>
   save: (file: string, document: ProjectDocument) => Promise<{ ok: boolean; error?: string }>
+  listSequences: (root: string) => Promise<Array<SequenceState & { file: string; media?: SequenceMedia[] }>>
+  saveSequence: (
+    root: string,
+    document: Record<string, unknown>,
+    previousFile?: string,
+  ) => Promise<{ ok: boolean; file?: string; error?: string }>
+  deleteSequence: (root: string, file: string) => Promise<{ ok: boolean; error?: string }>
+  importSequence: (
+    root: string,
+    sourcePath: string,
+  ) => Promise<{ ok: boolean; file?: string; sequence?: SequenceState & { media?: SequenceMedia[] }; error?: string }>
   copyIntoImports: (root: string, sourcePath: string) => Promise<CopyResult>
   /** A .flux path passed on the command line, when FLUX was launched with one. */
   launchTarget: () => Promise<string | null>
@@ -194,7 +234,61 @@ export function buildDocument(): ProjectDocument | null {
     settings: { importMode: getImportMode() },
     view: getView(),
     assets: getAssets(),
-    sequence: getSequence(),
+    // The sequences themselves are files; the document only remembers which
+    // one was open. See shared/sequenceFormat.js.
+    activeSequence: getActiveSequenceId(),
+  }
+}
+
+/**
+ * Resolves a sequence's media against this project's assets.
+ *
+ * A sequence carries the files its clips refer to, so one made elsewhere can
+ * open here — and its clips reference asset ids that mean nothing in this
+ * project. Files are matched by **path**: one already in the bin is used, and
+ * anything new is linked where it lies, exactly as importing by link does.
+ *
+ * Then the clips are remapped onto whatever id this project uses for that file.
+ * Not the other way round — adopting the sequence's ids would mean two projects
+ * eventually claiming one id for two different files, and a clip pointing at
+ * the wrong footage is a worse failure than an extra pass over the clip list.
+ */
+function resolveSequenceMedia(one: SequenceState & { media?: SequenceMedia[] }): SequenceState {
+  const media = one.media ?? []
+  if (media.length === 0) return one
+
+  const byPath = () => new Map(getAssets().map((asset) => [asset.path.toLowerCase(), asset]))
+  let known = byPath()
+
+  const missing: ImportCandidate[] = media
+    .filter((item) => !known.has(item.path.toLowerCase()))
+    .map((item) => ({
+      path: item.path,
+      kind: item.kind,
+      name: item.name,
+      size: item.size,
+      mtimeMs: item.mtimeMs,
+      width: item.width,
+      height: item.height,
+      duration: item.duration,
+    }))
+  if (missing.length > 0) {
+    importAssets(missing)
+    known = byPath()
+  }
+
+  const remap = new Map<string, string>()
+  for (const item of media) {
+    const asset = known.get(item.path.toLowerCase())
+    if (asset && asset.id !== item.id) remap.set(item.id, asset.id)
+  }
+  if (remap.size === 0) return one
+
+  return {
+    ...one,
+    clips: one.clips.map((clip) =>
+      remap.has(clip.assetId) ? { ...clip, assetId: remap.get(clip.assetId) as string } : clip,
+    ),
   }
 }
 
@@ -275,7 +369,9 @@ function adopt(project: Project, startDirty: boolean) {
   current = project
 
   setAssets(project.assets ?? [])
-  setSequence(project.sequence ?? null)
+  // Media before sequences: the clips are remapped onto this project's asset
+  // ids on the way in, so nothing downstream ever sees an id from elsewhere.
+  setSequences((project.sequences ?? []).map(resolveSequenceMedia), project.activeSequence)
   setImportMode(project.settings?.importMode ?? 'ask', { persist: false })
   setView(project.view)
 
@@ -293,17 +389,40 @@ function adopt(project: Project, startDirty: boolean) {
   })
 }
 
+/**
+ * Reads the project's sequences off disk, or migrates the one it used to carry.
+ *
+ * The sequences folder is the list. A project written before sequences were
+ * files has one inside the document instead: it is brought across here and
+ * written out on the next save, which is why such a project opens with unsaved
+ * work — the same as any other migration.
+ */
+async function withSequences(project: Project): Promise<Project & { migratedSequence?: boolean }> {
+  const sequences = await requireProject()
+    .listSequences(project.root)
+    .catch(() => [])
+
+  if (sequences.length > 0) return { ...project, sequences }
+  if (!project.sequence) return { ...project, sequences: [] }
+  return {
+    ...project,
+    sequences: [project.sequence as SequenceState & { file: string }],
+    migratedSequence: true,
+  }
+}
+
 export async function createProject(parent: string, name: string): Promise<ProjectResult> {
   const result = await requireProject().create(parent, name)
-  if (result.ok) adopt(result.project, false)
+  if (result.ok) adopt({ ...result.project, sequences: [] }, false)
   return result
 }
 
 export async function openProject(target: string): Promise<ProjectResult> {
   const result = await requireProject().open(target)
   if (result.ok && result.project) {
-    adopt(result.project, Boolean(result.dirty))
-    return { ok: true, project: result.project }
+    const project = await withSequences(result.project)
+    adopt(project, Boolean(result.dirty) || project.migratedSequence === true)
+    return { ok: true, project }
   }
   if (result.error === 'not-a-project') {
     // Keep the list honest the moment we learn an entry is bad.
@@ -311,6 +430,25 @@ export async function openProject(target: string): Promise<ProjectResult> {
     emit()
   }
   return { ok: false, error: result.error ?? 'unreadable' }
+}
+
+/**
+ * Copies a `.fluxseq` into this project and opens it.
+ *
+ * The media it names is resolved the same way a sequence read at open time is,
+ * so one made in another project arrives with its clips pointing at this
+ * project's assets — see resolveSequenceMedia.
+ */
+export async function importSequenceFile(
+  sourcePath: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!current) return { ok: false, error: 'no-project' }
+  const result = await requireProject().importSequence(current.root, sourcePath)
+  if (!result.ok || !result.sequence) return { ok: false, error: result.error ?? 'unreadable' }
+
+  const resolved = resolveSequenceMedia(result.sequence)
+  addSequence({ ...resolved, file: result.file })
+  return { ok: true }
 }
 
 export function closeProject() {
@@ -328,7 +466,19 @@ export async function saveProject(): Promise<{ ok: boolean; error?: string }> {
 
   saving = true
   emit()
-  const result = await requireProject().save(current.file, document)
+
+  /*
+   * The sequences first, then the document.
+   *
+   * A document that named a sequence whose file had not been written would
+   * point at nothing, and the project would open with an empty timeline. The
+   * other order fails safely: a sequence on disk that the document does not
+   * name yet is still found, because the folder is the list.
+   */
+  const sequenceError = await writeSequences(current.root)
+  const result = sequenceError
+    ? { ok: false, error: sequenceError }
+    : await requireProject().save(current.file, document)
   saving = false
 
   if (result.ok) {
@@ -337,6 +487,41 @@ export async function saveProject(): Promise<{ ok: boolean; error?: string }> {
   }
   emit()
   return result
+}
+
+/**
+ * Writes every sequence to its own file, and removes the files of any that have
+ * been deleted since the last save.
+ *
+ * All of them, not just the ones that changed. A sequence is a few kilobytes of
+ * JSON, and tracking which are dirty would be a second bookkeeping system whose
+ * only job is to be wrong occasionally.
+ */
+async function writeSequences(root: string): Promise<string | null> {
+  const bridge = requireProject()
+  const assets = getAssets()
+  const live = new Set<string>()
+
+  for (const one of listSequences()) {
+    const written = await bridge.saveSequence(
+      root,
+      sequenceDocument(one, assets, current?.flux.version),
+      one.file,
+    )
+    if (!written.ok) return written.error ?? 'write-failed'
+    if (written.file) {
+      noteSequenceFile(one.id, written.file)
+      live.add(written.file.toLowerCase())
+    }
+  }
+
+  // Anything left in the folder that is no longer in the project was deleted
+  // in this session. The folder is the list, so it has to be told.
+  const onDisk = await bridge.listSequences(root).catch(() => [])
+  for (const stale of onDisk) {
+    if (!live.has(stale.file.toLowerCase())) await bridge.deleteSequence(root, stale.file)
+  }
+  return null
 }
 
 // ── main-process conversations ────────────────────────────────

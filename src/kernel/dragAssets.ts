@@ -17,6 +17,7 @@
  */
 
 import { mediaKindOf } from '../../shared/mediaTypes.js'
+import { SEQUENCE_EXTENSION } from '../../shared/sequenceFormat.js'
 import type { MediaKind } from './fsBridge'
 
 export const ASSET_DRAG_TYPE = 'application/x-flux-assets'
@@ -57,6 +58,39 @@ export function isDroppableDrag(event: React.DragEvent): boolean {
   return isAssetDrag(event) || isFileDrag(event) || isNativeFileDrag(event)
 }
 
+/**
+ * Paths of any `.fluxseq` in a drop.
+ *
+ * A sequence is not footage and does not become a clip, so it is picked out
+ * before the media path rather than after — `readNativeFileDrag` drops anything
+ * that is not decodable media, which a sequence is not.
+ */
+export function sequenceFilesIn(event: React.DragEvent): string[] {
+  const bridge = (globalThis as { flux?: FilePathBridge }).flux
+  const pathForFile = bridge?.fs?.pathForFile
+  if (!pathForFile || !isNativeFileDrag(event)) return []
+
+  const found: string[] = []
+  for (const file of Array.from(event.dataTransfer.files)) {
+    const path = pathForFile(file)
+    if (path && isSequenceFile(path)) found.push(path)
+  }
+  return found
+}
+
+/**
+ * Whether a drop carries a sequence.
+ *
+ * Checked from the file *names* during dragover, where the real paths are not
+ * available: a drag in progress exposes only types and item kinds. The names
+ * are enough to decide whether to accept the drop, and the paths are read on
+ * the drop itself.
+ */
+export function hasSequenceFile(event: React.DragEvent): boolean {
+  if (!isNativeFileDrag(event)) return false
+  return Array.from(event.dataTransfer.files).some((file) => isSequenceFile(file.name))
+}
+
 export function readAssetDragPayload(event: React.DragEvent): string[] {
   try {
     const parsed: unknown = JSON.parse(event.dataTransfer.getData(ASSET_DRAG_TYPE))
@@ -82,6 +116,10 @@ export function readFileDragPayload(event: React.DragEvent): DraggedFile[] {
 
 interface FilePathBridge {
   fs?: { pathForFile?: (file: File) => string }
+}
+
+function isSequenceFile(name: string): boolean {
+  return name.toLowerCase().endsWith(SEQUENCE_EXTENSION)
 }
 
 /**

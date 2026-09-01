@@ -183,12 +183,16 @@ try {
     assert.deepEqual(api, [
       'copyIntoImports',
       'create',
+      'deleteSequence',
+      'importSequence',
       'is',
       'launchTarget',
+      'listSequences',
       'onOpenTarget',
       'onSaveAndClose',
       'open',
       'save',
+      'saveSequence',
       'setUnsaved',
     ])
   })
