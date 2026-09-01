@@ -32,6 +32,7 @@ import { mediaKindOf } from '../../shared/mediaTypes.js'
 import { IMPORTS_DIR, projectChildPath } from '../../shared/projectNaming.js'
 import { PanelFrame } from './PanelFrame'
 import { AssetThumb } from './AssetThumb'
+import { useSound } from './useSound'
 import { TreeView, useDiskTree } from './FolderTree'
 
 /**
@@ -790,6 +791,11 @@ function FileCard({
 }) {
   const missing = asset?.missing ?? false
 
+  // Said here rather than only at the drop: whether a file has sound is a fact
+  // about the file, and knowing it before you drag it is what stops a silent
+  // clip reading as a broken timeline.
+  const sound = useSound(path, kind, !missing)
+
   return (
     <div
       data-asset-id={asset?.id}
@@ -826,6 +832,23 @@ function FileCard({
       {asset && !asset.inProject && (
         <span className="card-badge card-badge--linked" title={`Linked from ${path}`}>
           linked
+        </span>
+      )}
+
+      {sound?.kind === 'silent' && (
+        <span
+          className="card-badge card-badge--silent"
+          title="This file has no soundtrack, so it drops as picture alone"
+        >
+          no audio
+        </span>
+      )}
+      {sound?.kind === 'unreadable' && (
+        <span
+          className="card-badge card-badge--silent"
+          title={`FLUX cannot read this file's audio yet (${sound.detail})`}
+        >
+          audio ?
         </span>
       )}
 

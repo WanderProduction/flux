@@ -251,6 +251,9 @@ export async function requireFixtures(cdp, mediaDir) {
   // layer_red and layer_blue are a landscape clip and a portrait one, in flat
   // colours: the only way to see whether a composite drew both layers is for
   // the layers to be told apart at a glance.
+  // foreign_audio.mp4 carries audio FLUX cannot decode, which is a different
+  // thing from having none: clipA.mp4 is genuinely silent, and the app has to
+  // say which is which rather than showing one answer for both.
   for (const required of [
     'clipA.mp4',
     'still.jpg',
@@ -258,6 +261,7 @@ export async function requireFixtures(cdp, mediaDir) {
     'voice_over.mp4',
     'layer_red.mp4',
     'layer_blue.mp4',
+    'foreign_audio.mp4',
   ]) {
     if (!names.includes(required)) {
       throw new Error(`fixture ${required} missing from ${mediaDir}`)

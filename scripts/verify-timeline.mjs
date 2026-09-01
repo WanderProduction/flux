@@ -1230,6 +1230,114 @@ try {
     assert.deepEqual(state, [{ kind: 'video', link: null }])
   })
 
+  /*
+   * A silent file used to land as picture alone with nothing said about it,
+   * which is indistinguishable from the audio half of the app being broken —
+   * and that is exactly how it was reported. These three checks are the app
+   * saying which: on the card before the drag, and on the timeline after the
+   * drop, in different words for "there is no sound" and "FLUX cannot read the
+   * sound that is there".
+   */
+  await check('a file with no sound says so on its card, before it is dragged', async () => {
+    const state = await evaluate(
+      cdp,
+      `const badgeOn = (name) => {
+         const card = [...document.querySelectorAll('.card')]
+           .find(c => c.querySelector('.card-name')?.textContent === name);
+         if (!card) throw new Error('no card named ' + name);
+         const badge = card.querySelector('.card-badge--silent');
+         return badge ? badge.textContent.trim() : null;
+       };
+       // The badge is asked for asynchronously - six ranged reads - so wait for
+       // the answer rather than for a duration.
+       for (let i = 0; i < 40 && badgeOn('clipA.mp4') === null; i++)
+         await new Promise(r => setTimeout(r, 250));
+       return {
+         silent: badgeOn('clipA.mp4'),
+         foreign: badgeOn('foreign_audio.mp4'),
+         sounded: badgeOn('voice_over.mp4'),
+       };`,
+    )
+    assert.equal(state.silent, 'no audio', 'a file with no soundtrack should say so')
+    assert.equal(state.foreign, 'audio ?', 'audio FLUX cannot read is a different answer')
+    assert.equal(state.sounded, null, 'and a file with sound says nothing at all')
+  })
+
+  await check('a silent file explains itself when it drops', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `return {
+           notice: document.querySelector('.tl-notice')?.textContent ?? null,
+           clips: window.__fluxDev.sequence.getSequence().clips.length,
+         };`,
+    )
+    assert.equal(state.clips, 1, 'the picture still lands')
+    assert.ok(state.notice, 'a drop that placed no sound has to say why')
+    assert.ok(
+      state.notice.includes('clipA.mp4') && state.notice.includes('no soundtrack'),
+      `the notice should name the file and the reason, got: ${state.notice}`,
+    )
+  })
+
+  await check('audio FLUX cannot read is not called silence', async () => {
+    // The difference is the whole point of saying anything: one is a fact about
+    // the footage and the other is a fact about FLUX, and telling someone the
+    // second is the first sends them looking for a fault in their own file.
+    const state = await evaluate(
+      cdp,
+      dropOne('foreign_audio.mp4', 1) +
+        `return document.querySelector('.tl-notice')?.textContent ?? null;`,
+    )
+    assert.ok(state, 'a file whose audio cannot be read has to say so')
+    assert.ok(
+      state.includes('cannot read') && state.includes('ac-3'),
+      `the notice should name what stopped it, got: ${state}`,
+    )
+    assert.ok(!state.includes('no soundtrack'), 'and must not claim the file is silent')
+  })
+
+  await check('sound with nowhere to go gets a track of its own', async () => {
+    /*
+     * Both audio tracks busy at the moment the picture lands. The sound cannot
+     * slide along to the next gap - that would put it out of sync with its own
+     * picture - so the only answer that keeps the pair together is a new track,
+     * which is what every NLE does. It used to be dropped silently.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, view } = window.__fluxDev;
+       sequence.setSequence(null);
+       view.recordView({ timeline: { zoom: 60 } });
+       await new Promise(r => setTimeout(r, 200));
+
+       // Lane 2 is A1: this both imports the fixture and fills A1 from zero.
+       await window.__drag('voice_over.mp4', 2, 0, 60);
+       await new Promise(r => setTimeout(r, 300));
+       const laid = sequence.getSequence().clips[0];
+       sequence.addClip({ assetId: laid.assetId, trackId: 'A2', start: 0, duration: laid.duration });
+
+       // Lane 0 is V2, which is empty, so the picture lands at zero and the
+       // sound has to be at zero with it.
+       await window.__drag('voice_over.mp4', 0, 0, 60);
+       await new Promise(r => setTimeout(r, 300));
+
+       const seq = sequence.getSequence();
+       return {
+         tracks: seq.tracks.map(t => t.id),
+         clips: seq.clips.map(c => ({ track: c.trackId, kind: c.kind, start: c.start, link: c.linkId ?? null })),
+         notice: document.querySelector('.tl-notice')?.textContent ?? null,
+       };`,
+    )
+    assert.ok(state.tracks.includes('A3'), `a track should have been made, got ${state.tracks}`)
+    const video = state.clips.find((c) => c.kind === 'video')
+    const made = state.clips.find((c) => c.track === 'A3')
+    assert.ok(video && made, 'the pair should both exist')
+    assert.equal(made.start, video.start, 'a pair that starts at two moments is a sync error')
+    assert.ok(made.link && made.link === video.link, 'and the two halves must share a link')
+    assert.equal(state.notice, null, 'nothing to explain: the sound was placed')
+  })
+
   await check('dragging the picture takes the sound with it', async () => {
     const state = await evaluate(
       cdp,

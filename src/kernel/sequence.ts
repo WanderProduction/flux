@@ -583,9 +583,10 @@ export function addClip({ assetId, trackId, start, duration, linkId }: NewClip):
  * Drops a file's picture and its sound as one linked pair.
  *
  * The audio goes on the first audio track that can take it at the same moment,
- * so a linked pair starts life in sync. If none can, the video is placed alone
- * rather than nothing being placed at all — a timeline that refuses a drop
- * because the audio tracks are busy would be a strange thing to explain.
+ * so a linked pair starts life in sync. If none can, a new audio track is made
+ * for it — which is what every NLE does, and the only answer that keeps the
+ * pair together. Sliding the sound along to the next free gap would put it out
+ * of sync with its own picture, and dropping it would lose it silently.
  *
  * `start` is honoured for the video; the audio follows it. Placing them
  * independently would let the two halves of one take land at different moments,
@@ -599,10 +600,14 @@ export function addLinkedClips(
   const video = addClip({ assetId, trackId, start, duration, linkId })
   if (!video || !withAudio) return { video, audio: null }
 
-  const free = sequence.tracks.find(
-    (track) => track.kind === 'audio' && findFreeStart(track.id, video.start, duration) === video.start,
-  )
-  if (!free) {
+  const free =
+    sequence.tracks.find(
+      (track) =>
+        track.kind === 'audio' && findFreeStart(track.id, video.start, duration) === video.start,
+    ) ?? addTrack('audio')
+
+  const audio = addClip({ assetId, trackId: free.id, start: video.start, duration, linkId })
+  if (!audio) {
     // Nothing to link to. Strip the link rather than leaving a clip pointing at
     // a partner that was never made.
     sequence = {
@@ -615,7 +620,6 @@ export function addLinkedClips(
     return { video, audio: null }
   }
 
-  const audio = addClip({ assetId, trackId: free.id, start: video.start, duration, linkId })
   return { video, audio }
 }
 

@@ -811,6 +811,27 @@ kbd {
   pointer-events: none;
 }
 
+/* Why the last drop placed less than it looked like it would. */
+.tl-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 4px 10px;
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  border: 1px solid color-mix(in srgb, var(--flux-warn) 55%, var(--flux-border));
+  color: var(--flux-text-dim);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  text-align: center;
+  cursor: pointer;
+}
+.tl-notice:hover {
+  color: var(--flux-text);
+}
+
 /* ── Node Map ──────────────────────────────────────────────── */
 
 .nodemap {
@@ -1221,6 +1242,15 @@ kbd {
   text-transform: uppercase;
   background: color-mix(in srgb, var(--flux-audio) 28%, rgba(0, 0, 0, 0.65));
   color: #cdf5e4;
+}
+
+/* A file with no soundtrack, so it can only ever drop as picture.
+   Stacked above the in-project badge rather than beside it: a card is 124px at
+   its narrowest and two badges on one line would collide there. */
+.card-badge--silent {
+  bottom: 52px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--flux-text-faint);
 }
 
 /* An asset whose file was left where it was, so the project does not own it. */

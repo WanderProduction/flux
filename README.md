@@ -54,6 +54,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 | **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
 | **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
+| **No sound, said out loud** | A file with none says so on its card and on the drop, rather than landing as picture alone in silence. |
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 | **Level, mute, solo** | Per track, in decibels, saved with the project. |
 | **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
@@ -358,10 +359,36 @@ clip whose kind and track disagree, which every other rule in the sequence assum
 Dropped on an audio track, a file arrives as its sound alone. A file with no sound is refused there
 rather than laid down as a silent block.
 
-A file with **no audio track at all** lands as a picture and nothing else, which is correct and says
-nothing — dropping a silent file then looks exactly like dropping one whose sound failed to arrive,
-and the only difference is a thing that is not there. So the Viewer's toolbar reports what sound the
-clip under the playhead has: `2ch 48k`, or `none`.
+**Sound that has nowhere to go gets a track made for it.** If every audio track is busy at the
+moment the picture lands, the sound cannot slide along to the next gap — that would put it out of
+sync with its own picture — and dropping it would lose it. A new track is the only answer that keeps
+the pair together, and it is what every NLE does.
+
+**A file with no audio says so, rather than quietly landing as a picture.** This was reported as the
+audio half of the app being broken, and the report was fair: the footage was shot without a
+microphone, FLUX did exactly the right thing, and *the only evidence was a thing that was not
+there*. An absence cannot be read. So it is said twice — on the card before the drag, and on the
+timeline after the drop.
+
+The card carries it because whether a file has sound is a fact about the file, knowable before you
+drag it. It costs the audio sample table and nothing more: six ranged reads the first time, memory
+afterwards, no decode (see [Indexing once](#indexing-once)). The drop carries it because that is the
+moment the question is being asked.
+
+And there are **two ways to have no sound**, which are not the same thing:
+
+| | The card | The timeline |
+|---|---|---|
+| No soundtrack at all | `no audio` | *name* has no soundtrack — it dropped as picture alone |
+| Audio FLUX cannot read | `audio ?` | *name*: FLUX cannot read this file's audio yet (`unsupported-codec:ac-3`) |
+
+The first is a fact about the footage; the second is a fact about FLUX, and will change when the
+demuxer grows. Saying the second as the first would send someone looking for a fault in their own
+file, so `media/peaks.ts` returns three answers where it used to return two.
+
+The notice clears itself after seven seconds, and every drop answers for itself — a complaint left
+over from the previous drop would be describing a clip you had already stopped thinking about. The
+Viewer's toolbar keeps reporting what sound the clip under the playhead has: `2ch 48k`, or `none`.
 
 The waveform comes from [`shared/peaks.js`](shared/peaks.js): the audio decoded once, end to end,
 and reduced to the loudest sample in each direction per bucket. This is what Premiere's `.pek` files
@@ -923,6 +950,14 @@ ffmpeg -y -f lavfi -i "color=c=red:size=1280x720:rate=25:duration=6" -f lavfi -i
 
 ```bash
 ffmpeg -y -f lavfi -i "color=c=blue:size=480x640:rate=25:duration=6" -f lavfi -i "sine=frequency=900:duration=6" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k -g 25 -c:a aac -b:a 96k -shortest ~/flux-media-test/layer_blue.mp4
+```
+
+One fixture has audio FLUX cannot read. `foreign_audio.mp4` carries AC-3, which the demuxer refuses
+as an unsupported codec — the point being that this is *not* the same as `clipA.mp4`, which has no
+soundtrack at all, and the app has to say which of the two it is looking at:
+
+```bash
+ffmpeg -y -f lavfi -i "color=c=green:size=320x180:rate=25:duration=4" -f lavfi -i "sine=frequency=440:duration=4" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 150k -g 25 -c:a ac3 -b:a 96k -shortest ~/flux-media-test/foreign_audio.mp4
 ```
 
 One fixture is loud and quiet on a schedule. `voice_over.mp4` alternates two seconds at 0.9 with two

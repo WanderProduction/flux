@@ -114,6 +114,35 @@ export interface AudioInfo {
 }
 
 /**
+ * Whether a file has sound, and if not, which kind of "not".
+ *
+ * Three answers rather than two, because the difference matters to whoever is
+ * looking at the timeline wondering where their audio block went. A file shot
+ * without a microphone is *silent* and there is nothing to place; a file whose
+ * audio FLUX cannot yet read is *unreadable* and there is something to place
+ * once the demuxer grows — and telling someone the second is the first would be
+ * a lie they could act on, by going to look for a fault in their footage.
+ */
+export type AudioState =
+  | ({ kind: 'sound' } & AudioInfo)
+  | { kind: 'silent' }
+  | { kind: 'unreadable'; detail: string }
+
+export async function audioStateFor(path: string): Promise<AudioState> {
+  const index = await trackFor(path, 'audio')
+  if (index.ok) {
+    const { channels, sampleRate, duration } = index.track
+    return { kind: 'sound', channels, sampleRate, duration }
+  }
+  // The demuxer's own words for "this file has no soundtrack". Every other
+  // reason it can give — an unsupported codec, a fragmented file, a malformed
+  // box — is about FLUX, not about the footage.
+  return index.reason === 'no-audio-track'
+    ? { kind: 'silent' }
+    : { kind: 'unreadable', detail: index.reason }
+}
+
+/**
  * What audio a file has, or null if it has none.
  *
  * Reads the audio track's index and nothing more — six ranged requests the
@@ -123,10 +152,10 @@ export interface AudioInfo {
  * what the sound looks like whenever.
  */
 export async function audioInfoFor(path: string): Promise<AudioInfo | null> {
-  const index = await trackFor(path, 'audio')
-  if (!index.ok) return null
-  const { channels, sampleRate, duration } = index.track
-  return { channels, sampleRate, duration }
+  const state = await audioStateFor(path)
+  return state.kind === 'sound'
+    ? { channels: state.channels, sampleRate: state.sampleRate, duration: state.duration }
+    : null
 }
 
 interface MediaBridge {

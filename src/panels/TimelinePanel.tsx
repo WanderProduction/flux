@@ -23,7 +23,7 @@ import {
   seek,
   subscribePlayback,
 } from '../kernel/playback'
-import { audioInfoFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
+import { audioStateFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
 import { videoInfoFor } from '../kernel/media/indexCache'
 import { peakRange } from '../../shared/peaks.js'
 import {
@@ -81,6 +81,16 @@ import { useThumbnail } from './useThumbnail'
 
 const TRACK_HEIGHT = 46
 const HEADER_WIDTH = 118
+
+/**
+ * How long a drop's explanation stays on screen.
+ *
+ * Long enough to read a sentence twice, short enough that it is gone before the
+ * next drop — a message that outlived what it was about would be worse than
+ * none, because it would be describing a clip you had already stopped thinking
+ * about. Clicking it dismisses it sooner.
+ */
+const NOTICE_MS = 7000
 
 /** Frame rates are counted, so they land on things like 29.970029. */
 const round = (fps: number) => Math.round(fps * 1000) / 1000
@@ -180,6 +190,14 @@ export function TimelinePanel() {
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
   const [drag, setDrag] = useState<ClipDrag | null>(null)
+  /**
+   * Why the last drop did less than it looked like it should.
+   *
+   * Held here rather than shouted through a dialog: a file with no soundtrack
+   * is a thing to know, not a thing to acknowledge, and a modal in the middle
+   * of laying out an edit would be worse than the silence it replaces.
+   */
+  const [notice, setNotice] = useState<string | null>(null)
   const lanesRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const headersRef = useRef<HTMLDivElement>(null)
@@ -564,6 +582,11 @@ export function TimelinePanel() {
       const ids = await idsFromDrop(event)
       if (ids.length === 0) return
 
+      // What the drop could not do, in the words of whoever is watching it.
+      // A clip that arrives without its sound looks identical to a broken
+      // timeline unless the timeline says which it was.
+      const notices: string[] = []
+
       // Sequential so several assets dropped together land end to end rather
       // than all resolving against the same free slot.
       let cursor = dropTime
@@ -572,7 +595,14 @@ export function TimelinePanel() {
         if (!asset || asset.missing || asset.unreadable || !asset.duration) continue
 
         // Cheap: the audio track's index, not its waveform. See media/peaks.ts.
-        const hasAudio = Boolean(await audioInfoFor(asset.path))
+        const sound = await audioStateFor(asset.path)
+        const hasAudio = sound.kind === 'sound'
+        const silence =
+          sound.kind === 'silent'
+            ? `${asset.name} has no soundtrack`
+            : sound.kind === 'unreadable'
+              ? `${asset.name}: FLUX cannot read this file's audio yet (${sound.detail})`
+              : null
 
         /*
          * The first clip into an empty sequence decides what the sequence is.
@@ -588,15 +618,14 @@ export function TimelinePanel() {
          */
         if (getSequence().clips.length === 0) {
           const video = await videoInfoFor(asset.path)
-          const audio = await audioInfoFor(asset.path)
           updateSequenceSettings({
             ...(video
               ? { width: video.width, height: video.height, frameRate: round(video.frameRate) }
               : asset.width && asset.height
                 ? { width: asset.width, height: asset.height }
                 : {}),
-            ...(audio
-              ? { audio: { sampleRate: audio.sampleRate, channels: audio.channels } }
+            ...(sound.kind === 'sound'
+              ? { audio: { sampleRate: sound.sampleRate, channels: sound.channels } }
               : {}),
           })
         }
@@ -609,7 +638,10 @@ export function TimelinePanel() {
          * be able to contain.
          */
         if (track.kind === 'audio') {
-          if (!hasAudio) continue
+          if (!hasAudio) {
+            notices.push(`${silence}, so there is nothing to put on an audio track`)
+            continue
+          }
           const clip = addClip({
             assetId,
             trackId: track.id,
@@ -625,10 +657,29 @@ export function TimelinePanel() {
           hasAudio,
         )
         if (video) cursor = video.start + video.duration
+        if (video && silence) notices.push(`${silence} — it dropped as picture alone`)
       }
+
+      // Cleared as well as set: every drop answers for itself, and a complaint
+      // left over from the last one would be describing a clip you have already
+      // stopped thinking about.
+      setNotice(notices.length > 0 ? notices.join(' · ') : null)
     },
     [timeAt, idsFromDrop],
   )
+
+  /*
+   * The notice clears itself, and the timer restarts on each new one.
+   *
+   * Keyed on the message: a second drop that says the same thing about the same
+   * file should still be visible for its full span, and a timer that survived
+   * from the first would cut it short for no reason anybody could see.
+   */
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS)
+    return () => clearTimeout(timer)
+  }, [notice])
 
   // ── scrubbing ─────────────────────────────────────────────────
 
@@ -848,8 +899,18 @@ export function TimelinePanel() {
           </div>
         </div>
 
-        {sequence.clips.length === 0 && (
+        {sequence.clips.length === 0 && !notice && (
           <div className="tl-hint">Drag media onto a track — from the browser, or from Explorer</div>
+        )}
+
+        {notice && (
+          <button
+            className="tl-notice"
+            title="Dismiss"
+            onClick={() => setNotice(null)}
+          >
+            {notice}
+          </button>
         )}
       </div>
       </div>
