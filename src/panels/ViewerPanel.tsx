@@ -4,6 +4,7 @@ import { commands } from '../kernel/commands'
 import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
 import { VideoSource } from '../kernel/media/videoSource'
+import { audioInfoFor, type AudioInfo } from '../kernel/media/peaks'
 import {
   formatTimecode,
   getSeekToken,
@@ -127,6 +128,32 @@ export function ViewerPanel() {
   const [why, setWhy] = useState<string | null>(null)
   /** True when the pipeline is drawing, which is also when the mixer has the sound. */
   const decoding = Boolean(source)
+
+  /*
+   * What sound this clip's file has, if any.
+   *
+   * A file with no audio track lands on the timeline as a picture and nothing
+   * else — correctly, since there is no sound to put on an audio track. But the
+   * absence of something is a poor way to say so: dropping a silent file looks
+   * exactly like dropping one whose audio failed to arrive, and the only
+   * difference is a thing that is not there.
+   *
+   * So the Viewer says it. This is the panel already reporting what it knows
+   * about the clip under the playhead, and "none" is the answer that was
+   * missing.
+   */
+  const [sound, setSound] = useState<AudioInfo | null | undefined>(undefined)
+  useEffect(() => {
+    setSound(undefined)
+    if (!playable || playable.kind !== 'video') return
+    let live = true
+    void audioInfoFor(playable.path).then((info) => {
+      if (live) setSound(info)
+    })
+    return () => {
+      live = false
+    }
+  }, [playable?.id, playable?.path])
 
   useEffect(() => {
     setSource(null)
@@ -333,6 +360,24 @@ export function ViewerPanel() {
           </span>
           {playable?.kind === 'video' && (
             <>
+              <span className="tool-sep" />
+              <span className="tool-label">Sound</span>
+              <span
+                className="tool-value tool-value--dim"
+                title={
+                  sound === undefined
+                    ? 'Reading the file'
+                    : sound
+                      ? 'Played by the mixer, from its own audio clip on the timeline'
+                      : 'This file has no audio track, so it lands on the timeline as picture only'
+                }
+              >
+                {sound === undefined
+                  ? '…'
+                  : sound
+                    ? `${sound.channels}ch ${Math.round(sound.sampleRate / 100) / 10}k`
+                    : 'none'}
+              </span>
               <span className="tool-sep" />
               <span className="tool-label">Decode</span>
               <span

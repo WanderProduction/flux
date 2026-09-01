@@ -332,6 +332,19 @@ other, because losing a take's sound by dragging its picture is not an edit anyo
 That rule lives in `sequence.ts` rather than in the panel: anything that moves a clip gets it,
 including things not written yet.
 
+**A linked pair is one thing to move.** Resolving each clip's placement on its own is what a group
+of unrelated clips wants, and is exactly wrong for a pair: their tracks differ, so what blocks one
+need not block the other — and the moment that happens the picture and its sound move by different
+amounts and the take is out of sync. Found on real footage rather than imagined: two clips end to
+end on V1, drag the first one right, and the audio track was clear, so the sound slid three seconds
+while the picture, blocked by its neighbour, did not move at all. Nothing said so; the pair simply
+arrived in two pieces.
+
+So a link moves as a unit. The clip that was grabbed decides the distance — through the same
+midpoint rule, so dragging a pair feels like dragging a clip — and the rest follow it exactly. If a
+follower cannot sit there, the unit does not move: a pair that will not fit somewhere should refuse
+to go there, which is a thing you can see and undo.
+
 Tracks stack the way every NLE stacks them, and it is not arbitrary — **video upward** because a
 higher layer is in front, **audio downward** because nothing is in front of anything, it all just
 sums. A clip may only travel within its own band; a picture landing on an audio track would be a
@@ -339,6 +352,11 @@ clip whose kind and track disagree, which every other rule in the sequence assum
 
 Dropped on an audio track, a file arrives as its sound alone. A file with no sound is refused there
 rather than laid down as a silent block.
+
+A file with **no audio track at all** lands as a picture and nothing else, which is correct and says
+nothing — dropping a silent file then looks exactly like dropping one whose sound failed to arrive,
+and the only difference is a thing that is not there. So the Viewer's toolbar reports what sound the
+clip under the playhead has: `2ch 48k`, or `none`.
 
 The waveform comes from [`shared/peaks.js`](shared/peaks.js): the audio decoded once, end to end,
 and reduced to the loudest sample in each direction per bucket. This is what Premiere's `.pek` files

@@ -1279,6 +1279,111 @@ try {
     }
   })
 
+  await check('a pair blocked on one track does not come apart', async () => {
+    /*
+     * The tracks are different, so what blocks one half need not block the
+     * other — and the moment that happens the picture and its sound move by
+     * different amounts and the take is out of sync.
+     *
+     * Found on real footage rather than imagined: two clips end to end on V1,
+     * drag the first one right, and the audio track was clear so the sound slid
+     * three seconds while the picture, blocked by its neighbour, did not move
+     * at all. Nothing said so; the pair simply arrived in two pieces.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `// A second clip immediately after it on V1, and nothing on A1.
+         const { assets } = window.__fluxDev;
+         const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+         const probed = await assets.ensureProbed(a.id);
+         const pair = sequence.getSequence().clips.find(c => c.kind === 'video');
+         sequence.addClip({ assetId: a.id, trackId: 'V1',
+                            start: pair.start + pair.duration, duration: probed.duration });
+         await new Promise(r => setTimeout(r, 200));
+
+         const before = sequence.getSequence().clips
+           .filter(c => c.linkId).map(c => [c.kind, c.start]);
+         sequence.moveClips([pair.id], 3, 0);
+         await new Promise(r => setTimeout(r, 200));
+         const after = sequence.getSequence().clips
+           .filter(c => c.linkId).map(c => [c.kind, c.start]);
+         return { before, after,
+                  blocked: sequence.getSequence().clips.filter(c => !c.linkId).length };`,
+    )
+    assert.equal(state.blocked, 1, 'setup: expected one clip in the way')
+    assert.equal(state.after.length, 2, 'the pair should still be a pair')
+
+    const moved = state.after.map(([kind, start], i) => start - state.before[i][1])
+    assert.ok(
+      Math.abs(moved[0] - moved[1]) < 1e-6,
+      `the picture moved ${moved[0]}s and its sound moved ${moved[1]}s`,
+    )
+  })
+
+  await check('a pair whose sound will not fit does not move at all', async () => {
+    // The other way round from the check above: the picture is free to go and
+    // the sound is not. A pair that will not fit somewhere should refuse to go
+    // there — which is a thing you can see and undo, unlike silently arriving
+    // in two pieces.
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const pair = sequence.getSequence().clips.find(c => c.kind === 'video');
+         // Something on A1 just past the pair, and nothing at all on V1.
+         const blocker = sequence.addClip(
+           { assetId: sequence.getSequence().clips.find(c => c.kind === 'audio').assetId,
+             trackId: 'A1', start: 14, duration: 4 });
+         if (!blocker || blocker.start !== 14) throw new Error('setup: blocker at ' + blocker?.start);
+         await new Promise(r => setTimeout(r, 200));
+
+         sequence.moveClips([pair.id], 3, 0);
+         await new Promise(r => setTimeout(r, 200));
+         return sequence.getSequence().clips
+           .filter(c => c.linkId).map(c => [c.kind, Math.round(c.start * 1000) / 1000]);`,
+    )
+    assert.deepEqual(
+      state.sort(),
+      [['audio', 0], ['video', 0]].sort(),
+      'the picture went somewhere its sound could not follow',
+    )
+  })
+
+  await check('a pair with room moves the whole way, both halves', async () => {
+    // The other side of it: being careful about the blocked case must not have
+    // made the ordinary one refuse.
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const pair = sequence.getSequence().clips.find(c => c.kind === 'video');
+         sequence.moveClips([pair.id], 2.5, 0);
+         await new Promise(r => setTimeout(r, 200));
+         return sequence.getSequence().clips.map(c => [c.kind, Math.round(c.start * 1000) / 1000]);`,
+    )
+    assert.deepEqual(
+      state.sort(),
+      [['audio', 2.5], ['video', 2.5]].sort(),
+      'with nothing in the way both halves should travel the full distance',
+    )
+  })
+
+  await check('dragging the sound takes the picture with it, blocked or not', async () => {
+    // Whichever half is grabbed decides, and the other follows it exactly.
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const pair = sequence.getSequence().clips.find(c => c.kind === 'audio');
+         sequence.moveClips([pair.id], 1.5, 0);
+         await new Promise(r => setTimeout(r, 200));
+         return sequence.getSequence().clips.map(c => [c.kind, Math.round(c.start * 1000) / 1000]);`,
+    )
+    assert.deepEqual(
+      state.sort(),
+      [['audio', 1.5], ['video', 1.5]].sort(),
+      'grabbing the sound should move the picture the same distance',
+    )
+  })
+
   await check('dragging the picture down cannot strand it below its own sound', async () => {
     // The bands again, from the audio side: the pair is on V1 and A1, and a
     // drag downward has to be refused by the video half rather than quietly

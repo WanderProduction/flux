@@ -455,12 +455,29 @@ export function setTrackSolo(trackId: string, solo: boolean): boolean {
  * between them, and dragging it decisively across should reorder them. Neither
  * overwrites, and neither shifts anything downstream.
  *
+ * ## A linked pair is one thing to move
+ *
+ * Resolving each clip on its own is what a group of unrelated clips wants, and
+ * it is exactly wrong for a linked pair. Their tracks are different, so what
+ * blocks one need not block the other — and the moment that happens the picture
+ * and its sound move by different amounts and the take is out of sync. Found on
+ * real footage: two clips end to end on V1, drag the first one right, and the
+ * audio track was clear so the sound slid three seconds while the picture,
+ * blocked by its neighbour, did not move at all.
+ *
+ * So a link moves as a unit. The clip that was actually grabbed decides the
+ * distance and the rest follow it exactly; if a follower cannot sit there, the
+ * unit does not move. A pair that will not fit somewhere should refuse to go
+ * there, which is a thing you can see and undo — unlike silently arriving in
+ * two pieces.
+ *
  * @returns true when anything actually moved.
  */
 export function moveClips(ids: string[], deltaSeconds: number, deltaTracks: number): boolean {
   // Linked partners travel with what they are linked to. Expanded here rather
   // than at the caller: that a picture does not leave its sound behind is a
   // rule about the sequence, not a convenience of the panel that drags it.
+  const asked = new Set(ids)
   const moving = new Set(withLinked(ids))
   const chosen = sequence.clips.filter((clip) => moving.has(clip.id))
   if (chosen.length === 0) return false
@@ -496,17 +513,75 @@ export function moveClips(ids: string[], deltaSeconds: number, deltaTracks: numb
   const others = sequence.clips.filter((clip) => !moving.has(clip.id))
   const placed: Clip[] = []
 
-  // Ascending, and already-placed siblings count as obstacles: if one of them
-  // is slid right out of an occupied span it must not then land on top of the
-  // clip that was travelling behind it.
-  for (const clip of [...chosen].sort((a, b) => a.start - b.start)) {
-    const trackId = sequence.tracks[trackIndex(clip.trackId) + shift].id
-    const obstacles = [...others, ...placed].filter((other) => other.trackId === trackId)
-    placed.push({
+  const trackAfter = (clip: Clip) => sequence.tracks[trackIndex(clip.trackId) + shift].id
+  const obstaclesOn = (trackId: string) =>
+    [...others, ...placed].filter((other) => other.trackId === trackId)
+  const collides = (obstacles: Clip[], start: number, duration: number) =>
+    obstacles.some(
+      (other) => start < other.start + other.duration - EPS && other.start < start + duration - EPS,
+    )
+
+  /*
+   * Units, not clips: a linked pair travels as one.
+   *
+   * Ascending by where the unit begins, and already-placed units count as
+   * obstacles — if one is slid right out of an occupied span it must not then
+   * land on top of whatever was travelling behind it.
+   */
+  const units = new Map<string, Clip[]>()
+  for (const clip of chosen) {
+    const key = clip.linkId ?? `solo:${clip.id}`
+    units.set(key, [...(units.get(key) ?? []), clip])
+  }
+  const ordered = [...units.values()].sort(
+    (a, b) => Math.min(...a.map((c) => c.start)) - Math.min(...b.map((c) => c.start)),
+  )
+
+  for (const unit of ordered) {
+    if (unit.length === 1) {
+      const clip = unit[0]
+      const trackId = trackAfter(clip)
+      placed.push({
+        ...clip,
+        trackId,
+        start: resolvePlacement(obstaclesOn(trackId), clip.start + delta, clip.duration),
+      })
+      continue
+    }
+
+    /*
+     * The clip that was grabbed decides the distance.
+     *
+     * Its own placement still goes through the midpoint rule, so dragging a
+     * pair behaves like dragging a clip. The others take the same distance
+     * without re-deciding it, which is the whole point — a second opinion is
+     * how they come apart.
+     */
+    const leader = unit.find((clip) => asked.has(clip.id)) ?? unit[0]
+    const leaderTrack = trackAfter(leader)
+    const wanted =
+      resolvePlacement(obstaclesOn(leaderTrack), leader.start + delta, leader.duration) -
+      leader.start
+    // No member may be pushed before the start of the sequence.
+    const unitDelta = Math.max(wanted, -Math.min(...unit.map((clip) => clip.start)))
+
+    const attempt = unit.map((clip) => ({
       ...clip,
-      trackId,
-      start: resolvePlacement(obstacles, clip.start + delta, clip.duration),
-    })
+      trackId: trackAfter(clip),
+      start: clip.start + unitDelta,
+    }))
+    // Each against the obstacles on its own track, plus its own travelling
+    // siblings. A pair that will not fit stays where it is rather than landing
+    // in two pieces.
+    const fits = attempt.every(
+      (clip, i) =>
+        !collides(
+          [...obstaclesOn(clip.trackId), ...attempt.slice(0, i).filter((s) => s.trackId === clip.trackId)],
+          clip.start,
+          clip.duration,
+        ),
+    )
+    placed.push(...(fits ? attempt : unit))
   }
 
   const byId = new Map(placed.map((clip) => [clip.id, clip]))

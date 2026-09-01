@@ -972,6 +972,53 @@ try {
     assert.equal(state.stats.built, 0, 'asking whether a file has sound must not decode it')
   })
 
+  await check('the viewer says whether the file under the playhead has sound', async () => {
+    /*
+     * A file with no audio track lands as a picture and nothing else, which is
+     * correct and says nothing. Dropping a silent file then looks exactly like
+     * dropping one whose sound failed to arrive, and the only difference is a
+     * thing that is not there.
+     *
+     * Real footage prompted this: a phone clip with no audio stream, dropped,
+     * and no way to tell that from a bug.
+     */
+    /** Puts one fixture under the playhead and reads the Sound value off the toolbar. */
+    const readSound = (name) => `
+      const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+      const file = ${JSON.stringify(path.join(MEDIA_DIR, name))};
+      await importPipeline.importFiles([{ path: file, kind: 'video' }], 'link');
+      const asset = assets.getAssets().find(a => a.path === file);
+      const probed = await assets.ensureProbed(asset.id);
+      sequence.clearSequence();
+      sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+      playback.seek(0.5);
+
+      // Wait for the answer, not for a duration: reading the audio track is a
+      // handful of ranged requests, and the toolbar says so while it waits.
+      const read = (name) => {
+        const label = [...document.querySelectorAll('.tool-label')]
+          .find(n => n.textContent === name);
+        return label ? label.nextElementSibling.textContent : null;
+      };
+      // Waiting only for "no longer reading" is not enough: the toolbar shows
+      // the previous clip's answer until the new one arrives, and that is a
+      // settled-looking value too. So the Source has to be right first.
+      for (let i = 0; i < 100; i++) {
+        const sound = read('Sound');
+        if (read('Source') === asset.name && sound && sound !== '\u2026') break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return { source: read('Source'), sound: read('Sound') };`
+
+    const withSound = await evaluate(cdp, readSound('voice_over.mp4'))
+    assert.equal(withSound.source, 'voice_over.mp4', 'the viewer is showing something else')
+    assert.equal(withSound.sound, '1ch 48k', `a mono 48kHz file reported ${withSound.sound}`)
+
+    const silent = await evaluate(cdp, readSound('clipA.mp4'))
+    assert.equal(silent.source, 'clipA.mp4', 'the viewer is showing something else')
+    assert.equal(silent.sound, 'none', `a file with no audio track reported ${silent.sound}`)
+  })
+
   await check('an audio clip alone under the playhead shows no picture', async () => {
     // The Viewer looks down the video tracks and no further. A sound on its own
     // is a thing FLUX can hold on a timeline and cannot yet play, and drawing
