@@ -254,6 +254,8 @@ export async function requireFixtures(cdp, mediaDir) {
   // foreign_audio.mp4 carries audio FLUX cannot decode, which is a different
   // thing from having none: clipA.mp4 is genuinely silent, and the app has to
   // say which is which rather than showing one answer for both.
+  // open_gop.mp4 has sync samples that are not IDR frames, which is what real
+  // phone footage does and what a decoder refuses to start on.
   for (const required of [
     'clipA.mp4',
     'still.jpg',
@@ -262,6 +264,7 @@ export async function requireFixtures(cdp, mediaDir) {
     'layer_red.mp4',
     'layer_blue.mp4',
     'foreign_audio.mp4',
+    'open_gop.mp4',
   ]) {
     if (!names.includes(required)) {
       throw new Error(`fixture ${required} missing from ${mediaDir}`)

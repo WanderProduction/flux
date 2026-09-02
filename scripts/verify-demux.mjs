@@ -284,6 +284,58 @@ try {
 
   await long.handle.close()
 
+  /*
+   * An open GOP: sync samples that are not IDR frames.
+   *
+   * `stss` says "you may begin decoding here", and for H.264 that is a weaker
+   * promise than "this is an IDR". An open GOP marks I-frames whose GOP refers
+   * back across the boundary, and a decoder that has just been configured will
+   * refuse to start on one — which is a black picture from that point in the
+   * file onward, and is what a real phone recording did.
+   *
+   * This is a fixture check rather than a demuxer check. Nothing in the index
+   * is wrong: ffprobe reads exactly the same sync samples, because both are
+   * reading `stss`. What it guards is the *fixture* — the checks in
+   * verify-playback that exercise the recovery are worthless if a future
+   * encoder quietly starts emitting IDRs here, and they would still pass.
+   */
+  await check('open_gop.mp4 has sync samples that are not IDR frames', async () => {
+    const { result, handle } = await trackOf('open_gop.mp4')
+    assert.equal(result.ok, true, `refused: ${result.reason}`)
+    const track = result.track
+
+    /** The NAL types in a sample, read through its 4-byte length prefixes. */
+    const nalsOf = async (i) => {
+      const buffer = Buffer.alloc(Math.min(track.bytes[i], 4096))
+      await handle.read(buffer, 0, buffer.length, track.offset[i])
+      const types = []
+      let at = 0
+      while (at + 4 < buffer.length) {
+        const length = buffer.readUInt32BE(at)
+        types.push(buffer[at + 4] & 0x1f)
+        at += 4 + length
+      }
+      return types
+    }
+
+    const sync = []
+    for (let i = 0; i < track.count; i++) if (track.key[i]) sync.push(i)
+    assert.ok(sync.length > 2, `only ${sync.length} sync samples to work with`)
+
+    // 5 is an IDR slice, 1 is a non-IDR slice. The first sample of a playable
+    // file is always the former; in this fixture the rest are the latter.
+    assert.ok((await nalsOf(sync[0])).includes(5), 'the first sample should be an IDR')
+    for (const i of sync.slice(1)) {
+      const types = await nalsOf(i)
+      assert.ok(
+        !types.includes(5) && types.includes(1),
+        `sample ${i} is marked as a sync sample and is an IDR after all (${types.join(',')}) — ` +
+          'the fixture no longer has an open GOP, so the checks that rely on it prove nothing',
+      )
+    }
+    await handle.close()
+  })
+
   // ── the short fixtures ────────────────────────────────────────
 
   for (const [name, frames] of [

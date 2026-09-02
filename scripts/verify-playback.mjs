@@ -39,6 +39,7 @@ const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 const dir = JSON.stringify(MEDIA_DIR)
 /** A minute of video, which is the only kind of file that can prove seeking. */
 const LONG = JSON.stringify(path.join(MEDIA_DIR, 'long_take.mp4'))
+const OPEN_GOP = JSON.stringify(path.join(MEDIA_DIR, 'open_gop.mp4'))
 const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 const { check, report } = createChecker()
@@ -637,6 +638,205 @@ try {
         if (indexCache.indexCacheStats().stored === 0) throw new Error('index never stored');
       }
     }`
+
+  /*
+   * A decoder that dies mid-stream, which is the one failure this pipeline
+   * cannot talk its way out of.
+   *
+   * WebCodecs answers an internal error by closing the decoder. Everything
+   * about recovering from that — building a new one, and building it at a
+   * keyframe — happens in code that only runs after something has already gone
+   * wrong, which is exactly the code that never gets exercised. So the fault is
+   * introduced deliberately: the decoder is closed behind the source's back,
+   * which leaves precisely the state a real error leaves.
+   *
+   * Reported as "the preview goes black at some point and never comes back",
+   * and that is what it was: the fresh decoder was handed the next sample in
+   * the file, which is a delta frame in the middle of a GOP, `decode()` threw
+   * DataError, and the source stayed alive producing nothing for the rest of
+   * the session.
+   */
+  /*
+   * The failure this whole group exists for, and the one that was reported:
+   * the picture goes black partway into a file and stays black.
+   *
+   * The file's sync samples are not IDR frames — an open GOP, which phone and
+   * drone footage produces routinely. Seeking into it configures a decoder and
+   * hands it the sync sample the index names, the decoder refuses it, and
+   * everything after that point in the file is black. Playing *through* the
+   * same frames is fine, which is why it reads as "it stops working at some
+   * point" rather than as a broken file.
+   */
+  await check('a sync sample that is not an IDR is not a place to start', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const r = await videoSource.VideoSource.open(${OPEN_GOP});
+       if (!r.ok) return { error: r.reason };
+       const source = r.source;
+       // Every one of these lands past a sync sample that is not an IDR, and
+       // the last two go backwards — a seek back has to work as well as a seek
+       // on, or half the timeline is unreachable.
+       const seen = [];
+       for (const t of [0.2, 6, 9, 3, 11, 6]) {
+         const frame = await source.frameFor(t);
+         seen.push([t, frame ? Math.round((frame.timestamp / 1e6) * 1000) / 1000 : null]);
+       }
+       const state = { seen, broken: source.broken, refused: [...source.refused].sort((a, b) => a - b) };
+       source.close();
+       return state;`,
+    )
+    assert.ok(!state.error, `the source would not open: ${state.error}`)
+    for (const [asked, got] of state.seen) {
+      assert.ok(
+        got !== null && Math.abs(got - asked) < 0.1,
+        `seeking to ${asked}s gave ${got} — a decoder that will not start at a sync sample has ` +
+          'to be started at the one before it, not left with nothing to show',
+      )
+    }
+    assert.equal(state.broken, false, 'and the source is not broken, only particular')
+    assert.ok(
+      state.refused.length > 0,
+      'no sync sample was refused, so nothing here was exercised — is the fixture still open-GOP?',
+    )
+  })
+
+  await check('a refused start point is learned once', async () => {
+    // Rediscovering it on every seek would mean a wasted fetch and a wasted
+    // decoder for each one, which on a long file is the difference between
+    // scrubbing and waiting.
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const r = await videoSource.VideoSource.open(${OPEN_GOP});
+       if (!r.ok) return { error: r.reason };
+       const source = r.source;
+       for (const t of [6, 9, 11]) await source.frameFor(t);
+       const first = [...source.refused].sort((a, b) => a - b);
+       const again = [];
+       for (const t of [6, 9, 11]) {
+         const frame = await source.frameFor(t);
+         again.push(frame ? Math.round((frame.timestamp / 1e6) * 1000) / 1000 : null);
+       }
+       const state = { first, second: [...source.refused].sort((a, b) => a - b), again };
+       source.close();
+       return state;`,
+    )
+    assert.ok(state.first.length > 0, 'setup: nothing was refused on the first pass')
+    assert.deepEqual(state.second, state.first, 'the same start points were refused all over again')
+    assert.deepEqual(state.again, [6, 9, 11], 'and the frames still come back')
+  })
+
+  await check('a decoder that dies mid-GOP is started again at a keyframe', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const r = await videoSource.VideoSource.open(${LONG});
+       if (!r.ok) return { error: r.reason };
+       const source = r.source;
+
+       // Decode into the middle of a GOP, so what comes next is a delta frame.
+       const before = await source.frameFor(3);
+       source.decoder.close();
+
+       // Near enough that the source keeps going rather than seeking: this is
+       // the path where a fresh decoder meets a delta frame.
+       const after = await source.frameFor(3.5);
+       const state = { before: before ? before.timestamp / 1e6 : null,
+                       after: after ? after.timestamp / 1e6 : null,
+                       broken: source.broken };
+       source.close();
+       return state;`,
+    )
+    assert.ok(!state.error, `the source would not open: ${state.error}`)
+    assert.ok(Math.abs(state.before - 3) < 0.1, `setup: expected a frame at 3s, got ${state.before}`)
+    assert.ok(
+      state.after !== null && Math.abs(state.after - 3.5) < 0.1,
+      `after the decoder died the source returned ${state.after} — a dead decoder must be ` +
+        'rebuilt at a keyframe, not handed the delta frame that came next',
+    )
+    assert.equal(state.broken, false, 'and one dead decoder is not a broken file')
+  })
+
+  await check('a source that has failed repairs itself', async () => {
+    // The other half: the flag the error callback sets. A source that has
+    // failed once has not run out of options, and treating it as finished is
+    // what turned a hiccup into a black picture for the rest of the session.
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const r = await videoSource.VideoSource.open(${LONG});
+       if (!r.ok) return { error: r.reason };
+       const source = r.source;
+       await source.frameFor(2);
+
+       // Exactly what the decoder's own error callback does.
+       source.failed = true;
+       source.decoder.close();
+
+       const after = await source.frameFor(2.5);
+       const state = { after: after ? after.timestamp / 1e6 : null,
+                       broken: source.broken, repairs: source.repairs };
+       source.close();
+       return state;`,
+    )
+    assert.ok(!state.error, `the source would not open: ${state.error}`)
+    assert.ok(
+      state.after !== null && Math.abs(state.after - 2.5) < 0.1,
+      `a failed source should recover, and it returned ${state.after}`,
+    )
+    assert.equal(state.broken, false)
+    assert.equal(state.repairs, 0, 'a source that produced a frame is not one that is failing')
+  })
+
+  await check('a source that gives up hands the picture back to the element', async () => {
+    /*
+     * And the end of the road. A file that fails every time is not a decoder
+     * hiccup, and the Viewer has a fallback for it — an element that plays the
+     * file the browser's own way. That fallback was unreachable: `decoding`
+     * asks whether a source *exists*, and a broken one still does, so the
+     * pipeline went on drawing black over a perfectly good <video>.
+     *
+     * The fault is put into the source the panel is actually using, which is
+     * why VideoSource keeps a list of the live ones.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { videoSource, playback, sequence, assets, importPipeline } = window.__fluxDev;
+         await importPipeline.importFiles([{ path: ${LONG}, kind: 'video' }], 'link');
+         const asset = assets.getAssets().find(a => a.name === 'long_take.mp4');
+         const probed = await assets.ensureProbed(asset.id);
+         sequence.clearSequence();
+         sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 1200));
+         const canvasFirst = document.querySelector('canvas.viewer-media');
+         const usingPipeline = Boolean(canvasFirst && canvasFirst.dataset.frameTime);
+
+         // Beyond repair: failed, with every attempt spent.
+         const source = [...videoSource.VideoSource.live].at(-1);
+         source.failed = true;
+         source.repairs = 99;
+
+         // A seek is what asks for the next frame.
+         playback.seek(3);
+         let element = null;
+         for (let i = 0; i < 40; i++) {
+           await new Promise(r => setTimeout(r, 100));
+           element = document.querySelector('video.viewer-media');
+           if (element) break;
+         }
+         const canvas = document.querySelector('canvas.viewer-media');
+         return {
+           usingPipeline,
+           element: Boolean(element),
+           canvasHidden: canvas ? getComputedStyle(canvas).display === 'none' : true,
+         };`,
+    )
+    assert.equal(state.usingPipeline, true, 'setup: the pipeline should have been drawing')
+    assert.equal(state.element, true, 'a source that gave up must hand the picture to the element')
+    assert.equal(state.canvasHidden, true, 'and the black canvas must get out of the way')
+  })
 
   await check('a source opened three times is only fetched once', async () => {
     const state = await evaluate(

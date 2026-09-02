@@ -218,6 +218,7 @@ try {
       'layer_blue.mp4',
       'layer_red.mp4',
       'long_take.mp4',
+      'open_gop.mp4',
       'photo.png',
       'render.webm',
       'shot_B.mp4',

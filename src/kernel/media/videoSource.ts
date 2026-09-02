@@ -57,6 +57,16 @@ const MAX_FETCH_BYTES = 8 << 20
  */
 const FRAME_TIMEOUT_MS = 5000
 
+/**
+ * How many times a source will rebuild its decoder before giving up.
+ *
+ * Three, and the count resets on every frame that comes out. A decoder lost to
+ * a driver hiccup comes back on the first attempt; a file that cannot be
+ * decoded at all fails three times in a row and is handed to the element,
+ * which is the fallback that exists for exactly this.
+ */
+const MAX_REPAIRS = 3
+
 export interface SourceInfo {
   codec: string
   width: number
@@ -105,6 +115,38 @@ export class VideoSource {
    */
   private generation = 0
 
+  /**
+   * Repairs spent since the last frame this source actually produced.
+   *
+   * A decoder can go away mid-stream — a driver hiccup, a lost hardware
+   * context, an error on one bad sample — and WebCodecs answers by closing it.
+   * That state is recoverable: throw the decoder away, start again from the
+   * keyframe before the playhead. What is not recoverable is a file that fails
+   * every time, so the attempts are counted and the source gives up rather than
+   * restarting for ever. The count resets whenever a frame comes out, because a
+   * source that recovered is not a source that is failing.
+   */
+  private repairs = 0
+
+  /**
+   * Sync samples this decoder has refused to start from. See the catch in
+   * `feed`. Per source rather than per file: it is cheap to relearn, and a
+   * cache keyed on a path would have to be invalidated when the file changed.
+   */
+  private refused = new Set<number>()
+
+  /**
+   * Every source currently open, newest last.
+   *
+   * Here for one reason: the verification harnesses have to be able to reach
+   * the *instance a panel is using*, rather than one they opened themselves.
+   * Recovery from a broken decoder cannot be checked any other way — the fault
+   * has to be introduced into the source the picture is actually coming from.
+   * Reading it costs nothing and it is never used to find a source to work
+   * with; kernel/media is not a registry.
+   */
+  static live = new Set<VideoSource>()
+
   static async open(
     path: string,
   ): Promise<{ ok: true; source: VideoSource } | { ok: false; reason: OpenFailure }> {
@@ -133,7 +175,9 @@ export class VideoSource {
     const support = await VideoDecoder.isConfigSupported(config).catch(() => null)
     if (!support?.supported) return { ok: false, reason: 'unsupported-config' }
 
-    return { ok: true, source: new VideoSource(url, track) }
+    const source = new VideoSource(url, track)
+    VideoSource.live.add(source)
+    return { ok: true, source }
   }
 
   get info(): SourceInfo {
@@ -146,9 +190,14 @@ export class VideoSource {
     }
   }
 
-  /** True once the decoder has given up; the caller should fall back. */
+  /**
+   * True once this source has given up — it has failed and spent every repair.
+   *
+   * The caller should stop asking and fall back. A source that has failed but
+   * has repairs left is not broken; it is about to start again.
+   */
   get broken(): boolean {
-    return this.failed
+    return this.failed && this.repairs >= MAX_REPAIRS
   }
 
   close(): void {
@@ -156,6 +205,7 @@ export class VideoSource {
     this.discardBuffer()
     this.decoder?.close()
     this.decoder = null
+    VideoSource.live.delete(this)
   }
 
   private discardBuffer() {
@@ -204,13 +254,30 @@ export class VideoSource {
     for (const resolve of waiting) resolve()
   }
 
+  /**
+   * The sync sample at or before `sample` that the decoder has not refused.
+   *
+   * Falls back to zero, which is the first sample of the file and an IDR in
+   * anything that plays at all — so this always answers, and the answer is
+   * always somewhere the decoder can start.
+   */
+  private startBefore(sample: number): number {
+    for (let i = sample - 1; i > 0; i--) {
+      if (this.track.key[i] && !this.refused.has(i)) return i
+    }
+    return 0
+  }
+
   /** Throws away decoder state and points it at the keyframe before `time`. */
   private restartAt(time: number) {
     this.generation += 1
     this.discardBuffer()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
-    this.next = keyframeAt(this.track, time)
+    const at = keyframeAt(this.track, time)
+    // Straight past the ones already known to be no good, rather than
+    // rediscovering them a fetch at a time on every seek.
+    this.next = this.refused.has(at) ? this.startBefore(at) : at
   }
 
   /**
@@ -256,18 +323,82 @@ export class VideoSource {
       // that may since have been replaced.
       if (!bytes || this.closed || this.failed || this.generation !== mine) return
 
+      /*
+       * A decoder that has to be built here must be handed a keyframe first.
+       *
+       * Normally it is: every restart points `next` at one. But a decoder can
+       * also go away on its own — WebCodecs closes it on an internal error —
+       * and then the next batch builds a fresh one and hands it whatever comes
+       * next in the file, which is a delta frame in the middle of a GOP.
+       * `decode()` throws DataError, the throw escapes as a rejected feed, and
+       * the source is left alive but producing nothing: a black picture that
+       * never comes back, which is exactly how this was reported.
+       *
+       * So the invariant is held at the point where it has to be true, rather
+       * than trusted from four call sites away. Rewinding costs one wasted
+       * range read on a path that only runs after something has already gone
+       * wrong.
+       */
+      if ((!this.decoder || this.decoder.state === 'closed') && !track.key[from]) {
+        this.next = keyframeAt(track, track.pts[from])
+        continue
+      }
+
+      const fresh = !this.decoder || this.decoder.state === 'closed'
       const decoder = this.ensureDecoder()
-      for (let i = from; i <= to; i++) {
-        const at = track.offset[i] - start
-        if (at + track.bytes[i] > bytes.length) break
-        decoder.decode(
-          new EncodedVideoChunk({
-            type: track.key[i] ? 'key' : 'delta',
-            // Microseconds, which is what WebCodecs counts in.
-            timestamp: Math.round(track.pts[i] * 1e6),
-            data: bytes.subarray(at, at + track.bytes[i]),
-          }),
-        )
+      let submitted = 0
+      try {
+        for (let i = from; i <= to; i++) {
+          const at = track.offset[i] - start
+          if (at + track.bytes[i] > bytes.length) break
+          decoder.decode(
+            new EncodedVideoChunk({
+              type: track.key[i] ? 'key' : 'delta',
+              // Microseconds, which is what WebCodecs counts in.
+              timestamp: Math.round(track.pts[i] * 1e6),
+              data: bytes.subarray(at, at + track.bytes[i]),
+            }),
+          )
+          submitted += 1
+        }
+      } catch {
+        /*
+         * A sync sample the decoder will not start from.
+         *
+         * `stss` says "you may begin here", and for H.264 that is not the same
+         * promise as "this is an IDR". An open GOP marks I-frames that refer
+         * back across the boundary; Chromium refuses to configure a decoder and
+         * then start on one, and says so with the same message as a delta —
+         * "a key frame is required". Phone and drone footage does this
+         * routinely: the file that prompted this has three sync samples and
+         * only the first is an IDR.
+         *
+         * So the sample is remembered as no good and the one before it is
+         * tried, down to sample zero, which is an IDR in any file that plays at
+         * all. Learned rather than assumed, because there is no way to know
+         * without the bytes, and reading them to find out would mean fetching
+         * every keyframe in the file before playing a frame of it.
+         */
+        if (submitted === 0 && fresh && track.key[from]) {
+          this.refused.add(from)
+          const earlier = this.startBefore(from)
+          if (earlier < from) {
+            // The decoder goes too. It was configured and handed nothing it
+            // would take, and the next start point has to meet a decoder that
+            // is genuinely new — otherwise the second refusal in one pass is
+            // not recognised as one, which is a black frame that fixes itself
+            // on the next seek and looks like a race.
+            if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
+            this.decoder = null
+            this.next = earlier
+            continue
+          }
+        }
+        // Marked, not thrown. A rejection here reaches nobody — the feed is
+        // deliberately not awaited on the fast path — and a source that has
+        // silently stopped decoding is worse than one that says so.
+        this.failed = true
+        return
       }
       this.next = to + 1 >= track.count ? -1 : to + 1
     }
@@ -308,11 +439,28 @@ export class VideoSource {
    * close it.
    */
   async frameFor(time: number): Promise<VideoFrame | null> {
-    if (this.closed || this.failed) return null
+    if (this.closed) return null
+
+    /*
+     * A failed decoder is thrown away and started again, not given up on.
+     *
+     * The failure that prompted this is transient by nature: the decoder is
+     * gone, and a new one starting from a keyframe has no memory of whatever
+     * upset it. Bounded, because a file that fails every time would otherwise
+     * restart on every frame for ever — after MAX_REPAIRS the source reports
+     * itself broken and the Viewer falls back to the element.
+     */
+    if (this.failed) {
+      if (this.repairs >= MAX_REPAIRS) return null
+      this.repairs += 1
+      this.failed = false
+      this.restartAt(time)
+    }
 
     this.wantTime = time
     const held = this.pick(time)
     if (held) {
+      this.repairs = 0
       this.trim()
       // Top up in the background so playing forward never waits on a decode.
       if (!this.feeding && this.next >= 0 && this.buffer.length < LOOKAHEAD_FRAMES / 2) {
@@ -359,6 +507,7 @@ export class VideoSource {
     while (!this.closed && !this.failed) {
       const frame = this.pick(time)
       if (frame) {
+        this.repairs = 0
         this.trim()
         return frame
       }
@@ -383,6 +532,10 @@ export class VideoSource {
     }
 
     const frame = this.pick(time)
+    // A source that produced a frame is not a source that is failing, so its
+    // repair budget starts again. Otherwise three hiccups spread across an
+    // afternoon would retire a file that works.
+    if (frame) this.repairs = 0
     this.trim()
     return frame
   }

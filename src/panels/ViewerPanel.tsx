@@ -300,6 +300,32 @@ export function ViewerPanel() {
         )
         if (stopped) return
 
+        /*
+         * A source that has given up is let go of.
+         *
+         * VideoSource rebuilds its own decoder when one dies, so reaching here
+         * means it has failed and spent every attempt. Keeping it would mean
+         * the pipeline drawing black for the rest of the session while the
+         * element sitting behind it — the fallback that exists for precisely
+         * this — is never used, because `decoding` only asks whether a source
+         * exists. Dropping it answers that question honestly.
+         *
+         * Not reopened. A fresh source would have a fresh budget and fail the
+         * same three times, which is a loop rather than a recovery.
+         */
+        const lost = layers.filter((layer) => sourcesRef.current.get(layer.id)?.broken)
+        if (lost.length > 0) {
+          for (const layer of lost) {
+            sourcesRef.current.get(layer.id)?.close()
+            sourcesRef.current.delete(layer.id)
+          }
+          setWhy('decode-failed')
+          // Re-renders, which is what makes `decoding` false and puts the
+          // element on screen.
+          setReady((n) => n + 1)
+          return
+        }
+
         const context = canvas.getContext('2d')
         if (!context) return
         if (canvas.width !== width || canvas.height !== height) {

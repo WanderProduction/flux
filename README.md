@@ -51,6 +51,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
+| **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
 | **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
@@ -670,6 +671,46 @@ scale, rotation or opacity), **no blend modes**, and **no effects**. A layer cov
 wherever it has pixels. Compositing several sources is the machinery those need; they are the next
 thing it makes possible, not something it already does.
 
+#### When the decoder will not start
+
+A file's sync samples are where the index says decoding may begin. For H.264 that is a **weaker
+promise than "this is an IDR"**: an open GOP marks I-frames whose group refers back across the
+boundary, and Chromium will not configure a decoder and then start it on one. It refuses with the
+same words it uses for a delta frame — *a key frame is required after configure() or flush()*.
+
+The symptom is specific and misleading. Playing *through* those frames is fine, because the decoder
+is already running. Only starting there fails — so the picture goes black partway into a file and
+stays black, and it looks like something that happened at a moment rather than at a place. It was
+reported as a trimming bug, because trimming is what had moved the playhead past the point.
+
+The file that prompted this has 451 frames and three sync samples, and only the first is an IDR:
+
+| sample | `stss` | first NALs | starts? |
+|---|---|---|---|
+| 0 | sync | 6 (SEI), **5 (IDR)** | yes |
+| 250 | sync | 6 (SEI), **1 (non-IDR)** | no |
+| 298 | sync | 6 (SEI), **1 (non-IDR)** | no |
+
+There is no way to know which is which without the bytes, and reading every keyframe in a file
+before playing a frame of it is not a trade worth making. So it is **learned**: a start point the
+decoder refuses is remembered, and the source steps back to the one before it — down to sample zero,
+which is an IDR in anything that plays at all. The decoder that refused is thrown away with it, or
+the second refusal in one pass is not recognised as one.
+
+Two smaller repairs sit behind that, both about the same failure mode — a picture that never comes
+back:
+
+- **A decoder that dies is rebuilt at a keyframe.** WebCodecs answers an internal error by closing
+  the decoder; the next batch built a new one and handed it whatever came next in the file, which is
+  a delta frame in the middle of a GOP. `decode()` threw, the throw escaped a feed nobody awaits, and
+  the source stayed alive producing nothing. The invariant is now held where it has to be true
+  rather than trusted from four call sites away.
+- **A source that gives up hands the picture back.** `VideoSource.broken` existed and *nothing read
+  it*, so a source that had exhausted its repairs kept the pipeline drawing black over a perfectly
+  good `<video>` — `decoding` only ever asked whether a source existed. Three failures with no frame
+  in between is the line; the count resets on every frame that comes out, because a source that
+  recovered is not a source that is failing.
+
 #### Indexing once
 
 Most of what an open costs is not the parsing. The `moov` is found by stepping through the file's
@@ -1026,6 +1067,19 @@ ffmpeg -y -f lavfi -i "color=c=red:size=1280x720:rate=25:duration=6" -f lavfi -i
 ```bash
 ffmpeg -y -f lavfi -i "color=c=blue:size=480x640:rate=25:duration=6" -f lavfi -i "sine=frequency=900:duration=6" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k -g 25 -c:a aac -b:a 96k -shortest ~/flux-media-test/layer_blue.mp4
 ```
+
+One fixture has an open GOP. `open_gop.mp4` is encoded so that its sync samples after the first are
+**not IDR frames** — which is what phone and drone footage does routinely, and what a decoder refuses
+to start on:
+
+```bash
+ffmpeg -y -f lavfi -i "testsrc2=size=320x180:rate=25:duration=12" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k -x264-params "open_gop=1:keyint=50:min-keyint=50:scenecut=0:bframes=3" -an ~/flux-media-test/open_gop.mp4
+```
+
+`verify:demux` checks the fixture is still like that, by reading the first NAL of every sync sample.
+Nothing in the index is wrong here and ffprobe agrees with it — both are reading `stss`. What the
+check guards is that a future encoder does not quietly start emitting IDRs, which would leave the
+recovery checks passing while exercising nothing.
 
 One fixture has audio FLUX cannot read. `foreign_audio.mp4` carries AC-3, which the demuxer refuses
 as an unsupported codec — the point being that this is *not* the same as `clipA.mp4`, which has no
