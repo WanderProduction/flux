@@ -3462,6 +3462,219 @@ try {
     assert.equal(state.backOn, true, 'and the button toggles it back')
   })
 
+  // ── the tool strip ────────────────────────────────────────────
+
+  /*
+   * Three tools that do something and seven that say they do not yet. Driven
+   * through the strip and through the keys, because a tool nothing can reach is
+   * not a tool — and the ones that are not built have to *refuse*, which is a
+   * behaviour of its own and the easiest thing in the world to get wrong by
+   * doing nothing at all.
+   */
+  /*
+   * Deliberately one line up to the brace: this is pasted after `return`, and a
+   * newline there is a semicolon — the expression would be dropped and the
+   * check would read `undefined.count`. Which it did, once.
+   */
+  const toolStrip = `({
+      count: document.querySelectorAll('.tool-button').length,
+      on: document.querySelector('.tool-button--on')?.dataset.tool ?? null,
+      later: [...document.querySelectorAll('.tool-button--later')].map(b => b.dataset.tool),
+      say: document.querySelector('.tools-say')?.textContent ?? null,
+      refused: document.querySelector('.tools-say--refused') !== null,
+    })`
+
+  await check('the strip shows every tool, and says which are not built', async () => {
+    const state = await evaluate(cdp, `return ${toolStrip};`)
+    assert.equal(state.count, 10, `the strip has ${state.count} tools`)
+    assert.equal(state.on, 'select', 'the pointer starts as a pointer')
+    assert.deepEqual(
+      state.later,
+      ['pen', 'geometry', 'brush', 'eyedropper', 'ruler', 'puppet', 'generate'],
+      'the unbuilt tools should be drawn as unavailable before they are pressed',
+    )
+    assert.ok(state.say?.includes('Select'), state.say)
+  })
+
+  await check('a tool that is not built refuses, and says what it will do', async () => {
+    /*
+     * The pointer keeps doing what it was doing. A button that silently becomes
+     * a mode which does nothing is a bug report waiting to be written; one that
+     * says "not yet, and here is what it will be" is a roadmap you can click.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { tools } = window.__fluxDev;
+       window.__key('c');
+       await new Promise(r => setTimeout(r, 200));
+       const razor = tools.activeTool();
+       window.__key('p');
+       await new Promise(r => setTimeout(r, 200));
+       const after = { tool: tools.activeTool(), strip: ${toolStrip} };
+       window.__key('v');
+       await new Promise(r => setTimeout(r, 200));
+       return { razor, after, back: tools.activeTool() };`,
+    )
+    assert.equal(state.razor, 'razor', 'C should pick the razor')
+    assert.equal(state.after.tool, 'razor', 'and the pen must not take the pointer from it')
+    assert.equal(state.after.strip.on, 'razor', 'the strip agrees')
+    assert.equal(state.after.strip.refused, true, 'and it says so')
+    assert.ok(state.after.strip.say?.includes('not built yet'), state.after.strip.say)
+    assert.equal(state.back, 'select', 'V comes back to the pointer')
+  })
+
+  await check('clicking the strip picks a tool, as the keys do', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { tools } = window.__fluxDev;
+       document.querySelector('.tool-button[data-tool="stretch"]').click();
+       await new Promise(r => setTimeout(r, 200));
+       const picked = tools.activeTool();
+       document.querySelector('.tool-button[data-tool="select"]').click();
+       await new Promise(r => setTimeout(r, 200));
+       return { picked, back: tools.activeTool() };`,
+    )
+    assert.equal(state.picked, 'stretch')
+    assert.equal(state.back, 'select')
+  })
+
+  await check('the razor cuts a pair into two pairs', async () => {
+    /*
+     * Both halves, or the picture would be linked to a sound twice its length
+     * and the first drag would take them apart. Each side gets a link of its
+     * own — two pairs, not four clips sharing one id.
+     *
+     * And the right-hand piece starts further into the file, by exactly the
+     * distance the cut was from the clip's head.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `window.__key('c');
+         await new Promise(r => setTimeout(r, 200));
+         const el = document.querySelector('.tl-lane .clip');
+         const box = el.getBoundingClientRect();
+         // Four seconds in, at sixty pixels per second.
+         const x = box.left + 4 * 60;
+         el.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 95,
+             clientX: x, clientY: box.top + box.height / 2 }));
+         window.dispatchEvent(new PointerEvent('pointerup',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 95,
+             clientX: x, clientY: box.top + box.height / 2 }));
+         await new Promise(r => setTimeout(r, 400));
+         window.__key('v');
+         const clips = window.__fluxDev.sequence.getSequence().clips;
+         return {
+           shape: window.__shape(),
+           links: clips.map(c => c.linkId ?? null),
+           notice: document.querySelector('.tl-notice')?.textContent ?? null,
+         };`,
+    )
+    assert.equal(state.shape.length, 4, 'a pair cut in two is four clips')
+    const left = state.shape.filter((clip) => clip.start === 0)
+    const right = state.shape.filter((clip) => clip.start === 4)
+    assert.equal(left.length, 2, 'two on the left of the cut')
+    assert.equal(right.length, 2, 'and two on the right')
+    assert.ok(
+      left.every((clip) => clip.dur === 4),
+      `the left pieces should run to the cut: ${JSON.stringify(left)}`,
+    )
+    assert.ok(
+      right.every((clip) => clip.off === 4),
+      `the right pieces should start four seconds into the file: ${JSON.stringify(right)}`,
+    )
+
+    const groups = new Set(state.links)
+    assert.equal(groups.size, 2, `expected two links, got ${JSON.stringify(state.links)}`)
+    assert.ok(!state.links.includes(null), 'both new pairs should still be pairs')
+    assert.ok(state.notice?.includes('Cut at'), state.notice)
+  })
+
+  await check('the razor will not cut where there is nothing to cut', async () => {
+    // The very edge of a clip is not a cut: it would make a piece with no
+    // frames in it, which is an invisible object that still has to be deleted.
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `window.__key('c');
+         await new Promise(r => setTimeout(r, 200));
+         const el = document.querySelector('.tl-lane .clip');
+         const box = el.getBoundingClientRect();
+         el.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 95,
+             clientX: box.left + 1, clientY: box.top + box.height / 2 }));
+         window.dispatchEvent(new PointerEvent('pointerup',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 95,
+             clientX: box.left + 1, clientY: box.top + box.height / 2 }));
+         await new Promise(r => setTimeout(r, 350));
+         window.__key('v');
+         return { clips: window.__shape().length,
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.clips, 1, 'nothing should have been cut')
+    assert.ok(state.notice?.includes('needs somewhere to cut'), state.notice)
+  })
+
+  await check('the stretch tool changes the rate and keeps the frames', async () => {
+    /*
+     * The one quantity a stretch holds still is how much *source* the clip
+     * covers: the same frames, over less time. So duration times rate is the
+     * number to check, and it must come out where it started.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `window.__key('r');
+         await new Promise(r => setTimeout(r, 200));
+         const before = window.__shape()[0];
+         const span = before.dur * (window.__fluxDev.sequence.getSequence().clips[0].speed);
+         await window.__trimClip(0, 'end', -120, { noSnap: true });
+         window.__key('v');
+         const clip = window.__fluxDev.sequence.getSequence().clips[0];
+         return { before, span, after: window.__shape()[0], speed: clip.speed, off: clip.offset };`,
+    )
+    assert.equal(state.after.dur, state.before.dur - 2, 'two seconds shorter on the timeline')
+    assert.ok(
+      Math.abs(state.after.dur * state.speed - state.span) < 1e-6,
+      `the same ${state.span}s of source should still play, and ${state.after.dur} × ` +
+        `${state.speed} is ${state.after.dur * state.speed}`,
+    )
+    assert.ok(state.speed > 1.9 && state.speed < 2.1, `a half-length clip runs at 2x, not ${state.speed}`)
+    assert.equal(state.off, 0, 'a stretch must not move the in point — that would be a trim')
+  })
+
+  await check('alt on an edge stretches whatever tool is in hand', async () => {
+    // The shortcut the tool strip is a slower way of reaching. Same edit.
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `await window.__trimClip(0, 'end', -120, { noSnap: true, altKey: true });
+         const clip = window.__fluxDev.sequence.getSequence().clips[0];
+         return { shape: window.__shape()[0], speed: clip.speed, tool: window.__fluxDev.tools.activeTool() };`,
+    )
+    assert.equal(state.tool, 'select', 'setup: the pointer should still be a pointer')
+    assert.ok(state.speed > 1.9 && state.speed < 2.1, `expected 2x, got ${state.speed}`)
+    assert.equal(state.shape.dur, 2, 'and half the length')
+  })
+
+  await check('a stretch stops at ten times either way', async () => {
+    // A limit you reach by dragging is kinder than one you discover by
+    // wondering why nothing plays.
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `window.__key('r');
+         await new Promise(r => setTimeout(r, 200));
+         await window.__trimClip(0, 'end', -4000, { noSnap: true });
+         const fast = window.__fluxDev.sequence.getSequence().clips[0].speed;
+         window.__key('v');
+         return { fast, shape: window.__shape()[0] };`,
+    )
+    assert.ok(state.fast <= 10.0001, `the rate ran away to ${state.fast}`)
+    assert.ok(state.fast > 9, `and it should have got all the way to ten, not ${state.fast}`)
+  })
+
   await check('a linked pair survives a save and a reload', async () => {
     // The promise the project format makes: everything on the timeline comes
     // back. A pair that reloads as two unrelated clips would still look right
@@ -3635,6 +3848,42 @@ try {
       'a pair that was cut apart came back tied together',
     )
     assert.deepEqual(after.sort(), before.sort(), 'and both halves came back where they were left')
+  })
+
+  await check('a stretched clip survives a save and a reload', async () => {
+    // Put back after the reloads above, which take every page-side helper with
+    // them — both of them, since this one drops a clip *and* drags an edge.
+    await evaluate(cdp, DRAG_HELPER)
+    await evaluate(cdp, TRIM_HELPERS)
+    const before = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `const { store, project } = window.__fluxDev;
+         await window.__trimClip(0, 'end', -120, { noSnap: true, altKey: true });
+         const clip = window.__fluxDev.sequence.getSequence().clips[0];
+         const shape = { dur: Math.round(clip.duration * 1000) / 1000,
+                         speed: Math.round(clip.speed * 1000) / 1000 };
+         if (Math.abs(shape.speed - 2) > 0.05) throw new Error('setup: speed is ' + shape.speed);
+         const saved = await project.saveProject();
+         if (!saved.ok) throw new Error('save failed: ' + saved.error);
+         await store.flushStores();
+         location.reload();
+         return shape;`,
+    )
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       const clip = seq.getSequence().clips[0];
+       return { dur: Math.round(clip.duration * 1000) / 1000,
+                speed: Math.round(clip.speed * 1000) / 1000 };`,
+    )
+    assert.deepEqual(after, before, 'a rate that does not survive a save is not an edit')
   })
 
   // ── sequences, and the tabs ───────────────────────────────────

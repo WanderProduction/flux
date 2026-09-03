@@ -29,11 +29,19 @@ export interface WorkspaceDefinition {
 }
 
 /**
- * EDIT — Viewer and Content Browser on top, Timeline full width beneath.
- * The layout a reels editor lives in.
+ * EDIT — Tools down the left, Viewer and Content Browser on top, Timeline full
+ * width beneath. The layout a reels editor lives in.
  */
 function buildEdit(api: DockviewApi) {
   api.addPanel({ id: 'viewer', component: 'viewer', title: 'Viewer' })
+  // Left of everything and narrow: a tool strip is read at a glance and picked
+  // from without looking, which is why every editor puts it at an edge.
+  api.addPanel({
+    id: 'tools',
+    component: 'tools',
+    title: 'Tools',
+    position: { referencePanel: 'viewer', direction: 'left' },
+  })
   api.addPanel({
     id: 'content',
     component: 'content',
@@ -46,6 +54,7 @@ function buildEdit(api: DockviewApi) {
     title: 'Timeline',
     position: { referencePanel: 'viewer', direction: 'below' },
   })
+  api.getPanel('tools')?.api.setSize({ width: 150 })
   api.getPanel('content')?.api.setActive()
 }
 

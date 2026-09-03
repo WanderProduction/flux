@@ -58,6 +58,9 @@ import {
   clipsInRegion,
   clipsAtTime,
   nudgeClips,
+  splitClips,
+  allowedStretch,
+  stretchClips,
   copyClips,
   pasteClips,
   duplicateClips,
@@ -76,6 +79,7 @@ import {
   type Track,
 } from '../kernel/sequence'
 import { getView, recordView, subscribeView } from '../kernel/view'
+import { activeTool, subscribeTool, type ToolId } from '../kernel/tools'
 import { getAssets as allAssets } from '../kernel/assets'
 import { PanelFrame } from './PanelFrame'
 import { useThumbnail } from './useThumbnail'
@@ -231,6 +235,8 @@ interface ClipTrim {
   ids: string[]
   edge: TrimEdge
   delta: number
+  /** True when the drag is changing the rate rather than which frames play. */
+  stretching: boolean
 }
 
 export function TimelinePanel() {
@@ -262,6 +268,16 @@ export function TimelinePanel() {
    * they are cutting to the beat and reaching for the clip they just heard.
    */
   const [autoSelect, setAutoSelect] = useState(() => getView().timeline.autoSelect === true)
+  /**
+   * What the pointer is holding, from kernel/tools.ts.
+   *
+   * The timeline is where three of the tools mean something, so it is the
+   * timeline that reads the mode. Kept in state rather than read at the moment
+   * of a press, because the cursor and the handles have to *look* like the tool
+   * before it is used.
+   */
+  const [tool, setTool] = useState<ToolId>(activeTool)
+  useEffect(() => subscribeTool(() => setTool(activeTool())), [])
   /**
    * Why the last drop did less than it looked like it should.
    *
@@ -497,7 +513,11 @@ export function TimelinePanel() {
 
       const startX = event.clientX
       let delta = 0
-      setTrim({ ids, edge, delta })
+      // Decided at the press and held for the gesture: an edge that changed
+      // from trimming to stretching halfway through a drag would be two edits
+      // in one, and neither of them the one that was asked for.
+      const stretching = tool === 'stretch' || event.altKey
+      setTrim({ ids, edge, delta, stretching })
 
       const onMove = (move: PointerEvent) => {
         const raw = (move.clientX - startX) / zoom
@@ -505,15 +525,18 @@ export function TimelinePanel() {
         // Clamped here rather than only on commit: an edge that keeps following
         // the pointer past the end of its own file and then springs back on
         // release is a lie about what the edit will be.
-        delta = allowedTrim(ids, edge, wanted)
-        setTrim({ ids, edge, delta })
+        delta = stretching ? allowedStretch(ids, edge, wanted) : allowedTrim(ids, edge, wanted)
+        setTrim({ ids, edge, delta, stretching })
       }
 
       const onUp = () => {
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
         window.removeEventListener('pointercancel', onUp)
-        if (delta !== 0) trimClips(ids, edge, delta)
+        if (delta !== 0) {
+          if (stretching) stretchClips(ids, edge, delta)
+          else trimClips(ids, edge, delta)
+        }
         setTrim(null)
       }
 
@@ -521,7 +544,7 @@ export function TimelinePanel() {
       window.addEventListener('pointerup', onUp)
       window.addEventListener('pointercancel', onUp)
     },
-    [zoom, snapping, snapTrimToEdges],
+    [zoom, snapping, tool, snapTrimToEdges],
   )
 
   /**
@@ -541,6 +564,25 @@ export function TimelinePanel() {
       if (event.button !== 0) return
       event.preventDefault()
       event.stopPropagation()
+
+      /*
+       * The razor cuts where it is pressed and nothing else happens.
+       *
+       * Both halves of a pair, always — see splitClips. The tool stays in hand
+       * afterwards, because cutting is something you do several times in a row
+       * and a razor that turned back into a pointer after every cut would be
+       * two gestures for one intention.
+       */
+      if (tool === 'razor') {
+        const at = timeAt(event.clientX)
+        const made = splitClips(at, [clip.id])
+        setNotice(
+          made.length > 0
+            ? `Cut at ${formatTimecode(at, sequence.settings.frameRate)}`
+            : 'A razor needs somewhere to cut — the very edge of a clip is not a cut',
+        )
+        return
+      }
 
       /*
        * Selection settles on press, not on release: the drag has to move what
@@ -685,7 +727,7 @@ export function TimelinePanel() {
       window.addEventListener('pointerup', onUp)
       window.addEventListener('pointercancel', onUp)
     },
-    [zoom, snapping, snapDeltaToEdges],
+    [zoom, snapping, tool, timeAt, sequence.settings.frameRate, snapDeltaToEdges],
   )
 
   // ── zoom ──────────────────────────────────────────────────────
@@ -1429,7 +1471,7 @@ export function TimelinePanel() {
         </>
       }
     >
-      <div className="tl-shell">
+      <div className={`tl-shell tl-shell--${tool}`}>
       <SequenceTabs
         sequences={allSequences}
         activeId={sequence.id}
@@ -1521,6 +1563,7 @@ export function TimelinePanel() {
                         // the same amount of length; the tail only changes the
                         // length. Same arithmetic as the kernel's trim, so what
                         // is drawn is what will be committed.
+                        stretching={trimming?.stretching === true}
                         trimStart={trimming?.edge === 'start' ? trimming.delta : 0}
                         trimDuration={
                           trimming ? (trimming.edge === 'start' ? -trimming.delta : trimming.delta) : 0
@@ -1925,6 +1968,7 @@ function ClipBlock({
   selected,
   dragging,
   copying,
+  stretching,
   trimStart,
   trimDuration,
   offsetX,
@@ -1938,6 +1982,7 @@ function ClipBlock({
   selected: boolean
   dragging: boolean
   copying: boolean
+  stretching: boolean
   trimStart: number
   trimDuration: number
   offsetX: number
@@ -1950,7 +1995,11 @@ function ClipBlock({
   // in-flight delta rather than from the sequence.
   const start = clip.start + trimStart
   const duration = clip.duration + trimDuration
-  const offset = clip.offset + trimStart
+  // A stretch holds the source still and changes the rate; a trim moves the in
+  // point. Drawn the same way the kernel will commit it, so the block under the
+  // pointer is the edit.
+  const speed = stretching ? (clip.duration * clip.speed) / Math.max(duration, 1e-6) : clip.speed
+  const offset = stretching ? clip.offset : clip.offset + trimStart * clip.speed
   const width = Math.max(2, duration * zoom)
 
   // The asset can be gone while the clip remains: removing something from the
@@ -1979,11 +2028,14 @@ function ClipBlock({
       }}
       title={`${label} · ${duration.toFixed(2)}s${
         trimmed ? ` · from ${offset.toFixed(2)}s of ${clip.sourceDuration.toFixed(2)}s` : ''
-      }`}
+      }${speed !== 1 ? ` · ${Math.round(speed * 100)}%` : ''}`}
       onPointerDown={onPointerDown}
     >
       {clip.kind === 'audio' ? (
-        <Waveform path={asset?.path} width={width} start={offset} duration={duration} />
+        // The *source* stretch it covers, not its length on the timeline: a
+        // clip at half speed shows half as much waveform, spread over the same
+        // block.
+        <Waveform path={asset?.path} width={width} start={offset} duration={duration * speed} />
       ) : (
         thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />
       )}
@@ -1993,6 +2045,11 @@ function ClipBlock({
       {clip.linkId && width > 46 && (
         <span className="clip-link" title="Linked — moves with its other half (Ctrl Tab)">
           ⛓
+        </span>
+      )}
+      {speed !== 1 && width > 60 && (
+        <span className="clip-speed" title="How fast this clip plays">
+          {Math.round(speed * 100)}%
         </span>
       )}
       <span className="clip-label">{label}</span>

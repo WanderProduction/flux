@@ -92,6 +92,20 @@ export interface Clip {
    * document reads back with this equal to its duration — which is true.
    */
   sourceDuration: number
+  /**
+   * How fast the source runs, as a multiple. 1 is as it was shot.
+   *
+   * A clip covers `duration * speed` seconds of its source in `duration`
+   * seconds of sequence, so every place that turns a moment on the timeline
+   * into a moment in a file multiplies by this — the compositor, the mixer, the
+   * waveform, and the arithmetic of a trim.
+   *
+   * Stored rather than derived from the two durations, even though it could be:
+   * a clip at 1.0000001 because of floating point would be a clip that is
+   * *nearly* untouched, and "is this clip stretched?" has to have a yes or no
+   * answer for anything downstream to say so.
+   */
+  speed: number
   /** Which half of the file this clip plays. Must match its track. */
   kind: TrackKind
   /**
@@ -463,6 +477,9 @@ function normalise(next: SequenceState): SequenceState {
     // so these are not defaults standing in for unknowns — they are what that
     // clip actually was.
     offset: Number.isFinite(clip.offset) ? Math.max(0, clip.offset) : 0,
+    // A clip saved before stretching existed played at the rate it was shot,
+    // which is what 1 means. Not a default standing in for an unknown.
+    speed: Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1,
     sourceDuration:
       Number.isFinite(clip.sourceDuration) && clip.sourceDuration > 0
         ? clip.sourceDuration
@@ -587,6 +604,8 @@ export interface NewClip {
   duration: number
   /** Seconds into the source. Defaults to the top of the file. */
   offset?: number
+  /** How fast the source runs. Defaults to the rate it was shot at. */
+  speed?: number
   /** The source's full length. Defaults to what is being played, which is what
       a drop means: the whole file. */
   sourceDuration?: number
@@ -600,6 +619,7 @@ export function addClip({
   start,
   duration,
   offset,
+  speed,
   sourceDuration,
   linkId,
 }: NewClip): Clip | null {
@@ -613,6 +633,7 @@ export function addClip({
     start: findFreeStart(trackId, start, duration),
     duration,
     offset: Math.max(0, offset ?? 0),
+    speed: speed && speed > 0 ? speed : 1,
     sourceDuration: Math.max(duration, sourceDuration ?? (offset ?? 0) + duration),
     // Taken from the track rather than passed in. A clip's kind and the track
     // it sits on cannot disagree, so there is no point offering a way for them
@@ -1353,22 +1374,22 @@ export function allowedTrim(ids: string[], edge: TrimEdge, deltaSeconds: number)
 
   for (const clip of chosen) {
     const siblings = clipsOnTrack(clip.trackId).filter((other) => !wanted.has(other.id))
+    // A second of timeline is `speed` seconds of source, so the limits the
+    // *file* imposes are divided by it: a clip at 2x has half as much timeline
+    // left to give as it has file.
+    const spare = (clip.sourceDuration - clip.offset) / clip.speed - clip.duration
     if (edge === 'start') {
       const before = siblings
         .filter((other) => other.start + other.duration <= clip.start + EPS)
         .reduce((end, other) => Math.max(end, other.start + other.duration), 0)
-      low = Math.max(low, -clip.offset, before - clip.start, -clip.start)
+      low = Math.max(low, -clip.offset / clip.speed, before - clip.start, -clip.start)
       high = Math.min(high, clip.duration - min)
     } else {
       const after = siblings
         .filter((other) => other.start >= clip.start + clip.duration - EPS)
         .reduce((start, other) => Math.min(start, other.start), Infinity)
       low = Math.max(low, min - clip.duration)
-      high = Math.min(
-        high,
-        clip.sourceDuration - clip.offset - clip.duration,
-        after - clip.start - clip.duration,
-      )
+      high = Math.min(high, spare, after - clip.start - clip.duration)
     }
   }
 
@@ -1401,7 +1422,9 @@ export function trimClips(ids: string[], edge: TrimEdge, deltaSeconds: number): 
       ? {
           ...clip,
           start: clip.start + delta,
-          offset: clip.offset + delta,
+          // Seconds of *source*: trimming a second off the head of a clip
+          // running at double speed skips two seconds of the file.
+          offset: clip.offset + delta * clip.speed,
           duration: clip.duration - delta,
         }
       : { ...clip, duration: clip.duration + delta }
@@ -1424,6 +1447,168 @@ export function trimClips(ids: string[], edge: TrimEdge, deltaSeconds: number): 
  */
 export interface MoveOptions {
   throughLinks?: boolean
+}
+
+/**
+ * How far a clip's rate may be pushed either way.
+ *
+ * Ten times faster and ten times slower. Beyond that the picture is a slideshow
+ * or a blur and the sound is unusable, and a limit you can reach by dragging is
+ * kinder than one you discover by wondering why nothing plays.
+ */
+export const MIN_SPEED = 0.1
+export const MAX_SPEED = 10
+
+/**
+ * How much of its source a clip covers, in seconds of that source.
+ *
+ * The one quantity a stretch holds still: the same frames play, over more or
+ * less time. Everything else about a stretch follows from that.
+ */
+export function sourceSpan(clip: Clip): number {
+  return clip.duration * clip.speed
+}
+
+/**
+ * What an edge can do when it is *stretching* rather than trimming.
+ *
+ * The same shape as allowedTrim and a different question. A trim changes which
+ * frames play; a stretch changes how long the same frames take, so the source
+ * span is held and the rate falls out of the new length. Three things stop it:
+ * the neighbour, one frame, and the ends of the rate range.
+ */
+export function allowedStretch(ids: string[], edge: TrimEdge, deltaSeconds: number): number {
+  const wanted = new Set(withLinked(ids))
+  const chosen = sequence.clips.filter((clip) => wanted.has(clip.id))
+  if (chosen.length === 0) return 0
+
+  const min = minDuration()
+  let low = -Infinity
+  let high = Infinity
+
+  for (const clip of chosen) {
+    const span = sourceSpan(clip)
+    // Longer means slower, so the *slowest* allowed rate is what caps growth.
+    const longest = Math.max(min, span / MIN_SPEED)
+    const shortest = Math.max(min, span / MAX_SPEED)
+    const siblings = clipsOnTrack(clip.trackId).filter((other) => !wanted.has(other.id))
+
+    if (edge === 'start') {
+      const before = siblings
+        .filter((other) => other.start + other.duration <= clip.start + EPS)
+        .reduce((end, other) => Math.max(end, other.start + other.duration), 0)
+      // The head moving right shortens; moving left lengthens, and it stops at
+      // its neighbour and at zero.
+      low = Math.max(low, before - clip.start, -clip.start, clip.duration - longest)
+      high = Math.min(high, clip.duration - shortest)
+    } else {
+      const after = siblings
+        .filter((other) => other.start >= clip.start + clip.duration - EPS)
+        .reduce((start, other) => Math.min(start, other.start), Infinity)
+      low = Math.max(low, shortest - clip.duration)
+      high = Math.min(high, longest - clip.duration, after - clip.start - clip.duration)
+    }
+  }
+
+  const fps = sequence.settings.frameRate
+  const lowFrame = Math.ceil(low * fps - EPS) / fps
+  const highFrame = Math.floor(high * fps + EPS) / fps
+  if (lowFrame > highFrame) return 0
+
+  return Math.min(highFrame, Math.max(lowFrame, snapDelta(deltaSeconds)))
+}
+
+/**
+ * Stretches one edge: the same frames, over more or less time.
+ *
+ * The head anchors the tail and the tail anchors the head, so the edge you are
+ * not holding stays where it is — which is what makes this feel like pulling
+ * the clip longer rather than moving it. The rate is recomputed from the new
+ * length rather than accumulated, so stretching out and back returns a clip to
+ * exactly the rate it started at instead of to something near it.
+ *
+ * @returns true when anything changed.
+ */
+export function stretchClips(ids: string[], edge: TrimEdge, deltaSeconds: number): boolean {
+  const delta = allowedStretch(ids, edge, deltaSeconds)
+  if (delta === 0) return false
+
+  const wanted = new Set(withLinked(ids))
+  const clips = sequence.clips.map((clip) => {
+    if (!wanted.has(clip.id)) return clip
+    const span = sourceSpan(clip)
+    const duration = edge === 'start' ? clip.duration - delta : clip.duration + delta
+    if (duration <= 0) return clip
+    return {
+      ...clip,
+      start: edge === 'start' ? clip.start + delta : clip.start,
+      duration,
+      speed: span / duration,
+    }
+  })
+
+  sequence = { ...sequence, clips }
+  emit()
+  return true
+}
+
+/**
+ * Cuts every clip that covers `at` into two, where the razor landed.
+ *
+ * Both halves of a pair, always: a cut through the picture that left the sound
+ * whole would produce a clip linked to something twice its length, and the
+ * first drag would take them apart. Each side then gets a link of its own, so
+ * the two new pairs are pairs rather than four clips sharing one id.
+ *
+ * The right-hand piece starts further into the source — by the *source*
+ * distance, which is the timeline distance times the rate.
+ *
+ * @param ids when given, only these clips (and their partners) are cut. The
+ *   razor passes the clip it was clicked on; a cut-at-the-playhead command
+ *   passes nothing and takes everything the playhead crosses.
+ * @returns the clips created on the right of the cut.
+ */
+export function splitClips(at: number, ids?: string[]): Clip[] {
+  const when = snapToFrame(at)
+  const only = ids ? new Set(withLinked(ids)) : null
+  const cutting = sequence.clips.filter(
+    (clip) =>
+      (!only || only.has(clip.id)) &&
+      when > clip.start + EPS &&
+      when < clip.start + clip.duration - EPS,
+  )
+  if (cutting.length === 0) return []
+
+  // One new link per old link, so both halves of a pair land in the same new
+  // pair. A clip that was not linked stays unlinked on both sides of the cut.
+  const links = new Map<string, string>()
+  for (const clip of cutting) {
+    if (clip.linkId && !links.has(clip.linkId)) links.set(clip.linkId, nextId('l'))
+  }
+
+  const made: Clip[] = []
+  const clips: Clip[] = []
+  for (const clip of sequence.clips) {
+    if (!cutting.includes(clip)) {
+      clips.push(clip)
+      continue
+    }
+    const left = { ...clip, duration: when - clip.start }
+    const right: Clip = {
+      ...clip,
+      id: nextId('c'),
+      start: when,
+      duration: clip.start + clip.duration - when,
+      offset: clip.offset + (when - clip.start) * clip.speed,
+      ...(clip.linkId ? { linkId: links.get(clip.linkId) } : {}),
+    }
+    clips.push(left, right)
+    made.push(right)
+  }
+
+  sequence = { ...sequence, clips }
+  emit()
+  return made
 }
 
 /** Which way a keyboard nudge is pushing. */

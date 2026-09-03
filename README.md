@@ -55,6 +55,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Copy, paste, duplicate** | `Ctrl C` / `Ctrl V` at the playhead, or `Alt` drag to leave a copy behind. |
 | **Selection** | Click, click-again, click-away, rubber band, `Shift` range by track and time, `Ctrl` one at a time. |
 | **Keyboard edit** | `S` takes what the playhead is on; `Alt` and the arrows walk it, swap it, and lift it between tracks. |
+| **Tools** | A strip of them: select, razor and stretch work; the rest say what they will do. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
@@ -66,7 +67,8 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
 | **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
 
-Three built-in panels: **Viewer**, **Timeline**, **Content Browser** — and all three do real work.
+Four built-in panels: **Viewer**, **Timeline**, **Content Browser** and **Tools** — and all four do
+real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
 not exist yet, and a tour of empty rooms says less about where this is going than three that are
 furnished. They come back when there is something to put in them.
@@ -232,6 +234,85 @@ Local files reach the renderer over a `flux-asset://` protocol rather than `file
 blocks). The handler serves **only** paths matching the shared media allowlist, and it speaks the
 small part of HTTP that matters — see **Serving media** below, because getting that wrong is what a
 broken viewer looks like.
+
+### Tools
+
+A strip down the left of what the pointer is holding. One tool at a time,
+app-wide, because the cursor means one thing everywhere and which thing should
+be a mode you can see.
+
+| | | |
+|---|---|---|
+| **Select** | `V` | select, move and trim — everything above |
+| **Razor** | `C` | cut a clip in two where you click |
+| **Stretch** | `R` | drag an edge to change how fast a clip plays |
+| Pen | `P` | *vector masks and paths* |
+| Geometry | `G` | *shape layers* |
+| Brush | `B` | *strokes painted onto a frame* |
+| Eyedropper | `I` | *pick a colour out of the picture* |
+| Ruler | `U` | *measure in pixels, guides, grid alignment* |
+| Puppet | `Y` | *pins, and warping between them* |
+| Generate | `J` | *generative fills and shots* |
+
+**Seven of these are not built, and they say so.** The strip is the shape of the
+thing FLUX is going to be, in the order the work is coming, and a row showing
+only the three finished tools would say less. What it must never do is pretend:
+an unbuilt tool is drawn as unavailable, *refuses* to take the pointer when it
+is picked, and answers with what it will do when it exists. A button that
+silently becomes a mode which does nothing is a bug report waiting to be
+written; one that says "not yet, and here is what this will be" is a roadmap you
+can click.
+
+The mode lives in `kernel/tools.ts` rather than in the panel. The Timeline is
+what *uses* it, and a panel that owned it would be a panel every other panel had
+to reach into — closing the strip would leave the pointer holding nothing.
+Every tool is a command, so the keys and the palette both reach them whether or
+not the strip is on screen.
+
+#### The razor
+
+Clicking a clip cuts it in two where the pointer is. **Both halves of a pair,
+always**: a cut through the picture that left the sound whole would produce a
+clip linked to something twice its length, and the first drag would take them
+apart. Each side then gets a link of its own — two pairs, not four clips sharing
+one id — and the right-hand piece starts further into its source by exactly the
+distance the cut was from the clip's head.
+
+The very edge of a clip is not a cut, and the razor says so rather than making a
+piece with no frames in it. The tool stays in hand afterwards, because cutting
+is something you do several times in a row.
+
+#### Stretching, and what a clip's rate is
+
+The stretch tool drags an edge like a trim, and means something else: **the same
+frames, over more or less time**. `Alt` and an edge does it with any tool in
+hand, which is the shortcut the strip is a slower way of reaching.
+
+A clip therefore carries a `speed` — how fast its source runs, as a multiple —
+and it covers `duration × speed` seconds of that source. Every place that turns
+a moment on the timeline into a moment in a file multiplies by it:
+
+- the compositor asks its decoder for `offset + (now − start) × speed`
+- the mixer seeks by the same arithmetic, maps each decoded frame back the other
+  way, and hands the rate to `AudioBufferSourceNode.playbackRate` — Web Audio
+  resamples, and the pitch moves with the speed, which is what a stretch means
+  before anyone asks for pitch to be held
+- the waveform draws `duration × speed` seconds of source into the block
+- and a trim's arithmetic divides by it: a clip at 2× has half as much timeline
+  left to give as it has file
+
+The edge you are *not* holding stays where it is, so a stretch feels like
+pulling the clip longer rather than moving it. The rate is recomputed from the
+new length rather than accumulated, so stretching out and back lands on exactly
+the rate it started at instead of near it. It stops at **ten times either way**:
+past that the picture is a slideshow or a blur, and a limit you reach by
+dragging is kinder than one you discover by wondering why nothing plays.
+
+`speed` is stored rather than derived from the two durations, even though it
+could be. A clip at 1.0000001 because of floating point would be a clip that is
+*nearly* untouched, and "is this stretched?" has to have a yes or no answer for
+anything downstream to say so. A clip saved before stretching existed played at
+the rate it was shot, which is exactly what 1 means.
 
 ### The Timeline
 

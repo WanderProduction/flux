@@ -48,6 +48,22 @@ export const defaultKeymap: Keymap = {
    * as "take the clip I am parked on", the keyboard's version of clicking one.
    */
   n: 'timeline.toggleSnapping',
+  /*
+   * The tool strip, on the letters every editor uses for them. Single keys,
+   * because picking a tool is something done a hundred times an hour — and the
+   * ones that are not built yet are bound too, so they can say so rather than
+   * appearing to be nothing at all.
+   */
+  v: 'tool.select',
+  c: 'tool.razor',
+  r: 'tool.stretch',
+  p: 'tool.pen',
+  g: 'tool.geometry',
+  b: 'tool.brush',
+  i: 'tool.eyedropper',
+  u: 'tool.ruler',
+  y: 'tool.puppet',
+  j: 'tool.generate',
   s: 'timeline.selectAtPlayhead',
   /*
    * Moving a clip with the keyboard: along its track to the next cut, or up and

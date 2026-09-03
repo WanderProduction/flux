@@ -165,7 +165,9 @@ export function ViewerPanel() {
    * head of the clip under the playhead and the picture went on showing the
    * frames from before the trim, because the ids had not changed.
    */
-  const placement = layers.map((layer) => `${layer.id}@${layer.start}+${layer.offset}`).join('|')
+  const placement = layers
+    .map((layer) => `${layer.id}@${layer.start}+${layer.offset}x${layer.speed}`)
+    .join('|')
   const clip = layers.at(-1) ?? null
   const assetById = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets])
   const asset = clip ? assetById.get(clip.assetId) : undefined
@@ -291,10 +293,10 @@ export function ViewerPanel() {
         const frames = await Promise.all(
           layers.map((layer) => {
             const source = sourcesRef.current.get(layer.id)
-            // Sequence time to source time: where the playhead is within the
-            // clip, plus where in the file the clip was cut from.
+            // Sequence time to source time: how far into the clip the
+            // playhead is, at the rate the clip runs, from where it was cut.
             return source
-              ? source.frameFor(now - layer.start + layer.offset)
+              ? source.frameFor(layer.offset + (now - layer.start) * layer.speed)
               : Promise.resolve(null)
           }),
         )
@@ -381,7 +383,7 @@ export function ViewerPanel() {
     const media = mediaRef.current
     if (!media || !clip) return
     if (media.readyState === 0) return
-    const target = getTime() - clip.start + clip.offset
+    const target = clip.offset + (getTime() - clip.start) * clip.speed
     if (Math.abs(media.currentTime - target) > SYNC_TOLERANCE) media.currentTime = target
     // seekToken is the dependency that matters: this must fire on a seek, not
     // on the clock advancing.
@@ -407,7 +409,7 @@ export function ViewerPanel() {
     setClockSource('element', () => {
       const media = mediaRef.current
       if (!media || media.paused || media.readyState < 2) return null
-      return clip.start + media.currentTime - clip.offset
+      return clip.start + (media.currentTime - clip.offset) / clip.speed
     })
     return () => setClockSource('element', null)
   }, [clip, playable, decoding])

@@ -14,6 +14,7 @@ import { panels } from '../kernel/panels'
 import { ViewerPanel } from './ViewerPanel'
 import { TimelinePanel } from './TimelinePanel'
 import { ContentBrowserPanel } from './ContentBrowserPanel'
+import { ToolsPanel } from './ToolsPanel'
 
 export function registerBuiltinPanels() {
   panels.registerAll([
@@ -28,6 +29,12 @@ export function registerBuiltinPanels() {
       title: 'Timeline',
       description: 'Time-occupying nodes of the current scope',
       component: TimelinePanel,
+    },
+    {
+      id: 'tools',
+      title: 'Tools',
+      description: 'What the pointer is holding',
+      component: ToolsPanel,
     },
     {
       id: 'content',

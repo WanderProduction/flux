@@ -358,7 +358,7 @@ async function tick() {
       // a trimmed clip starts at its in point rather than at the top of the
       // file, which is the whole of what a trim means to the mixer.
       const from = Math.max(0, now - clip.start)
-      opened.source.seek(clip.offset + from)
+      opened.source.seek(clip.offset + from * clip.speed)
       voice = { clipId: clip.id, source: opened.source, until: clip.start + from, nodes: new Set(), busy: false, done: false }
       voices.set(clip.id, voice)
     }
@@ -375,14 +375,16 @@ async function tick() {
         if (!running || !voices.has(clip.id)) break
 
         // Source time back to sequence time. The in point is subtracted
-        // because the frame knows where it is in the file, not in the edit.
-        const at = clip.start + frame.time - clip.offset
+        // because the frame knows where it is in the file, not in the edit, and
+        // the rate divides because a stretched clip covers more file than
+        // timeline.
+        const at = clip.start + (frame.time - clip.offset) / clip.speed
         const end = clip.start + clip.duration
         if (at >= end) {
           voice.done = true
           break
         }
-        voice.until = at + frame.duration
+        voice.until = at + frame.duration / clip.speed
 
         const when = sequenceToContext(at)
         if (when < ctx.currentTime - LATE_TOLERANCE) {
@@ -401,6 +403,15 @@ async function tick() {
 
         const node = ctx.createBufferSource()
         node.buffer = buffer
+        /*
+         * The rate the clip runs at, handed to the device.
+         *
+         * Web Audio resamples for us, and it moves the pitch with the speed —
+         * which is what a stretch means before anyone asks for pitch to be
+         * held. Set before start(), because a source node's rate cannot be
+         * changed once it is playing.
+         */
+        if (clip.speed !== 1) node.playbackRate.value = clip.speed
         // Into its track's fader, not straight at the master: that is what
         // makes a level change apply to everything already scheduled.
         node.connect(gainFor(clip.trackId) ?? (master as GainNode))

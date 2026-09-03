@@ -6,6 +6,8 @@ import './styles/app.css'
 
 import { App } from './App'
 import { registerBuiltinPanels } from './panels'
+import * as tools from './kernel/tools'
+import { registerToolCommands } from './kernel/tools'
 
 import * as assets from './kernel/assets'
 import * as sequence from './kernel/sequence'
@@ -28,6 +30,13 @@ import * as audioSource from './kernel/media/audioSource'
 // Panels register before the first render so the dock's component map is
 // complete on mount. Plugins will hook in here later, ahead of this call.
 registerBuiltinPanels()
+
+/**
+ * Tools are commands, so the palette and the keymap both reach them — and they
+ * are registered here rather than by the Tools panel, because a tool you could
+ * lose by closing a window is not a tool.
+ */
+registerToolCommands()
 
 /**
  * The mixer listens to the transport for the whole life of the app.
@@ -64,6 +73,7 @@ if (import.meta.env.DEV) {
       importMode,
       pinned,
       view,
+      tools,
       playback,
       importPipeline,
       videoSource,

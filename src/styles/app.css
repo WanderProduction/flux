@@ -895,6 +895,107 @@ kbd {
   color: var(--flux-text);
 }
 
+/* ── Tools ─────────────────────────────────────────────────── */
+
+.tools {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.tools-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tool-button {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--flux-radius);
+  background: none;
+  color: var(--flux-text-dim);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.tool-button:hover {
+  background: var(--flux-bg-hover);
+  color: var(--flux-text);
+}
+
+/* The tool in hand. A mode, so it reads as held rather than as hovered. */
+.tool-button--on {
+  border-color: color-mix(in srgb, var(--flux-accent) 60%, var(--flux-border));
+  background: color-mix(in srgb, var(--flux-accent) 18%, transparent);
+  color: var(--flux-text);
+}
+
+/* Not built yet, and saying so before it is pressed rather than after. */
+.tool-button--later {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tool-button--later:hover {
+  background: none;
+  color: var(--flux-text-dim);
+}
+
+.tool-glyph {
+  font-size: 13px;
+  text-align: center;
+  opacity: 0.9;
+}
+.tool-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-key {
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+  opacity: 0.6;
+}
+
+.tools-say {
+  margin-top: auto;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.4;
+}
+.tools-say--refused {
+  color: var(--flux-warn);
+}
+
+/* The pointer says which tool it is holding, over the whole timeline. */
+.tl-shell--razor .clip,
+.tl-shell--razor .tl-lane {
+  cursor: crosshair;
+}
+.tl-shell--stretch .clip-handle {
+  cursor: col-resize;
+}
+
+/* How fast a clip plays, when that is not simply "as it was shot". */
+.clip-speed {
+  flex: none;
+  margin-left: 4px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--flux-warn) 30%, rgba(0, 0, 0, 0.5));
+  color: #ffe6bd;
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+}
+
 /* ── Node Map ──────────────────────────────────────────────── */
 
 .nodemap {
