@@ -22,6 +22,9 @@ export const defaultKeymap: Keymap = {
   'ctrl+alt+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
   delete: 'timeline.deleteSelected',
+  // Ctrl and the transport key: the picture and its sound are one thing to the
+  // hand until this says otherwise.
+  'ctrl+space': 'timeline.toggleLink',
   // The transport. Space is the one key in a media app that is spoken for
   // before anything else is designed.
   space: 'playback.toggle',

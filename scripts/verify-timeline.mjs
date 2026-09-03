@@ -2015,6 +2015,195 @@ try {
     assert.equal(state, 0)
   })
 
+  // ── linking, and cutting the link ─────────────────────────────
+
+  /*
+   * A pair moves as one until someone says otherwise. Ctrl+Space is that
+   * someone, and everything below drives it the way a hand does: a real key
+   * event at the window, through the keymap, into the command.
+   */
+  await evaluate(
+    cdp,
+    `window.__ctrlSpace = () => window.dispatchEvent(
+       new KeyboardEvent('keydown', { key: ' ', ctrlKey: true, bubbles: true, cancelable: true }));
+
+     window.__clickClip = (index, opts = {}) => {
+       const el = [...document.querySelectorAll('.tl-lane .clip')][index];
+       if (!el) throw new Error('no clip at index ' + index);
+       const box = el.getBoundingClientRect();
+       const at = { clientX: box.left + Math.min(30, box.width / 2),
+                    clientY: box.top + box.height / 2 };
+       el.dispatchEvent(new PointerEvent('pointerdown',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 51, shiftKey: !!opts.shift, ...at }));
+       window.dispatchEvent(new PointerEvent('pointerup',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 51, ...at }));
+     };
+
+     window.__links = () => window.__fluxDev.sequence.getSequence().clips
+       .slice().sort((a, b) => a.kind.localeCompare(b.kind))
+       .map(c => [c.kind, Math.round(c.start * 1000) / 1000, c.linkId ? 'linked' : 'loose']);
+
+     window.__selected = () => document.querySelectorAll('.clip--selected').length;
+     window.__chains = () => document.querySelectorAll('.clip-link').length;
+     return true;`,
+  )
+
+  await check('ctrl+space cuts a pair apart', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         const before = { links: window.__links(), chains: window.__chains(), selected: window.__selected() };
+         window.__ctrlSpace();
+         await new Promise(r => setTimeout(r, 300));
+         return { before, after: { links: window.__links(), chains: window.__chains(),
+                                   selected: window.__selected(),
+                                   notice: document.querySelector('.tl-notice')?.textContent ?? null } };`,
+    )
+    assert.deepEqual(
+      state.before.links.map((row) => row[2]),
+      ['linked', 'linked'],
+      'setup: the drop should have produced a linked pair',
+    )
+    assert.equal(state.before.chains, 2, 'and both halves should say so')
+    assert.deepEqual(
+      state.after.links.map((row) => row[2]),
+      ['loose', 'loose'],
+      'both halves must come apart, not just the one that was pressed',
+    )
+    assert.equal(state.after.chains, 0, 'and stop claiming to be linked')
+    assert.equal(state.after.selected, 2, 'both stay selected, so a second press ties them back')
+    assert.ok(
+      state.after.notice?.includes('Unlinked'),
+      `the change is invisible until something is dragged, so it has to be said: ${state.after.notice}`,
+    )
+  })
+
+  await check('once apart, each half moves on its own', async () => {
+    /*
+     * The point of the whole feature. The picture goes two seconds later and
+     * the sound stays exactly where it was — deliberately out of sync, which is
+     * an edit rather than an accident.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         window.__ctrlSpace();
+         await new Promise(r => setTimeout(r, 300));
+
+         // A press keeps the group so it can be dragged; letting go without
+         // dragging means "this one". Both are still selected from the unlink.
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         const selected = window.__selected();
+         const video = [...document.querySelectorAll('.tl-lane .clip')]
+           .findIndex(el => el.className.includes('clip--video'));
+         await window.__dragClip(video, 120, 0, { altKey: true });
+         return { selected, links: window.__links() };`,
+    )
+    assert.equal(state.selected, 1, 'clicking one of two loose clips should leave one selected')
+    const video = state.links.find((row) => row[0] === 'video')
+    const audio = state.links.find((row) => row[0] === 'audio')
+    assert.equal(video[1], 2, 'the picture should have moved two seconds')
+    assert.equal(audio[1], 0, 'and the sound should have stayed exactly where it was')
+  })
+
+  await check('ctrl+space ties two clips back together', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         window.__ctrlSpace();
+         await new Promise(r => setTimeout(r, 250));
+         window.__ctrlSpace();
+         await new Promise(r => setTimeout(r, 250));
+         const linked = { links: window.__links(), chains: window.__chains(),
+                          notice: document.querySelector('.tl-notice')?.textContent ?? null };
+         const video = [...document.querySelectorAll('.tl-lane .clip')]
+           .findIndex(el => el.className.includes('clip--video'));
+         await window.__dragClip(video, 120, 0, { altKey: true });
+         return { linked, moved: window.__links() };`,
+    )
+    assert.deepEqual(
+      state.linked.links.map((row) => row[2]),
+      ['linked', 'linked'],
+      'a second press should tie them back together',
+    )
+    assert.equal(state.linked.chains, 2)
+    assert.ok(state.linked.notice?.includes('Linked'), state.linked.notice)
+    assert.deepEqual(
+      state.moved.map((row) => row[1]),
+      [2, 2],
+      'and once linked again they travel together',
+    )
+  })
+
+  await check('cutting a link takes the other half with it, whoever asks', async () => {
+    // Asked for by the picture's id alone. The panel expands a press through
+    // the link before it does anything, so a gesture cannot tell whether the
+    // rule is in the kernel — and everything else that edits a sequence needs
+    // it to be.
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const video = sequence.getSequence().clips.find(c => c.kind === 'video');
+         const result = sequence.toggleLink([video.id]);
+         await new Promise(r => setTimeout(r, 200));
+         return { result, links: window.__links() };`,
+    )
+    assert.equal(state.result, 'unlinked')
+    assert.deepEqual(
+      state.links.map((row) => row[2]),
+      ['loose', 'loose'],
+      'the half nobody named must come apart too, or it points at a link with nobody in it',
+    )
+  })
+
+  await check('a clip on its own has nothing to link to', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         window.__ctrlSpace();
+         await new Promise(r => setTimeout(r, 300));
+         return { links: window.__links(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.links.map((row) => row[2]), ['loose'], 'nothing should have been linked')
+    assert.ok(
+      state.notice?.includes('nothing to link to'),
+      `a command that did nothing has to say why: ${state.notice}`,
+    )
+  })
+
+  await check('pressing one clip of a group and letting go means that one', async () => {
+    /*
+     * The rule that makes an unlinked pair usable. A press has to keep the
+     * whole group or a group could never be dragged; a release without a drag
+     * is where "I meant this one" and "I meant all of these" separate.
+     */
+    const state = await evaluate(
+      cdp,
+      seedClips(4) +
+        `// Two clips, selected by shift-clicking, since there is no select-all.
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         window.__clickClip(1, { shift: true });
+         await new Promise(r => setTimeout(r, 150));
+         const both = window.__selected();
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         return { both, after: window.__selected() };`,
+    )
+    assert.equal(state.both, 2, 'setup: shift-clicking should have selected two clips')
+    assert.equal(state.after, 1, 'and pressing one of them without dragging means that one')
+  })
+
   // ── trimming ──────────────────────────────────────────────────
 
   /*
@@ -2499,6 +2688,54 @@ try {
          dur: r3(c.duration), off: r3(c.offset), src: r3(c.sourceDuration) }));`,
     )
     assert.deepEqual(after, before, 'a trim that does not survive a save is not an edit')
+  })
+
+  await check('a link that was cut stays cut across a save and a reload', async () => {
+    // The linked case has its own check above. This is the other state, and it
+    // is the one that is stored as an *absence* — a field that is not there.
+    // Absences are exactly what a format quietly reinstates.
+    const before = await evaluate(
+      cdp,
+      `const { assets, sequence, store, project, view } = window.__fluxDev;
+       sequence.setSequence(null);
+       view.recordView({ timeline: { zoom: 60 } });
+       await new Promise(r => setTimeout(r, 200));
+       const a = assets.getAssets().find(x => x.name === 'voice_over.mp4');
+       const probed = await assets.ensureProbed(a.id);
+       sequence.addLinkedClips(
+         { assetId: a.id, trackId: 'V1', start: 0, duration: probed.duration }, true);
+       const video = sequence.getSequence().clips.find(c => c.kind === 'video');
+       if (sequence.toggleLink([video.id]) !== 'unlinked') throw new Error('setup: nothing was unlinked');
+       // Apart, and in different places, so a reload that re-paired them by
+       // position rather than by what was stored would be visible.
+       sequence.moveClips([video.id], 2, 0);
+       await new Promise(r => setTimeout(r, 200));
+       const shape = sequence.getSequence().clips
+         .map(c => [c.kind, Math.round(c.start * 1000) / 1000, c.linkId ? 'linked' : 'loose']);
+       const saved = await project.saveProject();
+       if (!saved.ok) throw new Error('save failed: ' + saved.error);
+       await store.flushStores();
+       location.reload();
+       return shape;`,
+    )
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       return seq.getSequence().clips
+         .map(c => [c.kind, Math.round(c.start * 1000) / 1000, c.linkId ? 'linked' : 'loose']);`,
+    )
+    assert.deepEqual(
+      after.map((row) => row[2]),
+      ['loose', 'loose'],
+      'a pair that was cut apart came back tied together',
+    )
+    assert.deepEqual(after.sort(), before.sort(), 'and both halves came back where they were left')
   })
 
   // ── sequences, and the tabs ───────────────────────────────────

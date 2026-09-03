@@ -51,6 +51,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
+| **Link / unlink** | `Ctrl Space` cuts a pair apart, or ties clips together. Apart, each half moves alone. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
@@ -272,9 +273,12 @@ Two behaviours worth knowing:
 | `Alt` + scroll | zoom, anchored on the pointer |
 | drag the ruler, or the playhead | scrub |
 | drag a clip | move it in time, and between tracks |
+| drag either edge of a clip | trim what it plays |
 | `Alt` while dragging a clip | ignore snapping |
 | `Shift` / `Ctrl` click | add to the selection |
+| `Ctrl Space` | link or unlink the selected clips |
 | `Space` | play / pause |
+| `Delete` | remove the selected clips |
 
 The bare gesture is **horizontal** because a timeline is overwhelmingly a horizontal surface — the
 axis you move along all day should not need a modifier held down to reach. That inverts the usual
@@ -426,6 +430,27 @@ So a link moves as a unit. The clip that was grabbed decides the distance — th
 midpoint rule, so dragging a pair feels like dragging a clip — and the rest follow it exactly. If a
 follower cannot sit there, the unit does not move: a pair that will not fit somewhere should refuse
 to go there, which is a thing you can see and undo.
+
+**`Ctrl Space` cuts the link, and ties it back.** One gesture rather than two commands, because the
+question a hand asks is never "is this linked?" — it is "should this move on its own now?", and the
+answer to that is always the opposite of what is currently true. Apart, the halves select, move and
+trim on their own, and can be left deliberately out of sync; a second press ties them back where
+they now are. Linking does not move anything: two clips that drifted apart stay where they are and
+travel together from here, because re-syncing them would silently undo the edit that separated them.
+
+The whole group either way. Given one half of a pair, both halves come apart — leaving a partner
+pointing at a link with nobody else in it would be a clip that looks tied to something and is not.
+Given two clips to tie together, anything already linked to either of them joins the new group
+rather than being left behind. A linked clip shows a small chain; it is dim, because being linked is
+the normal state and a row of bright icons reads as a row of warnings.
+
+One rule had to change to make an unlinked pair usable. **A press keeps the selection; a release
+without a drag collapses it to the clip you pressed.** The press has to keep the group or a group
+could never be dragged at all — the first press would throw the rest of it away — and the release is
+where "I meant this one" and "I meant all of these" separate. Every multi-select surface works this
+way, which is why nobody notices the rule until it is missing: without it, both halves stay selected
+after unlinking and dragging one still moves both, which reads exactly like the unlink not having
+worked.
 
 Tracks stack the way every NLE stacks them, and it is not arbitrary — **video upward** because a
 higher layer is in front, **audio downward** because nothing is in front of anything, it all just

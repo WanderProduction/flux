@@ -691,6 +691,57 @@ export function withLinked(ids: Iterable<string>): string[] {
 }
 
 /**
+ * Ties a set of clips together, or cuts them apart.
+ *
+ * One gesture rather than two commands, because the question a hand is asking
+ * is never "is this linked?" — it is "should this move on its own now?", and
+ * the answer to that is always the opposite of what is currently true.
+ *
+ * The whole group either way. Given one half of a pair, both halves are
+ * unlinked: leaving a partner pointing at a link with nobody else in it would
+ * be a clip that looks tied to something and is not. Given two clips to link,
+ * anything already linked to either of them joins the new group rather than
+ * being left behind — a sound that quietly stopped following its picture
+ * because the picture was relinked to something else is the failure this whole
+ * mechanism exists to prevent.
+ *
+ * Linking does not move anything. Two clips that drifted apart while unlinked
+ * stay where they are and travel together from here — which is what "link"
+ * means everywhere else, and re-syncing them would silently undo the edit that
+ * separated them.
+ *
+ * @returns what the clips are now, or null when there was nothing to do.
+ */
+export function toggleLink(ids: string[]): 'linked' | 'unlinked' | null {
+  const group = new Set(withLinked(ids))
+  const chosen = sequence.clips.filter((clip) => group.has(clip.id))
+  if (chosen.length === 0) return null
+
+  if (chosen.some((clip) => clip.linkId)) {
+    sequence = {
+      ...sequence,
+      clips: sequence.clips.map((clip) =>
+        group.has(clip.id) && clip.linkId ? { ...clip, linkId: undefined } : clip,
+      ),
+    }
+    emit()
+    return 'unlinked'
+  }
+
+  // A single clip has nothing to be tied to. Saying so is the panel's job; here
+  // it is simply not an edit.
+  if (chosen.length < 2) return null
+
+  const linkId = nextId('l')
+  sequence = {
+    ...sequence,
+    clips: sequence.clips.map((clip) => (group.has(clip.id) ? { ...clip, linkId } : clip)),
+  }
+  emit()
+  return 'linked'
+}
+
+/**
  * Adds a track above the rest.
  *
  * Above, not below: tracks are stored in the order they are drawn and the first

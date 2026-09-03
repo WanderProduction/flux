@@ -53,6 +53,7 @@ import {
   addTrack,
   allowedTrim,
   trimClips,
+  toggleLink,
   type TrimEdge,
   findFreeStart,
   moveClips,
@@ -506,6 +507,25 @@ export function TimelinePanel() {
         // Committed here and nowhere else: until the pointer comes up the clip
         // is still where it was, so an abandoned drag needs no undoing.
         if (moved) moveClips(ids, deltaTime, deltaTracks)
+        else if (!additive && chosen.size > together.length) {
+          /*
+           * Pressed a clip that was already part of a group, and let go without
+           * dragging: that means "this one", not "all of them".
+           *
+           * The press has to keep the group, or a group could never be dragged
+           * at all — the first press would throw the rest of it away. The
+           * release is where the two intents separate, which is how every
+           * multi-select surface behaves and why nobody notices the rule.
+           *
+           * It matters most straight after unlinking a pair. Both halves are
+           * still selected, and without this the only way to move one of them
+           * alone would be to click somewhere empty first — which reads as the
+           * unlink not having worked.
+           */
+          const one = new Set(together)
+          setSelected(one)
+          selectedRef.current = one
+        }
         setDrag(null)
       }
 
@@ -813,6 +833,29 @@ export function TimelinePanel() {
     setSelected(new Set())
   }, [selected])
 
+  /**
+   * Ties the selection together, or cuts it apart.
+   *
+   * Reports what happened, because the result is invisible until something is
+   * dragged: two clips that no longer move together look exactly like two clips
+   * that do, right up to the moment one of them is somewhere the other is not.
+   */
+  const toggleLinkSelected = useCallback(() => {
+    const ids = [...selectedRef.current]
+    if (ids.length === 0) {
+      setNotice('Select the clips that should move together, then press Ctrl Space')
+      return
+    }
+
+    // Counted before the change: unlinking takes the partners with it, so after
+    // the fact there is no group left to count.
+    const count = withLinked(ids).length
+    const result = toggleLink(ids)
+    if (result === 'linked') setNotice(`Linked ${count} clips — they move together now`)
+    else if (result === 'unlinked') setNotice(`Unlinked ${count} clips — each moves on its own`)
+    else setNotice('A clip on its own has nothing to link to — select both halves, or two clips')
+  }, [])
+
   useEffect(() => {
     const handle = commands.registerAll([
       {
@@ -837,6 +880,14 @@ export function TimelinePanel() {
         },
       },
       {
+        id: 'timeline.toggleLink',
+        title: 'Link or Unlink Selected Clips',
+        category: 'Timeline',
+        detail: 'Linked clips move, select and delete as one',
+        enabled: () => selected.size > 0,
+        run: toggleLinkSelected,
+      },
+      {
         id: 'timeline.deleteSelected',
         title: 'Delete Selected Clips',
         category: 'Timeline',
@@ -846,7 +897,7 @@ export function TimelinePanel() {
       },
     ])
     return () => handle.dispose()
-  }, [deleteSelected, selected.size, zoomBy])
+  }, [deleteSelected, toggleLinkSelected, selected.size, zoomBy])
 
   // ── rendering ─────────────────────────────────────────────────
 
@@ -1439,6 +1490,14 @@ function ClipBlock({
         <Waveform path={asset?.path} width={width} start={offset} duration={duration} />
       ) : (
         thumbnail && width > 34 && <img className="clip-thumb" src={thumbnail} alt="" />
+      )}
+      {/* Says which clips travel together, which is otherwise invisible until
+          one of them is dragged. A chain rather than a word: it sits inside a
+          block that may be twenty pixels wide. */}
+      {clip.linkId && width > 46 && (
+        <span className="clip-link" title="Linked — moves with its other half (Ctrl Space)">
+          ⛓
+        </span>
       )}
       <span className="clip-label">{label}</span>
 
