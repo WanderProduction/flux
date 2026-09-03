@@ -24,7 +24,20 @@ export const defaultKeymap: Keymap = {
   delete: 'timeline.deleteSelected',
   // Ctrl and the transport key: the picture and its sound are one thing to the
   // hand until this says otherwise.
-  'ctrl+space': 'timeline.toggleLink',
+  // Ctrl and the key that means "the other one of these": the picture and its
+  // sound are one thing to the hand until this says otherwise.
+  'ctrl+tab': 'timeline.toggleLink',
+  /*
+   * Auto-select-on-pause, on the key it was asked for — and on `Alt A` as well.
+   *
+   * `Alt F4` is Windows' own "close this window", handled by the window manager
+   * before a page ever sees it, and preventDefault cannot take it back. It is
+   * bound here because it was asked for and it may reach us; the second binding
+   * is so the feature is reachable when it does not, and the command is in the
+   * palette either way.
+   */
+  'alt+f4': 'timeline.toggleAutoSelect',
+  'alt+a': 'timeline.toggleAutoSelect',
   'ctrl+c': 'timeline.copy',
   'ctrl+v': 'timeline.paste',
   // Snapping is a mode, not a held key: `Alt` is spoken for by duplicate-drag,

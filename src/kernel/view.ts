@@ -29,6 +29,8 @@ export interface ViewState {
      * saved before it existed opens with snapping on rather than off.
      */
     snapping?: boolean
+    /** Whether pausing selects the clip under the playhead. Off unless asked for. */
+    autoSelect?: boolean
   }
   browser: {
     location: BrowserLocation

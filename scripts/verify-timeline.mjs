@@ -2076,8 +2076,8 @@ try {
    */
   await evaluate(
     cdp,
-    `window.__ctrlSpace = () => window.dispatchEvent(
-       new KeyboardEvent('keydown', { key: ' ', ctrlKey: true, bubbles: true, cancelable: true }));
+    `window.__toggleLink = () => window.dispatchEvent(
+       new KeyboardEvent('keydown', { key: 'Tab', ctrlKey: true, bubbles: true, cancelable: true }));
 
      window.__clickClip = (index, opts = {}) => {
        const el = [...document.querySelectorAll('.tl-lane .clip')][index];
@@ -2100,14 +2100,14 @@ try {
      return true;`,
   )
 
-  await check('ctrl+space cuts a pair apart', async () => {
+  await check('ctrl+tab cuts a pair apart', async () => {
     const state = await evaluate(
       cdp,
       dropOne('voice_over.mp4', 1) +
         `window.__clickClip(0);
          await new Promise(r => setTimeout(r, 200));
          const before = { links: window.__links(), chains: window.__chains(), selected: window.__selected() };
-         window.__ctrlSpace();
+         window.__toggleLink();
          await new Promise(r => setTimeout(r, 300));
          return { before, after: { links: window.__links(), chains: window.__chains(),
                                    selected: window.__selected(),
@@ -2143,7 +2143,7 @@ try {
       dropOne('voice_over.mp4', 1) +
         `window.__clickClip(0);
          await new Promise(r => setTimeout(r, 200));
-         window.__ctrlSpace();
+         window.__toggleLink();
          await new Promise(r => setTimeout(r, 300));
 
          // A press keeps the group so it can be dragged; letting go without
@@ -2163,15 +2163,15 @@ try {
     assert.equal(audio[1], 0, 'and the sound should have stayed exactly where it was')
   })
 
-  await check('ctrl+space ties two clips back together', async () => {
+  await check('ctrl+tab ties two clips back together', async () => {
     const state = await evaluate(
       cdp,
       dropOne('voice_over.mp4', 1) +
         `window.__clickClip(0);
          await new Promise(r => setTimeout(r, 200));
-         window.__ctrlSpace();
+         window.__toggleLink();
          await new Promise(r => setTimeout(r, 250));
-         window.__ctrlSpace();
+         window.__toggleLink();
          await new Promise(r => setTimeout(r, 250));
          const linked = { links: window.__links(), chains: window.__chains(),
                           notice: document.querySelector('.tl-notice')?.textContent ?? null };
@@ -2221,7 +2221,7 @@ try {
       dropOne('clipA.mp4', 1) +
         `window.__clickClip(0);
          await new Promise(r => setTimeout(r, 200));
-         window.__ctrlSpace();
+         window.__toggleLink();
          await new Promise(r => setTimeout(r, 300));
          return { links: window.__links(),
                   notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
@@ -2640,6 +2640,302 @@ try {
     assert.equal(state.off, 0, 'it started at the top of its file')
     assert.equal(state.src, 5, 'and it was the whole of it')
     assert.equal(state.dur, 5)
+  })
+
+  // ── selecting ─────────────────────────────────────────────────
+
+  /*
+   * Every selection gesture on a timeline is a rectangle: a click is one with
+   * no width, a range is the one between two clips, and a rubber band is one
+   * drawn by hand. The checks below drive all three through real pointer
+   * events, and read the answer off the *screen* — a clip is selected when it
+   * looks selected.
+   */
+  await evaluate(
+    cdp,
+    `window.__lanes = () => [...document.querySelectorAll('.tl-lane')];
+     window.__laneOf = (trackId) => {
+       const rows = window.__fluxDev.sequence.getSequence().tracks;
+       return window.__lanes()[rows.findIndex(t => t.id === trackId)];
+     };
+     /** The clip on a track, as an element. One per track in these checks. */
+     window.__clipOn = (trackId) => [...document.querySelectorAll('.tl-lane .clip')]
+       .find(el => window.__laneOf(trackId).contains(el));
+
+     /** What is selected, as track:name, so a failure names the clips. */
+     window.__picked = () => {
+       const rows = window.__fluxDev.sequence.getSequence().tracks;
+       return [...document.querySelectorAll('.clip--selected')].map(el => {
+         const lane = window.__lanes().findIndex(l => l.contains(el));
+         return (rows[lane]?.id ?? '?') + ':' + el.querySelector('.clip-label')?.textContent;
+       }).sort();
+     };
+
+     window.__pressClip = (trackId, mods = {}) => {
+       const el = window.__clipOn(trackId);
+       if (!el) throw new Error('no clip on ' + trackId);
+       const box = el.getBoundingClientRect();
+       const at = { clientX: box.left + 20, clientY: box.top + box.height / 2 };
+       el.dispatchEvent(new PointerEvent('pointerdown',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 81, ...at, ...mods }));
+       window.dispatchEvent(new PointerEvent('pointerup',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 81, ...at }));
+       return new Promise(r => setTimeout(r, 180));
+     };
+
+     /** Press empty lane, optionally sweep, release. Returns the band's size. */
+     window.__sweep = async (fromTrack, toTrack, fromX, toX, mods = {}) => {
+       const from = window.__laneOf(fromTrack).getBoundingClientRect();
+       const to = window.__laneOf(toTrack).getBoundingClientRect();
+       const a = { clientX: from.left + fromX, clientY: from.top + from.height / 2 };
+       const b = { clientX: from.left + toX, clientY: to.top + to.height / 2 };
+       window.__laneOf(fromTrack).dispatchEvent(new PointerEvent('pointerdown',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 82, ...a, ...mods }));
+       let band = null;
+       for (let i = 1; i <= 5; i++) {
+         window.dispatchEvent(new PointerEvent('pointermove', {
+           bubbles: true, cancelable: true, button: 0, pointerId: 82,
+           clientX: a.clientX + (b.clientX - a.clientX) * i / 5,
+           clientY: a.clientY + (b.clientY - a.clientY) * i / 5,
+         }));
+         await new Promise(r => setTimeout(r, 40));
+         const el = document.querySelector('.tl-marquee');
+         if (el) { const r2 = el.getBoundingClientRect(); band = { w: Math.round(r2.width), h: Math.round(r2.height) }; }
+       }
+       const picked = window.__picked();
+       window.dispatchEvent(new PointerEvent('pointerup',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 82, ...b }));
+       await new Promise(r => setTimeout(r, 180));
+       return { band, duringSweep: picked, after: window.__picked(),
+                bandGone: !document.querySelector('.tl-marquee') };
+     };
+     return true;`,
+  )
+
+  /**
+   * A pair on V1/A1 from zero, a picture on V2 from two, more sound on A2 from
+   * three. Four tracks, four clips, every one overlapping the others in time —
+   * which is what makes a rectangle a different answer from a list.
+   */
+  const seedSelect = `
+    const { assets, sequence, view } = window.__fluxDev;
+    const voice = assets.getAssets().find(x => x.name === 'voice_over.mp4');
+    const other = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    const pv = await assets.ensureProbed(voice.id), po = await assets.ensureProbed(other.id);
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 40 } });
+    await new Promise(r => setTimeout(r, 200));
+    sequence.addLinkedClips(
+      { assetId: voice.id, trackId: 'V1', start: 0, duration: pv.duration }, true);
+    sequence.addClip({ assetId: other.id, trackId: 'V2', start: 2, duration: po.duration });
+    sequence.addClip({ assetId: voice.id, trackId: 'A2', start: 3, duration: 4 });
+    await new Promise(r => setTimeout(r, 500));
+    {
+      const seeded = sequence.getSequence().clips;
+      if (seeded.length !== 4) throw new Error('setup: ' + seeded.length + ' clips, not 4');
+    }
+  `
+
+  await check('clicking a clip selects it, and clicking it again lets it go', async () => {
+    // The answer to "how do I deselect this" that nobody has to be taught.
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `await window.__pressClip('V1');
+         const first = window.__picked();
+         await window.__pressClip('V1');
+         return { first, second: window.__picked() };`,
+    )
+    assert.deepEqual(
+      state.first,
+      ['A1:voice_over.mp4', 'V1:voice_over.mp4'],
+      'a click takes the clip and its other half',
+    )
+    assert.deepEqual(state.second, [], 'and a second click lets both go')
+  })
+
+  await check('clicking empty timeline lets go of everything', async () => {
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `await window.__pressClip('V1');
+         const before = window.__picked();
+         // Far right of the A2 lane, where nothing is.
+         const swept = await window.__sweep('A2', 'A2', 900, 900);
+         return { before, after: swept.after, band: swept.band };`,
+    )
+    assert.equal(state.before.length, 2, 'setup: something should have been selected')
+    assert.deepEqual(state.after, [], 'a click away from everything is how you let go')
+    assert.equal(state.band, null, 'and a press that goes nowhere draws no rubber band')
+  })
+
+  await check('ctrl-clicking adds one clip at a time, and takes it back out', async () => {
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `await window.__pressClip('V1');
+         await window.__pressClip('V2', { ctrlKey: true });
+         const added = window.__picked();
+         await window.__pressClip('V2', { ctrlKey: true });
+         return { added, removed: window.__picked() };`,
+    )
+    assert.deepEqual(state.added, ['A1:voice_over.mp4', 'V1:voice_over.mp4', 'V2:clipA.mp4'])
+    assert.deepEqual(
+      state.removed,
+      ['A1:voice_over.mp4', 'V1:voice_over.mp4'],
+      'ctrl on something already in the selection takes it out again',
+    )
+  })
+
+  await check('shift-clicking selects the rectangle from the anchor to here', async () => {
+    /*
+     * The gesture this was asked for. Anchor on the picture on V1, shift-click
+     * the sound two tracks below it: the picture, its own sound, and whatever
+     * else lies under that stretch of time down to the track clicked.
+     *
+     * V2 is *not* in it, and that is the point of a rectangle rather than a
+     * bag: V2 sits above the anchor, so a range reaching downward does not
+     * touch it. Reaching up from A2 would.
+     */
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `await window.__pressClip('V1');
+         await window.__pressClip('A2', { shiftKey: true });
+         const down = window.__picked();
+         await window.__pressClip('A2');
+         await window.__pressClip('V2', { shiftKey: true });
+         return { down, up: window.__picked() };`,
+    )
+    assert.deepEqual(
+      state.down,
+      ['A1:voice_over.mp4', 'A2:voice_over.mp4', 'V1:voice_over.mp4'],
+      'reaching down from V1 to A2 should take everything between them, and not V2',
+    )
+    assert.deepEqual(
+      state.up,
+      ['A1:voice_over.mp4', 'A2:voice_over.mp4', 'V1:voice_over.mp4', 'V2:clipA.mp4'],
+      'and reaching up from A2 to V2 should take all four',
+    )
+  })
+
+  await check('a range keeps its anchor, so it can be re-aimed', async () => {
+    // Shift-clicking twice extends the same range rather than dragging one end
+    // along behind the pointer — which is what makes overshooting recoverable.
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `await window.__pressClip('V1');
+         await window.__pressClip('A2', { shiftKey: true });
+         const far = window.__picked();
+         await window.__pressClip('A1', { shiftKey: true });
+         return { far, near: window.__picked() };`,
+    )
+    assert.equal(state.far.length, 3, `setup: expected three, got ${state.far.join(' ')}`)
+    assert.deepEqual(
+      state.near,
+      ['A1:voice_over.mp4', 'V1:voice_over.mp4'],
+      'a second shift-click should re-aim from the same anchor, not from the last target',
+    )
+  })
+
+  await check('sweeping a rubber band selects what it touches', async () => {
+    /*
+     * Live while it is dragged, because a sweep that only shows its result on
+     * release is a sweep you cannot aim. And touching counts: the band below
+     * covers the middle of every clip it crosses and none of them entirely.
+     */
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `return await window.__sweep('V2', 'A2', 130, 260);`,
+    )
+    assert.ok(state.band, 'no rubber band was ever drawn')
+    assert.ok(state.band.w > 100 && state.band.h > 100, `the band is ${JSON.stringify(state.band)}`)
+    assert.deepEqual(
+      state.duringSweep,
+      ['A1:voice_over.mp4', 'A2:voice_over.mp4', 'V1:voice_over.mp4', 'V2:clipA.mp4'],
+      'a band across all four rows should have caught all four clips, mid-sweep',
+    )
+    assert.deepEqual(state.after, state.duringSweep, 'and releasing must not change its mind')
+    assert.equal(state.bandGone, true, 'the band goes when the pointer does')
+  })
+
+  await check('a sweep with ctrl held adds to what was already selected', async () => {
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `await window.__pressClip('V2');
+         const before = window.__picked();
+         // Across the audio rows only, over the stretch where both of them
+         // have something: the sound on A2 runs from three seconds to seven.
+         const swept = await window.__sweep('A1', 'A2', 130, 200, { ctrlKey: true });
+         return { before, after: swept.after };`,
+    )
+    assert.deepEqual(state.before, ['V2:clipA.mp4'])
+    assert.deepEqual(
+      state.after,
+      ['A1:voice_over.mp4', 'A2:voice_over.mp4', 'V1:voice_over.mp4', 'V2:clipA.mp4'],
+      'ctrl should keep what was selected and add what the band caught — and the ' +
+        'sound it caught brings its own picture with it',
+    )
+  })
+
+  await check('pausing selects what the playhead landed on, when asked to', async () => {
+    /*
+     * Off by default: a transport that quietly changes the selection every time
+     * it stops would be a surprise. On, it is the gesture of playing until it
+     * looks right, stopping, and reaching for that clip.
+     *
+     * Alt+A here rather than Alt+F4, which Windows spends on closing the
+     * window before a page can see it. Both are bound; only one can be checked.
+     */
+    const state = await evaluate(
+      cdp,
+      seedSelect +
+        `const { playback } = window.__fluxDev;
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 150));
+
+         // Off: pausing leaves the selection alone.
+         playback.play();
+         await new Promise(r => setTimeout(r, 700));
+         playback.pause();
+         await new Promise(r => setTimeout(r, 300));
+         const off = { picked: window.__picked(), mode: view.getView().timeline.autoSelect ?? false };
+
+         window.dispatchEvent(new KeyboardEvent('keydown',
+           { key: 'a', altKey: true, bubbles: true, cancelable: true }));
+         await new Promise(r => setTimeout(r, 250));
+         const notice = document.querySelector('.tl-notice')?.textContent ?? null;
+
+         // On: pausing inside the pair selects the pair.
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 150));
+         playback.play();
+         await new Promise(r => setTimeout(r, 700));
+         playback.pause();
+         await new Promise(r => setTimeout(r, 400));
+         const on = { picked: window.__picked(), at: playback.getTime(),
+                      mode: view.getView().timeline.autoSelect };
+
+         // And back off, so nothing below inherits the mode.
+         window.dispatchEvent(new KeyboardEvent('keydown',
+           { key: 'a', altKey: true, bubbles: true, cancelable: true }));
+         await new Promise(r => setTimeout(r, 200));
+         return { off, on, notice, restored: view.getView().timeline.autoSelect };`,
+    )
+    assert.equal(state.off.mode, false, 'the mode should start off')
+    assert.deepEqual(state.off.picked, [], 'and pausing should have selected nothing')
+    assert.equal(state.on.mode, true, 'Alt+A should have turned it on')
+    assert.ok(state.notice?.includes('Auto select on'), state.notice)
+    assert.ok(state.on.at > 0.3, `the playhead only reached ${state.on.at}s`)
+    assert.deepEqual(
+      state.on.picked,
+      ['A1:voice_over.mp4', 'V1:voice_over.mp4'],
+      'pausing inside the pair should select the pair — the clip the Viewer is showing',
+    )
+    assert.equal(state.restored, false, 'and the mode toggles back off')
   })
 
   // ── copying, pasting and duplicating ──────────────────────────

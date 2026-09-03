@@ -838,6 +838,18 @@ kbd {
   padding-left: 6px;
 }
 
+/*
+ * The rubber band. Above the clips so it can be seen across them, and inert so
+ * it cannot swallow the pointer that is drawing it.
+ */
+.tl-marquee {
+  position: absolute;
+  z-index: 5;
+  border: 1px solid var(--flux-accent);
+  background: color-mix(in srgb, var(--flux-accent) 14%, transparent);
+  pointer-events: none;
+}
+
 .tl-drop-preview {
   position: absolute;
   top: 4px;

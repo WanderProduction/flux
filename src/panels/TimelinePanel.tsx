@@ -54,6 +54,9 @@ import {
   allowedTrim,
   trimClips,
   toggleLink,
+  clipsBetween,
+  clipsInRegion,
+  clipsAtTime,
   copyClips,
   pasteClips,
   duplicateClips,
@@ -180,6 +183,21 @@ const SNAP_PX = 8
 /** Floating-point slack, for deciding whether a clip is trimmed at all. */
 const EPS_UI = 1e-6
 
+/** Whether two selections are the same set — not merely the same size. */
+function sameSet(a: Set<string>, b: string[]): boolean {
+  return a.size === b.length && b.every((id) => a.has(id))
+}
+
+/**
+ * The ruler's height, needed to turn a pointer's Y into a track row.
+ *
+ * A constant rather than a measurement because the lanes and the ruler are laid
+ * out from it; measuring would be reading back a number this file already
+ * knows. It must match `.tl-ruler` in app.css — its height *and* the border
+ * under it, which is a pixel the lanes start after.
+ */
+const RULER_HEIGHT = 23
+
 /** What the panel needs to *draw* a drag in progress. The rest lives in the
     handler's own closure — see beginClipDrag. */
 interface ClipDrag {
@@ -198,6 +216,16 @@ interface ClipDrag {
  * needs no undoing. `delta` is already clamped to what the edge can take, so
  * what is drawn is what will be committed.
  */
+/** A rubber band being dragged across empty timeline, in sequence terms. */
+interface Marquee {
+  fromTime: number
+  toTime: number
+  fromRow: number
+  toRow: number
+  /** True once it has travelled far enough to be a sweep rather than a click. */
+  swept: boolean
+}
+
 interface ClipTrim {
   ids: string[]
   edge: TrimEdge
@@ -216,6 +244,23 @@ export function TimelinePanel() {
   const [playing, setPlaying] = useState(isPlaying)
   const [drag, setDrag] = useState<ClipDrag | null>(null)
   const [trim, setTrim] = useState<ClipTrim | null>(null)
+  /**
+   * The clip a range extends from.
+   *
+   * Set by every plain or additive press and left alone by a shift-press, which
+   * is what makes shift-clicking twice extend the *same* range rather than
+   * dragging one end along behind the pointer.
+   */
+  const anchorRef = useRef<string | null>(null)
+  const [marquee, setMarquee] = useState<Marquee | null>(null)
+  /**
+   * Whether pausing selects what the playhead is on.
+   *
+   * Off by default: a transport that quietly changes the selection every time
+   * it stops would be a surprise, and the people who want it want it because
+   * they are cutting to the beat and reaching for the clip they just heard.
+   */
+  const [autoSelect, setAutoSelect] = useState(() => getView().timeline.autoSelect === true)
   /**
    * Why the last drop did less than it looked like it should.
    *
@@ -254,6 +299,31 @@ export function TimelinePanel() {
     [],
   )
 
+  /**
+   * Pausing selects what the playhead landed on, when the mode is on.
+   *
+   * On the *edge* from playing to stopped, not on every tick and not on a seek:
+   * the gesture this serves is "play until it looks right, stop, and reach for
+   * that clip". Selecting while scrubbing would fight the hand instead.
+   *
+   * The front-most clip, plus its other half — the one the Viewer is showing,
+   * which is the one "the clip I paused on" can only mean.
+   */
+  const wasPlaying = useRef(false)
+  useEffect(() => {
+    const stopped = wasPlaying.current && !playing
+    wasPlaying.current = playing
+    if (!stopped || !autoSelect) return
+
+    const under = clipsAtTime(getTime())
+    const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1)
+    const chosen = new Set(front ? withLinked([front.id]) : [])
+    setSelected(chosen)
+    selectedRef.current = chosen
+    anchorRef.current = front?.id ?? null
+  }, [playing, autoSelect])
+
+
   useEffect(() => {
     setSequence({ ...getSequence() })
     return subscribeSequence(() => setSequence({ ...getSequence() }))
@@ -263,7 +333,10 @@ export function TimelinePanel() {
 
   // Recorded, never marked dirty: zooming is not an edit. It is written out
   // with the next save. See kernel/view.ts.
-  useEffect(() => recordView({ timeline: { zoom, snapping } }), [zoom, snapping])
+  useEffect(
+    () => recordView({ timeline: { zoom, snapping, autoSelect } }),
+    [zoom, snapping, autoSelect],
+  )
 
   /*
    * Follow the view when it names a zoom.
@@ -283,6 +356,7 @@ export function TimelinePanel() {
     () =>
       subscribeView(() => {
         setSnapping(getView().timeline.snapping !== false)
+        setAutoSelect(getView().timeline.autoSelect === true)
         const stored = getView().timeline.zoom
         if (stored > 0 && Math.abs(stored - zoom) > 0.01) setZoom(clampZoom(stored))
       }),
@@ -467,22 +541,45 @@ export function TimelinePanel() {
       event.preventDefault()
       event.stopPropagation()
 
-      // Selection settles on press, not on release: the drag has to move what
-      // the user can see is selected, and pressing an unselected clip means
-      // "this one".
+      /*
+       * Selection settles on press, not on release: the drag has to move what
+       * the user can see is selected, and pressing an unselected clip means
+       * "this one".
+       *
+       * Three gestures, and they are different questions:
+       *   - plain      — this one (and its other half)
+       *   - `Ctrl`     — this one as well, or no longer
+       *   - `Shift`    — everything from the anchor to here
+       */
       const current = selectedRef.current
-      const additive = event.shiftKey || event.ctrlKey || event.metaKey
+      const additive = event.ctrlKey || event.metaKey
+      const ranged = event.shiftKey
+      /*
+       * Whether this clip was *already* the whole selection before the press.
+       *
+       * The second half of the click-to-toggle rule needs to know that, and it
+       * cannot ask afterwards: by the time the pointer comes up the press has
+       * made this clip the selection either way, so "is it selected?" answers
+       * yes for the first click as well as the second.
+       */
+      const wasOnlyThis = sameSet(current, withLinked([clip.id]))
       // A picture and the sound that came with it are one thing to the hand, so
       // pressing either shows both selected. moveClips would move the pair
       // regardless; this is so what happens is what was visibly about to.
       const together = withLinked([clip.id])
       let chosen: Set<string>
-      if (additive) {
+      if (ranged && anchorRef.current && anchorRef.current !== clip.id) {
+        // The rectangle from the anchor to here, tracks and time both. See
+        // clipsBetween: a range on a timeline is an area, not a run of items.
+        chosen = new Set(clipsBetween(anchorRef.current, clip.id))
+      } else if (additive) {
         chosen = new Set(current)
         if (chosen.has(clip.id)) together.forEach((id) => chosen.delete(id))
         else together.forEach((id) => chosen.add(id))
+        anchorRef.current = clip.id
       } else {
         chosen = current.has(clip.id) ? new Set(current) : new Set(together)
+        anchorRef.current = clip.id
       }
       setSelected(chosen)
       // Immediately, not on the next render: a second press can arrive in the
@@ -539,7 +636,17 @@ export function TimelinePanel() {
             setNotice(`Duplicated ${copies.length} clip${copies.length === 1 ? '' : 's'}`)
           }
         } else if (moved) moveClips(ids, deltaTime, deltaTracks)
-        else if (!additive && chosen.size > together.length) {
+        else if (!additive && !ranged && wasOnlyThis) {
+          /*
+           * Pressed the one thing that was already selected, and let go without
+           * dragging: that is the second half of a toggle. Clicking a clip
+           * selects it; clicking it again lets it go, which is the answer to
+           * "how do I deselect this" that nobody has to be taught.
+           */
+          setSelected(new Set())
+          selectedRef.current = new Set()
+          anchorRef.current = null
+        } else if (!additive && !ranged && chosen.size > together.length) {
           /*
            * Pressed a clip that was already part of a group, and let go without
            * dragging: that means "this one", not "all of them".
@@ -839,6 +946,88 @@ export function TimelinePanel() {
     return () => clearTimeout(timer)
   }, [notice])
 
+  /**
+   * A rubber band across empty timeline.
+   *
+   * Everything a timeline selection gesture does is a rectangle — this one is
+   * simply drawn by hand rather than inferred from two clips — so it asks the
+   * kernel the same question a range does. Live while it is dragged, because a
+   * sweep that only shows its result on release is a sweep you cannot aim.
+   *
+   * A press that goes nowhere is a click on empty space, and that clears the
+   * selection. Clicking away from your work should let go of it; there is no
+   * other gesture on a timeline that means "never mind".
+   */
+  const beginMarquee = useCallback(
+    (event: React.PointerEvent, track: Track) => {
+      if (event.button !== 0) return
+      const lanes = lanesRef.current
+      if (!lanes) return
+      event.preventDefault()
+
+      const rows = getSequence().tracks
+      const fromRow = rows.findIndex((one) => one.id === track.id)
+      const additive = event.ctrlKey || event.metaKey || event.shiftKey
+      const before = new Set(selectedRef.current)
+      const fromTime = timeAt(event.clientX)
+      const startY = event.clientY
+
+      let swept = false
+      let toRow = fromRow
+      let toTime = fromTime
+      setMarquee({ fromTime, toTime, fromRow, toRow, swept })
+
+      const onMove = (move: PointerEvent) => {
+        const dx = move.clientX - event.clientX
+        const dy = move.clientY - startY
+        if (!swept && Math.abs(dx) < DRAG_THRESHOLD_PX && Math.abs(dy) < DRAG_THRESHOLD_PX) return
+        swept = true
+
+        toTime = timeAt(move.clientX)
+        /*
+         * Which row the pointer is over, measured rather than calculated.
+         *
+         * The arithmetic version — subtract the ruler, divide by the track
+         * height — is off by the ruler's bottom border, which is invisible
+         * until the pointer is exactly on a boundary and then silently drops
+         * the last row out of the sweep. The lanes know where they are; asking
+         * them cannot be one pixel wrong.
+         */
+        const tops = [...lanes.querySelectorAll('.tl-lane')].map(
+          (lane) => lane.getBoundingClientRect().top,
+        )
+        let row = 0
+        for (let i = 0; i < tops.length; i++) if (move.clientY >= tops[i]) row = i
+        toRow = Math.min(rows.length - 1, Math.max(0, row))
+        setMarquee({ fromTime, toTime, fromRow, toRow, swept })
+
+        const caught = withLinked(
+          clipsInRegion(fromTime, toTime, fromRow, toRow).map((one) => one.id),
+        )
+        const next = additive ? new Set([...before, ...caught]) : new Set(caught)
+        setSelected(next)
+        selectedRef.current = next
+      }
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+        if (!swept && !additive) {
+          setSelected(new Set())
+          selectedRef.current = new Set()
+          anchorRef.current = null
+        }
+        setMarquee(null)
+      }
+
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+    },
+    [timeAt],
+  )
+
   // ── scrubbing ─────────────────────────────────────────────────
 
   /** Click or drag anywhere on the ruler to move the playhead. */
@@ -875,7 +1064,7 @@ export function TimelinePanel() {
   const toggleLinkSelected = useCallback(() => {
     const ids = [...selectedRef.current]
     if (ids.length === 0) {
-      setNotice('Select the clips that should move together, then press Ctrl Space')
+      setNotice('Select the clips that should move together, then press Ctrl Tab')
       return
     }
 
@@ -959,6 +1148,22 @@ export function TimelinePanel() {
         detail: 'Puts the copied clips down at the playhead',
         enabled: () => clipboardCount() > 0,
         run: pasteAtPlayhead,
+      },
+      {
+        id: 'timeline.toggleAutoSelect',
+        title: 'Toggle Auto Select On Playhead',
+        category: 'Timeline',
+        detail: 'When on, pausing selects the clip the playhead landed on',
+        run: () => {
+          setAutoSelect((on) => {
+            setNotice(
+              on
+                ? 'Auto select off — pausing leaves the selection alone'
+                : 'Auto select on — pausing selects the clip under the playhead',
+            )
+            return !on
+          })
+        },
       },
       {
         id: 'timeline.toggleSnapping',
@@ -1096,6 +1301,19 @@ export function TimelinePanel() {
               <span className="tl-playhead-grip" style={{ left: time * zoom }} />
             </div>
 
+            {marquee?.swept && (
+              <div
+                className="tl-marquee"
+                style={{
+                  left: Math.min(marquee.fromTime, marquee.toTime) * zoom,
+                  width: Math.abs(marquee.toTime - marquee.fromTime) * zoom,
+                  top: RULER_HEIGHT + Math.min(marquee.fromRow, marquee.toRow) * TRACK_HEIGHT,
+                  height:
+                    (Math.abs(marquee.toRow - marquee.fromRow) + 1) * TRACK_HEIGHT,
+                }}
+              />
+            )}
+
             {sequence.tracks.map((track) => (
               <div
                 className={`tl-lane tl-lane--${track.kind}`}
@@ -1104,6 +1322,10 @@ export function TimelinePanel() {
                 onDragOver={(e) => onDragOver(e, track)}
                 onDragLeave={() => setPreview(null)}
                 onDrop={(e) => void onDrop(e, track)}
+                // The lane's own background, which is empty timeline: a press
+                // here is either a sweep or a click away from everything. A
+                // clip's own handler stops the press before it arrives.
+                onPointerDown={(e) => beginMarquee(e, track)}
               >
                 {sequence.clips
                   .filter((clip) => clip.trackId === track.id)
@@ -1594,7 +1816,7 @@ function ClipBlock({
           one of them is dragged. A chain rather than a word: it sits inside a
           block that may be twenty pixels wide. */}
       {clip.linkId && width > 46 && (
-        <span className="clip-link" title="Linked — moves with its other half (Ctrl Space)">
+        <span className="clip-link" title="Linked — moves with its other half (Ctrl Tab)">
           ⛓
         </span>
       )}

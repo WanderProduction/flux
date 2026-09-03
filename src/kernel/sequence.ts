@@ -691,6 +691,90 @@ export function withLinked(ids: Iterable<string>): string[] {
 }
 
 /**
+ * Every clip inside a rectangle of the timeline: a span of time, a run of
+ * tracks.
+ *
+ * The timeline is two-dimensional and every selection gesture on it is a
+ * rectangle — a marquee dragged across it, or a range extended from one clip to
+ * another. Both are the same question asked twice, so they are the same
+ * function, and it lives here because "which clips are in this region" is a
+ * fact about the sequence rather than about the panel drawing it.
+ *
+ * Track *positions*, not ids: a rectangle spans whatever lies between two rows
+ * on screen, and the rows are the track order.
+ *
+ * Touching counts. A clip half inside the rectangle is inside it, because that
+ * is what dragging a box across a timeline visibly does — requiring
+ * containment would make a marquee across a long clip select nothing at all.
+ */
+export function clipsInRegion(
+  fromTime: number,
+  toTime: number,
+  fromRow: number,
+  toRow: number,
+): Clip[] {
+  const start = Math.min(fromTime, toTime)
+  const end = Math.max(fromTime, toTime)
+  const top = Math.min(fromRow, toRow)
+  const bottom = Math.max(fromRow, toRow)
+
+  return sequence.clips.filter((clip) => {
+    const row = sequence.tracks.findIndex((track) => track.id === clip.trackId)
+    if (row < top || row > bottom) return false
+    // A zero-width sweep still catches what it lands on: a click is a rectangle
+    // with no width, and one that selected nothing would be a dead gesture.
+    if (end - start < EPS) return clip.start <= end + EPS && clip.start + clip.duration >= start - EPS
+    return clip.start < end - EPS && clip.start + clip.duration > start + EPS
+  })
+}
+
+/**
+ * The clips between two of them, as a range select means it.
+ *
+ * Not "the clips whose ids fall between", and not "everything on one track":
+ * the rectangle from one clip to the other, covering every track in between
+ * for the whole span the two of them cover. Shift-clicking an audio clip two
+ * tracks below a picture therefore takes the picture, the sound, and whatever
+ * else is under that stretch of time — which is what a range on a timeline
+ * looks like, and what makes it a *timeline* range rather than a list one.
+ *
+ * @returns the ids, expanded through links, or the target alone when the
+ *   anchor has gone.
+ */
+export function clipsBetween(anchorId: string, targetId: string): string[] {
+  const anchor = sequence.clips.find((clip) => clip.id === anchorId)
+  const target = sequence.clips.find((clip) => clip.id === targetId)
+  if (!target) return []
+  if (!anchor) return withLinked([targetId])
+
+  const row = (clip: Clip) => sequence.tracks.findIndex((track) => track.id === clip.trackId)
+  const inside = clipsInRegion(
+    Math.min(anchor.start, target.start),
+    Math.max(anchor.start + anchor.duration, target.start + target.duration),
+    row(anchor),
+    row(target),
+  )
+  // Through the links, like every other selection: a picture whose sound was
+  // left out of the range would come apart the moment the range was dragged.
+  return withLinked(inside.map((clip) => clip.id))
+}
+
+/**
+ * The clips the playhead is inside, front-most first.
+ *
+ * Front-most means the same thing it means to the Viewer: video tracks stack
+ * upward, so the last one drawn is the one being looked at. Audio follows,
+ * because a sequence with no picture at that moment still has something to be
+ * paused on.
+ */
+export function clipsAtTime(time: number): Clip[] {
+  const rows = new Map(sequence.tracks.map((track, index) => [track.id, index]))
+  return sequence.clips
+    .filter((clip) => time >= clip.start - EPS && time < clip.start + clip.duration - EPS)
+    .sort((a, b) => (rows.get(a.trackId) ?? 0) - (rows.get(b.trackId) ?? 0))
+}
+
+/**
  * Clips lifted out of a sequence, waiting to be put back somewhere.
  *
  * Held here rather than in the system clipboard, and that is a real decision.

@@ -51,8 +51,9 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
-| **Link / unlink** | `Ctrl Space` cuts a pair apart, or ties clips together. Apart, each half moves alone. |
+| **Link / unlink** | `Ctrl Tab` cuts a pair apart, or ties clips together. Apart, each half moves alone. |
 | **Copy, paste, duplicate** | `Ctrl C` / `Ctrl V` at the playhead, or `Alt` drag to leave a copy behind. |
+| **Selection** | Click, click-again, click-away, rubber band, `Shift` range by track and time, `Ctrl` one at a time. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
@@ -277,9 +278,14 @@ Two behaviours worth knowing:
 | drag either edge of a clip | trim what it plays |
 | `Alt` while dragging a clip | leave the original and place a copy |
 | `S` | snapping on or off |
-| `Shift` / `Ctrl` click | add to the selection |
+| click a clip | select it — and again to let it go |
+| click empty timeline | let go of everything |
+| drag across empty timeline | rubber-band select |
+| `Shift` click a clip | select the rectangle from the anchor to here |
+| `Ctrl` click a clip | add it, or take it back out |
+| `Alt F4` / `Alt A` | auto-select on pause, on or off |
 | `Ctrl C` / `Ctrl V` | copy the selection, paste it at the playhead |
-| `Ctrl Space` | link or unlink the selected clips |
+| `Ctrl Tab` | link or unlink the selected clips |
 | `Space` | play / pause |
 | `Delete` | remove the selected clips |
 
@@ -413,6 +419,54 @@ unknown, it is what that clip actually was.
 
 Not yet: rolling and slip edits, ripple trimming, and trimming with the keyboard.
 
+#### Selecting
+
+Every selection gesture on a timeline is a **rectangle**: tracks by time. A click is one with no
+width, a range is the one between two clips, and a rubber band is one drawn by hand. All three ask
+`clipsInRegion` the same question, and it lives in the kernel because "which clips are in this
+region" is a fact about the sequence rather than about the panel drawing it.
+
+| gesture | what it means |
+|---|---|
+| click | this clip, and its other half |
+| click again | let it go |
+| click empty timeline | let go of everything |
+| drag empty timeline | everything the band touches, live as it is dragged |
+| `Shift` click | the rectangle from the anchor to here |
+| `Ctrl` click | this one as well, or no longer |
+
+**A range is an area, not a run of items.** Anchor on a picture on V1 and shift-click a sound two
+tracks below it: the selection is the picture, its own sound, and whatever else lies under that
+stretch of time down to the track clicked. Shift-clicking the *last* audio track therefore takes
+every audio clip under the picture, which is the thing a list-style range could never express. A
+track above the anchor is not in it — reaching down does not reach up — and reaching the other way
+takes what it passes.
+
+The **anchor** is set by every plain or `Ctrl` press and left alone by a `Shift` press, so
+shift-clicking twice re-aims the same range rather than dragging one end along behind the pointer.
+That is what makes overshooting recoverable.
+
+**Touching counts.** A clip half inside the rubber band is inside it, because that is what dragging
+a box across a timeline visibly does; requiring containment would make a sweep across a long clip
+select nothing at all. The band selects *live* while it is dragged — a sweep that only shows its
+result on release is a sweep you cannot aim — and its rows come from measuring the lanes rather than
+from dividing pixels by a track height. The arithmetic version is off by the ruler's bottom border,
+which is invisible until the pointer is exactly on a boundary and then silently drops the last row.
+
+Selections expand through links throughout: a picture whose sound was left out of a range would come
+apart the moment the range was dragged.
+
+**`Alt F4` toggles auto-select on pause** — play until it looks right, stop, and the clip you landed
+on is already selected. Off by default, because a transport that quietly changes the selection every
+time it stops is a surprise. It fires on the *edge* from playing to stopped, not on every tick and
+not on a seek, and it takes the front-most clip — the one the Viewer is showing, which is the only
+thing "the clip I paused on" can mean.
+
+> `Alt F4` is Windows' own "close this window", handled by the window manager before a page ever
+> sees it, and `preventDefault` cannot take it back. It is bound because it was asked for and it may
+> arrive; **`Alt A` is bound to the same command** so the feature is reachable when it does not, and
+> it is in the palette either way.
+
 #### Copying clips
 
 Three ways to get a second copy, and one machinery underneath: a snapshot of the clips, put down
@@ -471,7 +525,7 @@ midpoint rule, so dragging a pair feels like dragging a clip — and the rest fo
 follower cannot sit there, the unit does not move: a pair that will not fit somewhere should refuse
 to go there, which is a thing you can see and undo.
 
-**`Ctrl Space` cuts the link, and ties it back.** One gesture rather than two commands, because the
+**`Ctrl Tab` cuts the link, and ties it back.** One gesture rather than two commands, because the
 question a hand asks is never "is this linked?" — it is "should this move on its own now?", and the
 answer to that is always the opposite of what is currently true. Apart, the halves select, move and
 trim on their own, and can be left deliberately out of sync; a second press ties them back where
