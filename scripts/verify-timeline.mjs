@@ -2671,8 +2671,35 @@ try {
        }).sort();
      };
 
-     window.__key = (key, mods = {}) => window.dispatchEvent(
-       new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods }));
+     /*
+      * A press is a press *and* a release.
+      *
+      * Letting go used not to matter, and then S became a key that can be
+      * held as a modifier — at which point a synthesised press that never came
+      * up left it held for the rest of the run, and every key after it was a
+      * chord nobody meant to type. Half the suite failed at once, all of it
+      * downstream of a helper that was modelling half a keystroke.
+      */
+     window.__key = (key, mods = {}) => {
+       window.dispatchEvent(
+         new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods }));
+       window.dispatchEvent(
+         new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true, ...mods }));
+     };
+
+     /** Press the clip on a track that covers a given second. */
+     window.__pressClipAt = (trackId, atSeconds, mods = {}) => {
+       const lane = window.__laneOf(trackId);
+       const zoom = window.__fluxDev.view.getView().timeline.zoom || 60;
+       const box = lane.getBoundingClientRect();
+       const at = { clientX: box.left + atSeconds * zoom, clientY: box.top + box.height / 2 };
+       const el = document.elementFromPoint(at.clientX, at.clientY)?.closest('.clip');
+       if (!el) throw new Error('no clip on ' + trackId + ' at ' + atSeconds + 's');
+       el.dispatchEvent(new PointerEvent('pointerdown',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 84, ...at, ...mods }));
+       window.dispatchEvent(new PointerEvent('pointerup',
+         { bubbles: true, cancelable: true, button: 0, pointerId: 84, ...at }));
+     };
 
      window.__pressClip = (trackId, mods = {}) => {
        const el = window.__clipOn(trackId);
@@ -2992,18 +3019,21 @@ try {
          window.__key('s');
          await new Promise(r => setTimeout(r, 200));
          const dropped = window.__picked();
-         // And where there is nothing, it says so rather than doing nothing.
+         // And where there is no clip, it takes the hole — see the gap
+         // checks further down for what that is worth.
          playback.seek(7);
          await new Promise(r => setTimeout(r, 150));
          window.__key('s');
          await new Promise(r => setTimeout(r, 200));
          return { taken, dropped, empty: window.__picked(),
+                  gaps: document.querySelectorAll('.tl-gap').length,
                   notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
     )
     assert.deepEqual(state.taken, ['V1:clipA.mp4'], 'the clip at two seconds is on V1')
     assert.deepEqual(state.dropped, [], 'and pressing it again lets go')
-    assert.deepEqual(state.empty, [], 'nothing is under the playhead in the gap')
-    assert.ok(state.notice?.includes('Nothing under the playhead'), state.notice)
+    assert.deepEqual(state.empty, [], 'no clip is under the playhead in the gap')
+    assert.equal(state.gaps, 1, 'so the hole is what it takes')
+    assert.ok(state.notice?.includes('Gap on'), state.notice)
   })
 
   await check('alt and an arrow walk a clip to the next cut', async () => {
@@ -3588,7 +3618,7 @@ try {
     const groups = new Set(state.links)
     assert.equal(groups.size, 2, `expected two links, got ${JSON.stringify(state.links)}`)
     assert.ok(!state.links.includes(null), 'both new pairs should still be pairs')
-    assert.ok(state.notice?.includes('Cut at'), state.notice)
+    assert.ok(state.notice?.includes('Cut 2 clips'), state.notice)
   })
 
   await check('the razor will not cut where there is nothing to cut', async () => {
@@ -3673,6 +3703,613 @@ try {
     )
     assert.ok(state.fast <= 10.0001, `the rate ran away to ${state.fast}`)
     assert.ok(state.fast > 9, `and it should have got all the way to ten, not ${state.fast}`)
+  })
+
+  // ── cutting, rippling and gaps ────────────────────────────────
+
+  /*
+   * The other half of an edit: taking things out, and the hole that leaves.
+   *
+   * Everything below runs on three clips in a row on V1 with a long sound on
+   * A1 that nothing is removed from — which is the case that says whether a
+   * ripple moves only what it should.
+   */
+  const seedCuts = `
+    const { assets, sequence, view } = window.__fluxDev;
+    const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    const b = assets.getAssets().find(x => x.name === 'shot_B.mp4');
+    const voice = assets.getAssets().find(x => x.name === 'voice_over.mp4');
+    const pa = await assets.ensureProbed(a.id), pb = await assets.ensureProbed(b.id);
+    const pv = await assets.ensureProbed(voice.id);
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 30 } });
+    await new Promise(r => setTimeout(r, 200));
+    sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: pa.duration });
+    sequence.addClip({ assetId: b.id, trackId: 'V1', start: 4, duration: pb.duration });
+    sequence.addClip({ assetId: a.id, trackId: 'V1', start: 7, duration: pa.duration });
+    sequence.addClip({ assetId: voice.id, trackId: 'A1', start: 0, duration: pv.duration });
+    await new Promise(r => setTimeout(r, 500));
+    {
+      const seeded = sequence.getSequence().clips;
+      if (seeded.length !== 4) throw new Error('setup: ' + seeded.length + ' clips, not 4');
+    }
+    window.__where = () => window.__fluxDev.sequence.getSequence().clips
+      .slice()
+      .sort((p, q) => p.trackId.localeCompare(q.trackId) || p.start - q.start)
+      .map(c => c.trackId + '@' + Math.round(c.start * 1000) / 1000 +
+                '+' + Math.round(c.duration * 1000) / 1000);
+  `
+
+  await check('W cuts every clip the playhead crosses', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('w');
+         await new Promise(r => setTimeout(r, 300));
+         return { where: window.__where(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(
+      state.where,
+      ['A1@0+2', 'A1@2+10', 'V1@0+2', 'V1@2+2', 'V1@4+3', 'V1@7+4'],
+      'the picture and the sound both cross two seconds, so both should be cut',
+    )
+    assert.ok(state.notice?.includes('Cut 2 clips'), state.notice)
+  })
+
+  await check('the razor takes one clip, and takes every track with shift', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `window.__key('c');
+         await new Promise(r => setTimeout(r, 200));
+         const cut = async (atSeconds, mods) => {
+           const lane = window.__laneOf('V1');
+           const el = [...document.querySelectorAll('.tl-lane .clip')]
+             .find(one => lane.contains(one));
+           const box = lane.getBoundingClientRect();
+           const at = { clientX: box.left + atSeconds * 30, clientY: box.top + box.height / 2 };
+           const target = document.elementFromPoint(at.clientX, at.clientY).closest('.clip') ?? el;
+           target.dispatchEvent(new PointerEvent('pointerdown',
+             { bubbles: true, cancelable: true, button: 0, pointerId: 98, ...at, ...mods }));
+           window.dispatchEvent(new PointerEvent('pointerup',
+             { bubbles: true, cancelable: true, button: 0, pointerId: 98, ...at }));
+           await new Promise(r => setTimeout(r, 300));
+         };
+         await cut(2, {});
+         const alone = window.__where();
+         await cut(9, { shiftKey: true });
+         const all = window.__where();
+         window.__key('v');
+         return { alone, all };`,
+    )
+    assert.deepEqual(
+      state.alone,
+      ['A1@0+12', 'V1@0+2', 'V1@2+2', 'V1@4+3', 'V1@7+4'],
+      'a plain cut takes the clip under the pointer and nothing else',
+    )
+    assert.deepEqual(
+      state.all,
+      ['A1@0+9', 'A1@9+3', 'V1@0+2', 'V1@2+2', 'V1@4+3', 'V1@7+2', 'V1@9+2'],
+      'and shift takes every track at that moment',
+    )
+  })
+
+  await check('shift+W takes a clip out and closes the hole behind it', async () => {
+    /*
+     * The difference between Delete and a ripple, in one line of numbers: the
+     * clips after the one removed have moved back by its length, and the ones
+     * before it have not moved at all.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         playback.seek(5);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         const took = window.__picked();
+         window.__key('w', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 300));
+         return { took, where: window.__where(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.took, ['V1:shot_B.mp4'], 'setup: the middle clip should be held')
+    assert.deepEqual(
+      state.where,
+      ['A1@0+12', 'V1@0+4', 'V1@4+4'],
+      'the third clip should have fallen back into the middle one\'s place',
+    )
+    assert.ok(state.notice?.includes('Rippled out'), state.notice)
+  })
+
+  await check('a ripple leaves tracks it removed nothing from alone', async () => {
+    /*
+     * The sound on A1 had nothing taken out of it, so it does not move. The
+     * other reading — everything on every track slides — is what Premiere does
+     * with sync lock on, and it is the one that can quietly ruin a soundtrack
+     * you were happy with. When there is a sync lock to turn on, this is what
+     * it will switch.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         const before = sequence.getSequence().clips
+           .filter(c => c.trackId === 'A1').map(c => c.start);
+         playback.seek(1);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('w', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 300));
+         return { before, after: sequence.getSequence().clips
+           .filter(c => c.trackId === 'A1').map(c => c.start), where: window.__where() };`,
+    )
+    assert.deepEqual(state.after, state.before, 'the sound must not have moved')
+    assert.deepEqual(
+      state.where.filter((one) => one.startsWith('V1')),
+      ['V1@0+3', 'V1@3+4'],
+      'while the pictures after the removed one fell back',
+    )
+  })
+
+  await check('S takes the gap when there is no clip to take', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         /*
+          * A hole in the middle of V1, made the ordinary way — and the sound
+          * taken off A1, because S takes a *clip* wherever it finds one and the
+          * sound runs under the whole sequence. A gap is what is left when
+          * there is nothing to stand on at all.
+          */
+         const middle = sequence.getSequence().clips.find(c => c.start === 4);
+         const sound = sequence.getSequence().clips.find(c => c.trackId === 'A1');
+         sequence.removeClips([middle.id, sound.id]);
+         await new Promise(r => setTimeout(r, 250));
+         playback.seek(5);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 250));
+         const held = { gaps: document.querySelectorAll('.tl-gap').length,
+                        clips: window.__picked().length,
+                        notice: document.querySelector('.tl-notice')?.textContent ?? null };
+         window.__key('w', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 300));
+         return { held, where: window.__where(),
+                  gone: document.querySelectorAll('.tl-gap').length,
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.held.gaps, 1, 'the hole should be drawn as held')
+    assert.equal(state.held.clips, 0, 'and no clip is selected at the same time')
+    assert.ok(state.held.notice?.includes('Gap on V1'), state.held.notice)
+    assert.deepEqual(
+      state.where,
+      ['V1@0+4', 'V1@4+4'],
+      'closing it should bring the third clip back against the first',
+    )
+    assert.equal(state.gone, 0, 'and the hole is no longer there to hold')
+    assert.ok(state.notice?.includes('Closed a'), state.notice)
+  })
+
+  await check('a gap can be clicked, and Delete closes it', async () => {
+    // Delete rather than a ripple: there is nothing to remove, so the only
+    // thing Delete can mean on a gap is "close it", which is what it means
+    // everywhere else that lets you select one.
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const middle = sequence.getSequence().clips.find(c => c.start === 4);
+         sequence.removeClips([middle.id]);
+         await new Promise(r => setTimeout(r, 250));
+
+         const lane = window.__laneOf('V1');
+         const box = lane.getBoundingClientRect();
+         const at = { clientX: box.left + 5 * 30, clientY: box.top + box.height / 2 };
+         lane.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 99, ...at }));
+         window.dispatchEvent(new PointerEvent('pointerup',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 99, ...at }));
+         await new Promise(r => setTimeout(r, 250));
+         const held = document.querySelectorAll('.tl-gap').length;
+         window.__key('Delete');
+         await new Promise(r => setTimeout(r, 300));
+         return { held, where: window.__where() };`,
+    )
+    assert.equal(state.held, 1, 'clicking the hole should take it')
+    assert.deepEqual(state.where, ['A1@0+12', 'V1@0+4', 'V1@4+4'], 'and Delete closes it')
+  })
+
+  await check('the empty timeline after the last clip is not a gap', async () => {
+    /*
+     * A gap is bounded on the right by a clip. What comes after the last one is
+     * where the sequence has not been used yet, and closing it would mean
+     * nothing — so a press there lets go of the selection instead, which is the
+     * only other thing a click on nothing can mean.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `await window.__pressClip('A1');
+         const before = window.__picked().length;
+         const lane = window.__laneOf('V1');
+         const box = lane.getBoundingClientRect();
+         // Well past the last clip, which ends at eleven seconds.
+         const at = { clientX: box.left + 20 * 30, clientY: box.top + box.height / 2 };
+         lane.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 99, ...at }));
+         window.dispatchEvent(new PointerEvent('pointerup',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 99, ...at }));
+         await new Promise(r => setTimeout(r, 250));
+         return { before, gaps: document.querySelectorAll('.tl-gap').length,
+                  after: window.__picked().length };`,
+    )
+    assert.equal(state.before, 1, 'setup: something should have been selected')
+    assert.equal(state.gaps, 0, 'no gap should have been taken')
+    assert.equal(state.after, 0, 'and the click let go of what was held')
+  })
+
+  await check('shift+A and shift+D walk the playhead between cuts', async () => {
+    // Across all tracks, because the playhead is not on a track — and a cut on
+    // any of them is a moment worth landing on.
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 150));
+         const walked = [];
+         for (let i = 0; i < 4; i++) {
+           window.__key('d', { shiftKey: true });
+           await new Promise(r => setTimeout(r, 200));
+           walked.push(Math.round(playback.getTime() * 1000) / 1000);
+         }
+         const back = [];
+         for (let i = 0; i < 2; i++) {
+           window.__key('a', { shiftKey: true });
+           await new Promise(r => setTimeout(r, 200));
+           back.push(Math.round(playback.getTime() * 1000) / 1000);
+         }
+         // Down to zero, and then one more: there is nothing before the start.
+         for (let i = 0; i < 3; i++) {
+           window.__key('a', { shiftKey: true });
+           await new Promise(r => setTimeout(r, 200));
+         }
+         return { walked, back, home: Math.round(playback.getTime() * 1000) / 1000,
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.walked, [4, 7, 11, 12], 'every edge, in order')
+    assert.deepEqual(state.back, [11, 7], 'and back again the same way')
+    assert.equal(state.home, 0, 'the start of the sequence is an edge like any other')
+    assert.ok(state.notice?.includes('No cut before'), state.notice)
+  })
+
+  await check('rippling a pair closes the hole on both its tracks', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const { assets, playback } = window.__fluxDev;
+         const other = assets.getAssets().find(x => x.name === 'clipA.mp4');
+         const po = await assets.ensureProbed(other.id);
+         // Something after the pair on each of its tracks.
+         sequence.addClip({ assetId: other.id, trackId: 'V1', start: 14, duration: po.duration });
+         sequence.addClip({ assetId: other.id, trackId: 'A1', start: 14, duration: po.duration });
+         await new Promise(r => setTimeout(r, 300));
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('w', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return window.__fluxDev.sequence.getSequence().clips
+           .map(c => c.trackId + '@' + Math.round(c.start * 1000) / 1000).sort();`,
+    )
+    assert.deepEqual(
+      state,
+      ['A1@2', 'V1@2'],
+      'both halves should have gone, and both followers moved back by the same amount',
+    )
+  })
+
+  // ── trimming to the playhead, and walking a selection ─────────
+
+  /*
+   * Two keyboard gestures that need a chord the keymap could not previously
+   * spell: `S` *held* while an arrow is pressed. Everything below drives real
+   * key events, including the keyup that lets go — a held key that is never
+   * released is a chord that never ends, and that is a bug this harness can
+   * have as easily as the app can.
+   */
+  await evaluate(
+    cdp,
+    `window.__hold = (key) => window.dispatchEvent(
+       new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+     window.__release = (key) => window.dispatchEvent(
+       new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }));
+     return true;`,
+  )
+
+  await check('Q takes the head up to the playhead, E takes the tail back to it', async () => {
+    /*
+     * The keyboard's version of dragging an edge, and the exact one: a hand can
+     * land a frame either side of where it meant, and this cannot. The hole is
+     * left behind — trimming a head forward leaves a gap in front of the clip,
+     * exactly as deleting it would, and closing it is Shift W's business.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('q');
+         await new Promise(r => setTimeout(r, 300));
+         const head = { where: window.__where(),
+                        notice: document.querySelector('.tl-notice')?.textContent ?? null };
+         playback.seek(9);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('e');
+         await new Promise(r => setTimeout(r, 300));
+         return { head, tail: window.__where() };`,
+    )
+    assert.deepEqual(
+      state.head.where,
+      ['A1@2+10', 'V1@2+2', 'V1@4+3', 'V1@7+4'],
+      'both clips the playhead was inside should start at it now, and keep their tails',
+    )
+    assert.ok(state.head.notice?.includes('Trimmed 2 clips'), state.head.notice)
+    assert.deepEqual(
+      state.tail.filter((one) => one.startsWith('V1')),
+      ['V1@2+2', 'V1@4+3', 'V1@7+2'],
+      'and the tail of the clip at nine seconds should come back to the playhead',
+    )
+  })
+
+  await check('a trim to the playhead takes the selection when there is one', async () => {
+    // Surgical or sweeping, without a second key — the same rule the razor's
+    // Shift follows.
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         await window.__pressClip('V1');
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('q');
+         await new Promise(r => setTimeout(r, 300));
+         return window.__where();`,
+    )
+    assert.deepEqual(
+      state,
+      ['A1@0+12', 'V1@2+2', 'V1@4+3', 'V1@7+4'],
+      'only the selected picture should have been trimmed; the sound is untouched',
+    )
+  })
+
+  await check('a trim to the playhead says so when the playhead is outside', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         // The *third* clip, with the playhead inside the first.
+         const third = sequence.getSequence().clips.find(c => c.start === 7);
+         sequence.setSequence({ ...sequence.getSequence() });
+         window.__pressClipAt(third.trackId, 8);
+         await new Promise(r => setTimeout(r, 200));
+         /*
+          * Before it, not after it. A trim that reached clips it should not
+          * would be stopped by the one-frame floor when the playhead is past
+          * them — it can only be *seen* on this side, where the broken version
+          * drags the clip backwards to meet the playhead.
+          */
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('q');
+         await new Promise(r => setTimeout(r, 300));
+         return { where: window.__where(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.where, ['A1@0+12', 'V1@0+4', 'V1@4+3', 'V1@7+4'], 'nothing moved')
+    assert.ok(state.notice?.includes('not inside the selection'), state.notice)
+  })
+
+  await check('S held with an arrow walks the selection to the next clip', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `await window.__pressClip('V1');
+         const first = window.__picked();
+         window.__hold('s');
+         await new Promise(r => setTimeout(r, 200));
+         /*
+          * Holding the key must not *do* anything yet.
+          *
+          * S selects the clip under the playhead, and a press that ran on the
+          * way down would toggle this selection away before the arrow arrived.
+          * Asserted here rather than inferred from what follows: the step after
+          * this one falls back to the playhead when nothing is held, and
+          * quietly produces the same answer either way.
+          */
+         const whileHeld = window.__picked();
+         window.__key('ArrowRight');
+         await new Promise(r => setTimeout(r, 250));
+         const second = window.__picked();
+         window.__key('ArrowRight');
+         await new Promise(r => setTimeout(r, 250));
+         const third = window.__picked();
+         window.__key('ArrowDown');
+         await new Promise(r => setTimeout(r, 250));
+         const below = window.__picked();
+         window.__key('ArrowLeft');
+         await new Promise(r => setTimeout(r, 250));
+         const nothingLeft = { picked: window.__picked(),
+                               notice: document.querySelector('.tl-notice')?.textContent ?? null };
+         window.__release('s');
+         return { first, whileHeld, second, third, below, nothingLeft };`,
+    )
+    assert.deepEqual(state.first, ['V1:clipA.mp4'], 'setup: the first clip is held')
+    assert.deepEqual(state.whileHeld, state.first, 'holding S must not change what is selected')
+    assert.deepEqual(state.second, ['V1:shot_B.mp4'], 'right goes to the next clip along')
+    assert.deepEqual(state.third, ['V1:clipA.mp4'], 'and again to the third')
+    assert.deepEqual(
+      state.below,
+      ['A1:voice_over.mp4'],
+      'down goes to the track below, to what is there at the same time',
+    )
+    assert.deepEqual(state.nothingLeft.picked, state.below, 'and the sound has nothing before it')
+    assert.ok(state.nothingLeft.notice?.includes('No clip before'), state.nothingLeft.notice)
+  })
+
+  await check('the clip above is the one at the same time, not the first one', async () => {
+    /*
+     * A decoy: two clips on the track below, and only the later one is under
+     * the anchor. A clip above that does not overlap is not the clip above —
+     * it is a different part of the edit, and jumping to it loses your place.
+     *
+     * Written with one clip on that track first, where "the one at this time"
+     * and "the first one on the track" were the same clip and a canary that
+     * ignored time altogether sailed through.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const other = assets.getAssets().find(x => x.name === 'clipA.mp4');
+         const po = await assets.ensureProbed(other.id);
+         /*
+          * The sound on A1 runs the whole length of the sequence, so stepping
+          * down onto it and then further would give an anchor that overlaps
+          * everything — and a decoy that overlaps the anchor is no decoy at
+          * all. It goes, and the step is a single one from a short clip.
+          */
+         const sound = sequence.getSequence().clips.find(c => c.trackId === 'A1');
+         sequence.removeClips([sound.id]);
+         // A1 gets a decoy at the start, well clear of the anchor, and the real
+         // neighbour underneath it.
+         sequence.addClip({ assetId: other.id, trackId: 'A1', start: 0, duration: 2 });
+         sequence.addClip({ assetId: other.id, trackId: 'A1', start: 7, duration: po.duration });
+         await new Promise(r => setTimeout(r, 300));
+
+         // The third clip on V1, which runs from seven to eleven.
+         window.__pressClipAt('V1', 8);
+         await new Promise(r => setTimeout(r, 200));
+         const from = window.__picked();
+         window.__hold('s');
+         window.__key('ArrowDown');
+         await new Promise(r => setTimeout(r, 250));
+         const below = window.__picked();
+         window.__release('s');
+         const starts = window.__fluxDev.sequence.getSequence().clips
+           .filter(c => c.trackId === 'A1').map(c => Math.round(c.start * 1000) / 1000)
+           .sort((a, b) => a - b);
+         const landedOn = window.__fluxDev.sequence.getSequence().clips
+           .filter(c => document.querySelectorAll('.clip--selected').length === 1 &&
+                        c.trackId === 'A1')
+           .map(c => c.start);
+         return { from, below, starts, landedOn,
+                  selectedStart: (() => {
+                    const el = document.querySelector('.clip--selected');
+                    return el ? Math.round(Number(el.style.left.replace('px','')) /
+                      (window.__fluxDev.view.getView().timeline.zoom || 60) * 1000) / 1000 : null;
+                  })() };`,
+    )
+    assert.deepEqual(state.starts, [0, 7], 'setup: a decoy at zero and a neighbour at seven')
+    assert.deepEqual(state.from, ['V1:clipA.mp4'], 'setup: the third clip on V1 is held')
+    assert.deepEqual(state.below, ['A1:clipA.mp4'], 'down goes to the track below')
+    assert.equal(
+      state.selectedStart,
+      7,
+      'and to the clip at that *time* — the decoy at zero is on the same track and is not ' +
+        'below anything',
+    )
+  })
+
+  await check('auto-repeat is not a second press', async () => {
+    /*
+     * Holding a key so it can be a modifier makes the OS send its keydown over
+     * and over. Every one of those running the command would mean `S` held down
+     * toggling a selection on and off thirty times a second — so a repeat is
+     * ignored outright.
+     *
+     * The repeats have to be *sent* to check this, and they have to be sent on
+     * a key that is not a chord key: `S` already waits for its release, so
+     * repeats of it prove nothing either way. `N` toggles snapping and answers
+     * immediately, and an odd number of repeats would leave it the wrong way
+     * round if any of them ran.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `view.recordView({ timeline: { snapping: true } });
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('n');
+         await new Promise(r => setTimeout(r, 200));
+         const once = view.getView().timeline.snapping;
+
+         // Held down: the auto-repeats the OS sends while a key stays down.
+         for (let i = 0; i < 3; i++) {
+           window.dispatchEvent(new KeyboardEvent('keydown',
+             { key: 'n', repeat: true, bubbles: true, cancelable: true }));
+         }
+         await new Promise(r => setTimeout(r, 250));
+         const after = view.getView().timeline.snapping;
+         view.recordView({ timeline: { snapping: true } });
+         await new Promise(r => setTimeout(r, 150));
+         return { once, after };`,
+    )
+    assert.equal(state.once, false, 'setup: one press should have turned snapping off')
+    assert.equal(state.after, false, 'and three repeats must not have toggled it back on')
+  })
+
+  await check('shift and S held adds the next clip rather than replacing', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `await window.__pressClip('V1');
+         window.__hold('s');
+         window.__key('ArrowRight', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const two = window.__picked();
+         window.__key('ArrowRight', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const three = window.__picked();
+         window.__release('s');
+         // And with S let go, an arrow is not a selection gesture at all.
+         window.__key('ArrowRight');
+         await new Promise(r => setTimeout(r, 200));
+         return { two, three, afterRelease: window.__picked() };`,
+    )
+    assert.equal(state.two.length, 2, `expected two clips, got ${state.two.join(' ')}`)
+    assert.equal(state.three.length, 3, `expected three, got ${state.three.join(' ')}`)
+    assert.deepEqual(state.afterRelease, state.three, 'letting go of S ends the chord')
+  })
+
+  await check('a held key that never comes up is let go of on blur', async () => {
+    /*
+     * Alt-tabbing mid-chord would otherwise leave S held for ever, and every
+     * arrow afterwards would be a chord nobody meant to type. The window losing
+     * focus is the only signal there is that a key will never be released.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `await window.__pressClip('V1');
+         const held = window.__picked();
+         window.__hold('s');
+         window.dispatchEvent(new Event('blur'));
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('ArrowRight');
+         await new Promise(r => setTimeout(r, 250));
+         return { held, after: window.__picked() };`,
+    )
+    assert.deepEqual(
+      state.after,
+      state.held,
+      'the chord should have been forgotten, so the arrow did nothing',
+    )
   })
 
   await check('a linked pair survives a save and a reload', async () => {

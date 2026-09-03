@@ -66,6 +66,34 @@ export const defaultKeymap: Keymap = {
   j: 'tool.generate',
   s: 'timeline.selectAtPlayhead',
   /*
+   * Cutting and un-cutting, on neighbouring keys: W splits the playhead's
+   * moment, Shift W takes something out and closes the hole behind it.
+   */
+  w: 'timeline.cutAtPlayhead',
+  'shift+w': 'timeline.rippleDelete',
+  /** Jumping between cuts, on the keys either side of S. */
+  'shift+a': 'timeline.toPreviousEdge',
+  'shift+d': 'timeline.toNextEdge',
+  /*
+   * Trimming to the playhead: Q takes the head up to it, E takes the tail back
+   * to it. Premiere's pair, on Premiere's keys — except that its second one is
+   * W, which is spoken for here by the cut.
+   */
+  q: 'timeline.trimHeadToPlayhead',
+  e: 'timeline.trimTailToPlayhead',
+  /*
+   * `S` held, and an arrow: walk the selection to the next clip along. With
+   * `Shift` as well, take that one too rather than instead.
+   */
+  's+arrowup': 'timeline.selectAbove',
+  's+arrowdown': 'timeline.selectBelow',
+  's+arrowleft': 'timeline.selectPrevious',
+  's+arrowright': 'timeline.selectNext',
+  'shift+s+arrowup': 'timeline.addAbove',
+  'shift+s+arrowdown': 'timeline.addBelow',
+  'shift+s+arrowleft': 'timeline.addPrevious',
+  'shift+s+arrowright': 'timeline.addNext',
+  /*
    * Moving a clip with the keyboard: along its track to the next cut, or up and
    * down the stack. `Alt` because the bare arrows belong to the playhead, which
    * is what they do in every NLE and what they will do here.
@@ -83,8 +111,27 @@ export const defaultKeymap: Keymap = {
   end: 'playback.goToEnd',
 }
 
-/** Normalise a KeyboardEvent into a stable chord string like `ctrl+shift+p`. */
-export function chordOf(e: KeyboardEvent): string {
+/**
+ * Letter keys that can be *held* as if they were modifiers.
+ *
+ * `S` takes the clip under the playhead; holding it and pressing an arrow walks
+ * that selection to the next clip along. Editors have done this for decades and
+ * a keyboard cannot express it any other way — `Ctrl`, `Alt` and `Shift` are
+ * three, and they are all spoken for.
+ *
+ * Deliberately a short list. Every key added here stops being available as a
+ * plain shortcut in combination with anything else, and a keymap where any
+ * letter might be a modifier is a keymap nobody can predict.
+ */
+export const CHORD_KEYS = new Set(['s'])
+
+/**
+ * Normalise a KeyboardEvent into a stable chord string like `ctrl+shift+p`.
+ *
+ * Held chord keys come after the real modifiers and before the key itself:
+ * `shift+s+arrowup`. Sorted, so two keys held in either order name one chord.
+ */
+export function chordOf(e: KeyboardEvent, held: ReadonlySet<string> = new Set()): string {
   const parts: string[] = []
   if (e.ctrlKey || e.metaKey) parts.push('ctrl') // treat cmd as ctrl for now
   if (e.altKey) parts.push('alt')
@@ -96,6 +143,10 @@ export function chordOf(e: KeyboardEvent): string {
 
   // Modifier-only presses are not chords.
   if (['control', 'meta', 'alt', 'shift'].includes(key)) return ''
+
+  // The key being pressed is not also one of the keys being held: `s` is `s`,
+  // not `s+s`.
+  for (const chord of [...held].filter((one) => one !== key).sort()) parts.push(chord)
 
   parts.push(key)
   return parts.join('+')
@@ -128,9 +179,55 @@ export interface KeymapController {
 
 export function createKeymapController(initial: Keymap = defaultKeymap): KeymapController {
   let keymap: Keymap = { ...initial }
+  /** Chord keys currently down. See CHORD_KEYS. */
+  const held = new Set<string>()
+  /**
+   * Chord keys that something was pressed *with* while they were down.
+   *
+   * A key that can be held as a modifier cannot run its own command when it
+   * goes down: `S` selects the clip under the playhead, and holding it to press
+   * an arrow would toggle that selection away before the arrow ever arrived.
+   * So its own command waits for the release, and only fires if the key was
+   * never used as a modifier — which is how a key that is both a shortcut and a
+   * modifier behaves everywhere it exists.
+   */
+  const usedAsModifier = new Set<string>()
+
+  const run = (chord: string): boolean => {
+    const commandId = keymap[chord]
+    if (!commandId) return false
+    const command = commands.get(commandId)
+    if (!command || !commands.isEnabled(command)) return false
+    void commands.run(commandId)
+    return true
+  }
 
   const onKeyDown = (e: KeyboardEvent) => {
-    const chord = chordOf(e)
+    /*
+     * Auto-repeat is not a second press.
+     *
+     * Holding a key so it can be a modifier means the OS sends its keydown over
+     * and over, and every one of those would run the command the key is bound
+     * to — `S` held down would toggle a selection on and off thirty times a
+     * second. A command is something you ask for once.
+     */
+    if (e.repeat) return
+
+    const key = e.key.toLowerCase()
+    // Anything pressed while a chord key is down is what that key was held
+    // *for*, whether or not the combination turns out to be bound.
+    if (!CHORD_KEYS.has(key)) for (const one of held) usedAsModifier.add(one)
+
+    const chord = chordOf(e, held)
+    if (CHORD_KEYS.has(key)) {
+      held.add(key)
+      // Unmodified, it might be the start of a chord; its own command waits for
+      // the release. With a modifier it cannot be, so it runs now — and its
+      // release must then stay quiet, or `Alt S` would be followed by a bare S
+      // undoing whatever it just did.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) return
+      usedAsModifier.add(key)
+    }
     if (!chord) return
 
     // Bare keys (no modifier) are suppressed inside text entry; chords with a
@@ -138,20 +235,38 @@ export function createKeymapController(initial: Keymap = defaultKeymap): KeymapC
     const hasModifier = e.ctrlKey || e.metaKey || e.altKey
     if (!hasModifier && isTextEntryTarget(e.target)) return
 
-    const commandId = keymap[chord]
-    if (!commandId) return
+    if (run(chord)) e.preventDefault()
+  }
 
-    const command = commands.get(commandId)
-    if (!command || !commands.isEnabled(command)) return
+  const onKeyUp = (e: KeyboardEvent) => {
+    const key = e.key.toLowerCase()
+    if (!held.delete(key)) return
+    // Let go without having been used as a modifier: it was a plain press after
+    // all, so it does what it says on the key.
+    if (!usedAsModifier.delete(key) && !isTextEntryTarget(e.target)) run(key)
+  }
 
-    e.preventDefault()
-    void commands.run(commandId)
+  /*
+   * A key held when the window loses focus is a key that never comes up.
+   *
+   * Alt-tabbing mid-chord would otherwise leave `S` held for ever, and every
+   * arrow press afterwards would be a chord nobody meant to type.
+   */
+  const onBlur = () => {
+    held.clear()
+    usedAsModifier.clear()
   }
 
   return {
     attach() {
       window.addEventListener('keydown', onKeyDown)
-      return () => window.removeEventListener('keydown', onKeyDown)
+      window.addEventListener('keyup', onKeyUp)
+      window.addEventListener('blur', onBlur)
+      return () => {
+        window.removeEventListener('keydown', onKeyDown)
+        window.removeEventListener('keyup', onKeyUp)
+        window.removeEventListener('blur', onBlur)
+      }
     },
     lookup(commandId) {
       return Object.keys(keymap).find((chord) => keymap[chord] === commandId)

@@ -850,6 +850,28 @@ kbd {
   pointer-events: none;
 }
 
+/*
+ * A selected gap: the hole between two clips, held.
+ *
+ * Drawn as an absence rather than as an object — hatched, not filled — because
+ * that is what it is, and a solid block would read as a clip you cannot play.
+ */
+.tl-gap {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border: 1px solid var(--flux-accent);
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    45deg,
+    color-mix(in srgb, var(--flux-accent) 22%, transparent),
+    color-mix(in srgb, var(--flux-accent) 22%, transparent) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  pointer-events: none;
+}
+
 .tl-drop-preview {
   position: absolute;
   top: 4px;

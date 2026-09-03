@@ -61,6 +61,16 @@ import {
   splitClips,
   allowedStretch,
   stretchClips,
+  rippleDeleteClips,
+  trimToTime,
+  clipNextTo,
+  type Step,
+  closeGap,
+  gapAt,
+  gapNear,
+  nextEdge,
+  previousEdge,
+  type Gap,
   copyClips,
   pasteClips,
   duplicateClips,
@@ -260,6 +270,18 @@ export function TimelinePanel() {
    */
   const anchorRef = useRef<string | null>(null)
   const [marquee, setMarquee] = useState<Marquee | null>(null)
+  /**
+   * The hole between two clips, when that is what is selected.
+   *
+   * Held apart from the clip selection rather than pretending to be one of
+   * them: a gap has no id, it stops existing the moment its neighbours move,
+   * and the commands that act on it are not the commands that act on clips.
+   * Only ever one, and never at the same time as a clip — two kinds of
+   * selection on screen at once would make every command ask which was meant.
+   */
+  const [gap, setGap] = useState<Gap | null>(null)
+  const gapRef = useRef<Gap | null>(null)
+  gapRef.current = gap
   /**
    * Whether pausing selects what the playhead is on.
    *
@@ -575,10 +597,16 @@ export function TimelinePanel() {
        */
       if (tool === 'razor') {
         const at = timeAt(event.clientX)
-        const made = splitClips(at, [clip.id])
+        // Shift cuts everything the moment crosses, not just what was under
+        // the pointer — one gesture for "cut here" and "cut here on every
+        // track", which is the pair every NLE offers.
+        const made = event.shiftKey ? splitClips(at) : splitClips(at, [clip.id])
         setNotice(
           made.length > 0
-            ? `Cut at ${formatTimecode(at, sequence.settings.frameRate)}`
+            ? `Cut ${made.length} clip${made.length === 1 ? '' : 's'} at ${formatTimecode(
+                at,
+                sequence.settings.frameRate,
+              )}`
             : 'A razor needs somewhere to cut — the very edge of a clip is not a cut',
         )
         return
@@ -639,6 +667,8 @@ export function TimelinePanel() {
       // same tick, and it has to build on this selection rather than the one
       // this render was made with.
       selectedRef.current = chosen
+      setGap(null)
+      gapRef.current = null
       if (chosen.size === 0) return
 
       const ids = [...chosen]
@@ -1031,6 +1061,9 @@ export function TimelinePanel() {
       let toRow = fromRow
       let toTime = fromTime
       setMarquee({ fromTime, toTime, fromRow, toRow, swept })
+      // What a press on empty timeline *lands on*, if anything: the hole
+      // between two clips is a thing you can take hold of and close.
+      const landed = gapAt(track.id, fromTime)
 
       const onMove = (move: PointerEvent) => {
         const dx = move.clientX - event.clientX
@@ -1069,9 +1102,16 @@ export function TimelinePanel() {
         window.removeEventListener('pointerup', onUp)
         window.removeEventListener('pointercancel', onUp)
         if (!swept && !additive) {
+          /*
+           * A press that went nowhere. On a gap it takes the gap; on open
+           * timeline it lets go of everything, which is the only other thing a
+           * click on nothing can sensibly mean.
+           */
           setSelected(new Set())
           selectedRef.current = new Set()
           anchorRef.current = null
+          setGap(landed)
+          gapRef.current = landed
         }
         setMarquee(null)
       }
@@ -1104,6 +1144,16 @@ export function TimelinePanel() {
   // ── commands ──────────────────────────────────────────────────
 
   const deleteSelected = useCallback(() => {
+    // A gap has nothing to remove, so Delete closes it — which is what Delete
+    // does to a gap in every editor that lets you select one.
+    const hole = gapRef.current
+    if (hole) {
+      if (closeGap(hole)) {
+        setGap(null)
+        gapRef.current = null
+      }
+      return
+    }
     if (selected.size === 0) return
     removeClips([...selected])
     setSelected(new Set())
@@ -1174,10 +1224,26 @@ export function TimelinePanel() {
    * showing is the one the playhead is "on".
    */
   const selectAtPlayhead = useCallback(() => {
-    const under = clipsAtTime(getTime())
+    const at = getTime()
+    const under = clipsAtTime(at)
     const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1)
     if (!front) {
-      setNotice('Nothing under the playhead to select')
+      /*
+       * Nothing to stand on, so look for a hole to stand in.
+       *
+       * The top-most track that has one, because the keyboard has no pointer to
+       * say which was meant — and the same order everything else here reads in.
+       */
+      const found = gapNear(at)
+      setSelected(new Set())
+      selectedRef.current = new Set()
+      setGap(found)
+      gapRef.current = found
+      setNotice(
+        found
+          ? `Gap on ${found.trackId}, ${(found.end - found.start).toFixed(2)}s`
+          : 'Nothing under the playhead to select',
+      )
       return
     }
     const together = withLinked([front.id])
@@ -1186,6 +1252,133 @@ export function TimelinePanel() {
     setSelected(chosen)
     selectedRef.current = chosen
     anchorRef.current = already ? null : front.id
+    setGap(null)
+    gapRef.current = null
+  }, [])
+
+  /** Cuts every clip the playhead crosses. */
+  const cutAtPlayhead = useCallback(() => {
+    const at = getTime()
+    const made = splitClips(at)
+    setNotice(
+      made.length > 0
+        ? `Cut ${made.length} clip${made.length === 1 ? '' : 's'} at ${formatTimecode(
+            at,
+            getSequence().settings.frameRate,
+          )}`
+        : 'Nothing to cut at the playhead',
+    )
+  }, [])
+
+  /**
+   * Takes the selection out and closes the hole behind it.
+   *
+   * Or closes the hole itself, when a gap is what is selected — the same
+   * gesture for "this shouldn't be here", whether *this* is a clip or the
+   * absence of one.
+   */
+  const rippleDelete = useCallback(() => {
+    const hole = gapRef.current
+    if (hole) {
+      const length = hole.end - hole.start
+      if (closeGap(hole)) {
+        setGap(null)
+        gapRef.current = null
+        setNotice(`Closed a ${length.toFixed(2)}s gap on ${hole.trackId}`)
+      }
+      return
+    }
+
+    const ids = [...selectedRef.current]
+    if (ids.length === 0) {
+      setNotice('Select a clip or a gap to ripple out')
+      return
+    }
+    const removed = rippleDeleteClips(ids)
+    setSelected(new Set())
+    selectedRef.current = new Set()
+    if (removed > 0) {
+      setNotice(
+        `Rippled out ${removed} clip${removed === 1 ? '' : 's'} — what followed moved back`,
+      )
+    }
+  }, [])
+
+  /**
+   * Trims what the playhead is inside, up to the playhead.
+   *
+   * The selection when there is one, everything the playhead crosses when there
+   * is not — the same rule the razor's `Shift` follows, and the one that lets
+   * this be either surgical or sweeping without a second key.
+   */
+  const trimToPlayhead = useCallback((edge: TrimEdge) => {
+    const at = getTime()
+    const ids = [...selectedRef.current]
+    const trimmed = trimToTime(at, edge, ids)
+    if (trimmed === 0) {
+      setNotice(
+        ids.length > 0
+          ? 'The playhead is not inside the selection'
+          : 'Nothing under the playhead to trim',
+      )
+      return
+    }
+    setNotice(
+      `Trimmed ${trimmed} clip${trimmed === 1 ? '' : 's'} ${
+        edge === 'start' ? 'up to' : 'back to'
+      } the playhead`,
+    )
+  }, [])
+
+  /**
+   * Walks the selection to the clip next to it.
+   *
+   * The anchor is where it walks *from*, which is what makes a run of presses
+   * travel in a line rather than oscillating between two clips. With `Shift`
+   * held it takes the next one as well rather than instead, so a selection can
+   * be built up a clip at a time without the pointer.
+   */
+  const stepSelection = useCallback((direction: Step, additive: boolean) => {
+    const held = [...selectedRef.current]
+    let fromId = anchorRef.current && held.includes(anchorRef.current) ? anchorRef.current : held[0]
+    if (!fromId) {
+      // Nothing held: start from whatever the playhead is on, which is where
+      // the eye already is.
+      const under = clipsAtTime(getTime())
+      const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1)
+      if (!front) {
+        setNotice('Nothing selected, and nothing under the playhead to start from')
+        return
+      }
+      fromId = front.id
+    }
+
+    const next = clipNextTo(fromId, direction)
+    if (!next) {
+      setNotice(`No clip ${direction === 'up' ? 'above' : direction === 'down' ? 'below' : direction === 'left' ? 'before' : 'after'} this one`)
+      return
+    }
+
+    const together = withLinked([next.id])
+    const chosen = additive ? new Set([...selectedRef.current, ...together]) : new Set(together)
+    setSelected(chosen)
+    selectedRef.current = chosen
+    anchorRef.current = next.id
+    setGap(null)
+    gapRef.current = null
+    setNotice(null)
+  }, [])
+
+  /** Sends the playhead to the nearest edge in a direction. */
+  const toEdge = useCallback((direction: 'previous' | 'next') => {
+    const at = getTime()
+    const found = direction === 'next' ? nextEdge(at) : previousEdge(at)
+    if (found === null) {
+      setNotice(direction === 'next' ? 'No cut after this one' : 'No cut before this one')
+      return
+    }
+    seek(found)
+    setNotice(null)
   }, [])
 
   /**
@@ -1312,6 +1505,72 @@ export function TimelinePanel() {
         run: pasteAtPlayhead,
       },
       {
+        id: 'timeline.trimHeadToPlayhead',
+        title: 'Trim Head To The Playhead',
+        category: 'Timeline',
+        detail: 'Takes the front of the clip up to where the playhead is',
+        run: () => trimToPlayhead('start'),
+      },
+      {
+        id: 'timeline.trimTailToPlayhead',
+        title: 'Trim Tail To The Playhead',
+        category: 'Timeline',
+        detail: 'Takes the end of the clip back to where the playhead is',
+        run: () => trimToPlayhead('end'),
+      },
+      ...(['up', 'down', 'left', 'right'] as Step[]).flatMap((direction) => {
+        const where =
+          direction === 'up'
+            ? 'Above'
+            : direction === 'down'
+              ? 'Below'
+              : direction === 'left'
+                ? 'Previous'
+                : 'Next'
+        return [
+          {
+            id: `timeline.select${where}`,
+            title: `Select The Clip ${where}`,
+            category: 'Timeline',
+            detail: 'Hold S and press an arrow',
+            run: () => stepSelection(direction, false),
+          },
+          {
+            id: `timeline.add${where}`,
+            title: `Add The Clip ${where} To The Selection`,
+            category: 'Timeline',
+            detail: 'Hold Shift and S, and press an arrow',
+            run: () => stepSelection(direction, true),
+          },
+        ]
+      }),
+      {
+        id: 'timeline.cutAtPlayhead',
+        title: 'Cut At The Playhead',
+        category: 'Timeline',
+        detail: 'Splits every clip the playhead crosses',
+        run: cutAtPlayhead,
+      },
+      {
+        id: 'timeline.rippleDelete',
+        title: 'Ripple Delete',
+        category: 'Timeline',
+        detail: 'Removes the selection, or a selected gap, and closes the hole',
+        run: rippleDelete,
+      },
+      {
+        id: 'timeline.toPreviousEdge',
+        title: 'Go To Previous Cut',
+        category: 'Timeline',
+        run: () => toEdge('previous'),
+      },
+      {
+        id: 'timeline.toNextEdge',
+        title: 'Go To Next Cut',
+        category: 'Timeline',
+        run: () => toEdge('next'),
+      },
+      {
         id: 'timeline.selectAtPlayhead',
         title: 'Select Clip Under Playhead',
         category: 'Timeline',
@@ -1392,14 +1651,23 @@ export function TimelinePanel() {
         title: 'Delete Selected Clips',
         category: 'Timeline',
         detail: 'Removes clips from the sequence; assets and files are untouched',
-        enabled: () => selected.size > 0,
+        // A gap counts as something to delete: there are no clips selected when
+        // one is held, and a command disabled at exactly that moment is a key
+        // that does nothing for a reason nobody can see.
+        enabled: () => selected.size > 0 || gap !== null,
         run: deleteSelected,
       },
     ])
     return () => handle.dispose()
   }, [
+    gap,
     copySelected,
     pasteAtPlayhead,
+    cutAtPlayhead,
+    trimToPlayhead,
+    stepSelection,
+    rippleDelete,
+    toEdge,
     deleteSelected,
     toggleLinkSelected,
     selectAtPlayhead,
@@ -1578,6 +1846,14 @@ export function TimelinePanel() {
                       />
                     )
                   })}
+
+                {gap?.trackId === track.id && (
+                  <div
+                    className="tl-gap"
+                    style={{ left: gap.start * zoom, width: (gap.end - gap.start) * zoom }}
+                    title={`Gap · ${(gap.end - gap.start).toFixed(2)}s — Shift W closes it`}
+                  />
+                )}
 
                 {preview?.trackId === track.id && (
                   <div

@@ -56,6 +56,9 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Selection** | Click, click-again, click-away, rubber band, `Shift` range by track and time, `Ctrl` one at a time. |
 | **Keyboard edit** | `S` takes what the playhead is on; `Alt` and the arrows walk it, swap it, and lift it between tracks. |
 | **Tools** | A strip of them: select, razor and stretch work; the rest say what they will do. |
+| **Ripple delete** | `Shift W` takes a clip — or a selected gap — out and closes the hole. |
+| **Trim to playhead** | `Q` and `E` take an edge exactly to the playhead. |
+| **Chord keys** | `S` held is a modifier: with the arrows it walks the selection clip by clip. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
@@ -269,18 +272,58 @@ to reach into — closing the strip would leave the pointer holding nothing.
 Every tool is a command, so the keys and the palette both reach them whether or
 not the strip is on screen.
 
-#### The razor
+#### The razor, and cutting
 
-Clicking a clip cuts it in two where the pointer is. **Both halves of a pair,
-always**: a cut through the picture that left the sound whole would produce a
-clip linked to something twice its length, and the first drag would take them
-apart. Each side then gets a link of its own — two pairs, not four clips sharing
-one id — and the right-hand piece starts further into its source by exactly the
-distance the cut was from the clip's head.
+Clicking a clip cuts it in two where the pointer is; **`Shift` and a click cuts
+every track** at that moment. From the keyboard, **`W`** cuts everything the
+playhead crosses — the pointer says *where*, the playhead already knows.
+
+**Both halves of a pair, always**: a cut through the picture that left the sound
+whole would produce a clip linked to something twice its length, and the first
+drag would take them apart. Each side then gets a link of its own — two pairs,
+not four clips sharing one id — and the right-hand piece starts further into its
+source by exactly the distance the cut was from the clip's head.
 
 The very edge of a clip is not a cut, and the razor says so rather than making a
 piece with no frames in it. The tool stays in hand afterwards, because cutting
 is something you do several times in a row.
+
+**`Shift A` and `Shift D` walk the playhead between cuts** — every clip edge on
+every track, and zero. Across all tracks because the playhead is not on a track,
+and a cut on any of them is a moment worth landing on.
+
+#### Ripple delete, and gaps
+
+`Delete` takes a clip out and leaves the hole, which is usually right: most of
+the time a shot is being replaced by another one. **`Shift W` is the other
+intention** — take this out and let everything after it fall back.
+
+**Only the tracks something was removed from move.** A pair deleted from V1 and
+A1 ripples both, so a picture and its sound stay together; music on A2 that had
+nothing removed from it stays exactly where it was put. The other reading —
+everything on every track slides — is what Premiere does with sync lock on, and
+it is the reading that can quietly ruin a soundtrack you were happy with. When
+there is a sync lock to turn on, this is what it will switch.
+
+Removed rightmost first, so each shift is measured against clips that have not
+moved yet: two clips taken out of one track compose correctly instead of one
+dragging the other's measurement out from under it.
+
+**A gap is a thing you can hold.** Click the empty stretch between two clips, or
+press `S` where there is no clip to take, and the hole itself is selected —
+drawn hatched rather than filled, because it is an absence and a solid block
+would read as a clip that will not play. `Shift W` closes it; so does `Delete`,
+since there is nothing else Delete can mean on a gap.
+
+A gap is bounded on the right by a clip, always. What comes after the last clip
+is not a gap — it is where the sequence has not been used yet, and closing it
+would mean nothing — so a press out there lets go of the selection instead. On
+the left it is bounded by a clip *or* by the start of the sequence, because the
+hole before the first shot is one of the things this is for.
+
+Gaps are held apart from the clip selection rather than pretending to be one:
+a gap has no id, it stops existing the moment its neighbours move, and two kinds
+of selection on screen at once would make every command ask which was meant.
 
 #### Stretching, and what a clip's rate is
 
@@ -359,7 +402,14 @@ Two behaviours worth knowing:
 | drag a clip | move it in time, and between tracks |
 | drag either edge of a clip | trim what it plays |
 | `Alt` while dragging a clip | leave the original and place a copy |
-| `S` | take the clip under the playhead, or put it down |
+| `S` | take the clip under the playhead — or the gap, when there is no clip |
+| `W` | cut every clip the playhead crosses |
+| `Shift W` | ripple delete: take it out and close the hole |
+| `Shift A` / `Shift D` | playhead to the previous / next cut |
+| `Q` / `E` | trim the head up to the playhead / the tail back to it |
+| `S` held + arrows | walk the selection to the clip above, below, before, after |
+| `Shift` + `S` held + arrows | add that clip rather than replacing |
+| razor click, `Shift` | cut every track at that moment |
 | `Alt` `←` `→` | walk the selection to the next cut, or swap with what it touches |
 | `Alt` `↑` `↓` | move the selection a track up or down |
 | `Alt S` | step between the halves of a linked pair |
@@ -587,6 +637,57 @@ either half still moves both, and a plain click takes the pair back.
 
 `Alt` on a press means the same thing it means on a drag: **this half**, or a
 copy of this half.
+
+#### Trimming to the playhead
+
+`Q` takes the head of a clip up to the playhead; `E` takes the tail back to it.
+Premiere's pair on Premiere's keys, except that its second one is `W`, which the
+cut already owns here.
+
+The keyboard's version of dragging an edge, and the one that is **exact**: a
+hand can land a frame either side of where it meant, and this cannot. Each clip
+gets its own distance — the playhead is one moment and the clips crossing it
+start at different ones — which is why this is not the same call a drag makes,
+where the *hand* moved one distance and every clip in the group should follow it.
+
+It takes the selection when there is one and everything under the playhead when
+there is not, the same rule the razor's `Shift` follows. The hole is left behind:
+trimming a head forward leaves a gap in front of the clip exactly as deleting it
+would, and `Shift W` is the gesture that says "and close it".
+
+#### Walking a selection with the keyboard
+
+Hold `S` and press an arrow: the selection moves to the clip above, below,
+before or after. Hold `Shift` as well and it *adds* that clip instead, so a
+selection can be built up a clip at a time without the pointer.
+
+Sideways is the next clip along the same track. Up and down are the nearest
+track with something **at the same time** — a clip above that does not overlap
+is not the clip above, it is a different part of the edit, and jumping to it
+would lose your place.
+
+That needed the keymap to learn a new kind of chord: **a letter key held down as
+if it were a modifier**. `Ctrl`, `Alt` and `Shift` are three and they are all
+spoken for. Two rules fall out of it, and both are the difference between a
+feature and a bug:
+
+- **A held chord key does not run its own command on the way down.** `S` selects
+  the clip under the playhead, so holding it to press an arrow would toggle that
+  selection away before the arrow arrived. Its own command waits for the
+  release, and fires only if the key was never used as a modifier — which is how
+  a key that is both a shortcut and a modifier behaves wherever it exists.
+- **Auto-repeat is not a second press.** Holding a key so it can be a modifier
+  makes the operating system send its keydown over and over, and every one of
+  those would run the command again: `S` held would toggle a selection on and
+  off thirty times a second.
+
+A key held when the window loses focus is a key that never comes up, so blur
+lets go of everything held. Alt-tabbing mid-chord would otherwise leave `S` down
+for ever, and every arrow afterwards would be a chord nobody meant to type.
+
+`CHORD_KEYS` is deliberately one key long. Every letter added to it stops being
+available as a plain shortcut in combination with anything else, and a keymap
+where any letter might be a modifier is one nobody can predict.
 
 #### Copying clips
 

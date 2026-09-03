@@ -1611,6 +1611,249 @@ export function splitClips(at: number, ids?: string[]): Clip[] {
   return made
 }
 
+/**
+ * A hole in a track: the empty stretch between two clips.
+ *
+ * Not a clip and not an id — a gap is a *place*, and it stops existing the
+ * moment the clips either side of it move. So it is passed around by value and
+ * looked up again whenever anything needs it, rather than being held onto.
+ */
+export interface Gap {
+  trackId: string
+  start: number
+  end: number
+}
+
+/**
+ * The gap a track has at `time`, if it has one.
+ *
+ * Bounded on the right by a clip, always: the empty timeline after the last
+ * clip is not a gap, it is where the sequence has not been used yet, and
+ * closing it would mean nothing. Bounded on the left by a clip *or* by the
+ * start of the sequence, because the hole before the first shot is one of the
+ * things a gap select is for.
+ */
+export function gapAt(trackId: string, time: number): Gap | null {
+  const clips = clipsOnTrack(trackId)
+  if (clips.length === 0) return null
+  if (clips.some((clip) => time >= clip.start - EPS && time < clip.start + clip.duration - EPS)) {
+    return null
+  }
+
+  const after = clips.find((clip) => clip.start > time + EPS)
+  if (!after) return null
+  const before = [...clips].reverse().find((clip) => clip.start + clip.duration <= time + EPS)
+  const start = before ? before.start + before.duration : 0
+  if (after.start - start < EPS) return null
+  return { trackId, start, end: after.start }
+}
+
+/**
+ * The first gap at `time`, looking down the tracks in the order they are drawn.
+ *
+ * For the keyboard, which has no pointer to say *which* track was meant. Top
+ * down because that is the order everything else here reads in — the front-most
+ * picture first, and the sound under it.
+ */
+export function gapNear(time: number): Gap | null {
+  for (const track of sequence.tracks) {
+    const gap = gapAt(track.id, time)
+    if (gap) return gap
+  }
+  return null
+}
+
+/**
+ * Deletes clips and closes the hole they leave.
+ *
+ * The ordinary delete leaves a gap where the clip was, which is right: most of
+ * the time a shot is being replaced by another one. A ripple is the other
+ * intention — take this out and let everything after it fall back — and it is
+ * the one that needs care, because it moves things nobody selected.
+ *
+ * **Only the tracks something was removed from move.** A pair deleted from V1
+ * and A1 ripples both, so a picture and its sound stay together; music on A2
+ * that had nothing removed from it stays exactly where it was put. The other
+ * reading — everything on every track slides — is what Premiere does with sync
+ * lock on, and it is the reading that can quietly ruin a soundtrack you were
+ * happy with. When there is a sync lock to turn on, this is what it will
+ * switch.
+ *
+ * Rightmost first, so each shift is measured against clips that have not moved
+ * yet: two clips removed from one track compose correctly rather than one
+ * dragging the other's measurement out from under it.
+ *
+ * @returns how many clips were removed.
+ */
+export function rippleDeleteClips(ids: string[]): number {
+  const doomed = new Set(withLinked(ids))
+  const removing = sequence.clips.filter((clip) => doomed.has(clip.id))
+  if (removing.length === 0) return 0
+
+  let clips = sequence.clips.filter((clip) => !doomed.has(clip.id))
+  const order = [...removing].sort((a, b) => b.start - a.start)
+  for (const gone of order) {
+    const end = gone.start + gone.duration
+    clips = clips.map((clip) =>
+      clip.trackId === gone.trackId && clip.start >= end - EPS
+        ? { ...clip, start: snapToFrame(clip.start - gone.duration) }
+        : clip,
+    )
+  }
+
+  sequence = { ...sequence, clips }
+  emit()
+  return removing.length
+}
+
+/**
+ * Closes a gap: everything after it on that track falls back into it.
+ *
+ * One track, because a gap is on one track. The same rule as a ripple delete
+ * without the delete.
+ */
+export function closeGap(gap: Gap): boolean {
+  const length = gap.end - gap.start
+  if (!(length > EPS)) return false
+
+  const clips = sequence.clips.map((clip) =>
+    clip.trackId === gap.trackId && clip.start >= gap.end - EPS
+      ? { ...clip, start: snapToFrame(clip.start - length) }
+      : clip,
+  )
+  if (clips.every((clip, i) => clip === sequence.clips[i])) return false
+
+  sequence = { ...sequence, clips }
+  emit()
+  return true
+}
+
+/**
+ * Every edge in the sequence: the head and tail of every clip, and zero.
+ *
+ * What "the next cut" means. Across all tracks rather than the selected one,
+ * because the playhead is not on a track — and a cut on any track is a moment
+ * worth landing on, which is the whole reason to jump between them.
+ */
+export function cutEdges(): number[] {
+  const edges = new Set<number>([0])
+  for (const clip of sequence.clips) {
+    edges.add(snapToFrame(clip.start))
+    edges.add(snapToFrame(clip.start + clip.duration))
+  }
+  return [...edges].sort((a, b) => a - b)
+}
+
+/** The first edge after `time`, or null when there is nothing further on. */
+export function nextEdge(time: number): number | null {
+  return cutEdges().find((edge) => edge > time + EPS) ?? null
+}
+
+/** The last edge before `time`, or null when there is nothing behind it. */
+export function previousEdge(time: number): number | null {
+  return [...cutEdges()].reverse().find((edge) => edge < time - EPS) ?? null
+}
+
+/**
+ * Trims one edge of everything the playhead is inside, up to the playhead.
+ *
+ * The keyboard's version of dragging an edge, and the one that is *exact*: a
+ * hand can land a frame either side of where it meant, and this cannot. Q takes
+ * the head up to the playhead, E takes the tail back to it — which is Premiere's
+ * pair, minus the fact that its second key is spoken for here by the cut.
+ *
+ * Each clip gets its own distance, since the playhead is at one moment and the
+ * clips crossing it start at different ones. That is why this is not
+ * `trimClips`: one delta across a group is the right rule for a drag, where the
+ * *hand* moved one distance, and the wrong one here.
+ *
+ * The hole is left behind. Trimming a head forward leaves a gap in front of the
+ * clip, exactly as deleting it leaves one — `Shift W` is the gesture that says
+ * "and close it", and doing that silently here would take a decision nobody
+ * made.
+ *
+ * @param ids when given, only these clips are considered (and their partners).
+ * @returns how many clips were trimmed.
+ */
+export function trimToTime(at: number, edge: TrimEdge, ids?: string[]): number {
+  const when = snapToFrame(at)
+  const only = ids && ids.length > 0 ? new Set(withLinked(ids)) : null
+  const crossing = sequence.clips.filter(
+    (clip) =>
+      (!only || only.has(clip.id)) &&
+      when > clip.start + EPS &&
+      when < clip.start + clip.duration - EPS,
+  )
+  if (crossing.length === 0) return 0
+
+  const min = 1 / sequence.settings.frameRate
+  const clips = sequence.clips.map((clip) => {
+    if (!crossing.includes(clip)) return clip
+    if (edge === 'start') {
+      const delta = when - clip.start
+      if (clip.duration - delta < min - EPS) return clip
+      return {
+        ...clip,
+        start: when,
+        // Seconds of source, so a stretched clip skips the right amount.
+        offset: clip.offset + delta * clip.speed,
+        duration: clip.duration - delta,
+      }
+    }
+    const duration = when - clip.start
+    if (duration < min - EPS) return clip
+    return { ...clip, duration }
+  })
+
+  const changed = clips.filter((clip, i) => clip !== sequence.clips[i]).length
+  if (changed === 0) return 0
+
+  sequence = { ...sequence, clips }
+  emit()
+  return changed
+}
+
+/** Which way the keyboard is walking a selection. */
+export type Step = 'up' | 'down' | 'left' | 'right'
+
+/**
+ * The clip next to this one, in a direction.
+ *
+ * Sideways is the next clip along the same track, which is what "the next clip"
+ * means when you are looking at one track. Up and down are the nearest track
+ * that has something *at the same time* — a clip above that does not overlap is
+ * not the clip above, it is a different part of the edit, and jumping to it
+ * would lose your place.
+ */
+export function clipNextTo(id: string, direction: Step): Clip | null {
+  const from = sequence.clips.find((clip) => clip.id === id)
+  if (!from) return null
+
+  if (direction === 'left' || direction === 'right') {
+    const onTrack = clipsOnTrack(from.trackId).filter((clip) => clip.id !== from.id)
+    const before = onTrack.filter((clip) => clip.start < from.start - EPS)
+    const after = onTrack.filter((clip) => clip.start > from.start + EPS)
+    return direction === 'left' ? (before.at(-1) ?? null) : (after[0] ?? null)
+  }
+
+  const rows = sequence.tracks
+  const row = rows.findIndex((track) => track.id === from.trackId)
+  if (row < 0) return null
+  const end = from.start + from.duration
+  const step = direction === 'up' ? -1 : 1
+
+  for (let i = row + step; i >= 0 && i < rows.length; i += step) {
+    const found = sequence.clips.find(
+      (clip) =>
+        clip.trackId === rows[i].id &&
+        clip.start < end - EPS &&
+        clip.start + clip.duration > from.start + EPS,
+    )
+    if (found) return found
+  }
+  return null
+}
+
 /** Which way a keyboard nudge is pushing. */
 export type Nudge = 'left' | 'right'
 
