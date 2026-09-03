@@ -54,6 +54,10 @@ import {
   allowedTrim,
   trimClips,
   toggleLink,
+  copyClips,
+  pasteClips,
+  duplicateClips,
+  clipboardCount,
   type TrimEdge,
   findFreeStart,
   moveClips,
@@ -184,6 +188,8 @@ interface ClipDrag {
   moved: boolean
   deltaTime: number
   deltaTracks: number
+  /** `Alt` is down: this drag leaves the original behind and places a copy. */
+  copying: boolean
 }
 
 /**
@@ -218,6 +224,12 @@ export function TimelinePanel() {
    * of laying out an edit would be worse than the silence it replaces.
    */
   const [notice, setNotice] = useState<string | null>(null)
+  /**
+   * Whether edges snap. A mode rather than a held key, because `Alt` means
+   * "duplicate" while dragging and one modifier cannot mean two things.
+   * Recorded with the view, so a project opens the way it was left.
+   */
+  const [snapping, setSnapping] = useState(() => getView().timeline.snapping !== false)
   const lanesRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const headersRef = useRef<HTMLDivElement>(null)
@@ -251,7 +263,7 @@ export function TimelinePanel() {
 
   // Recorded, never marked dirty: zooming is not an edit. It is written out
   // with the next save. See kernel/view.ts.
-  useEffect(() => recordView({ timeline: { zoom } }), [zoom])
+  useEffect(() => recordView({ timeline: { zoom, snapping } }), [zoom, snapping])
 
   /*
    * Follow the view when it names a zoom.
@@ -270,6 +282,7 @@ export function TimelinePanel() {
   useEffect(
     () =>
       subscribeView(() => {
+        setSnapping(getView().timeline.snapping !== false)
         const stored = getView().timeline.zoom
         if (stored > 0 && Math.abs(stored - zoom) > 0.01) setZoom(clampZoom(stored))
       }),
@@ -413,8 +426,7 @@ export function TimelinePanel() {
 
       const onMove = (move: PointerEvent) => {
         const raw = (move.clientX - startX) / zoom
-        // Alt turns snapping off, as it does for a move.
-        const wanted = move.altKey ? raw : snapTrimToEdges(raw, edge, chosen)
+        const wanted = snapping ? snapTrimToEdges(raw, edge, chosen) : raw
         // Clamped here rather than only on commit: an edge that keeps following
         // the pointer past the end of its own file and then springs back on
         // release is a lie about what the edit will be.
@@ -434,7 +446,7 @@ export function TimelinePanel() {
       window.addEventListener('pointerup', onUp)
       window.addEventListener('pointercancel', onUp)
     },
-    [zoom, snapTrimToEdges],
+    [zoom, snapping, snapTrimToEdges],
   )
 
   /**
@@ -485,7 +497,8 @@ export function TimelinePanel() {
       let moved = false
       let deltaTime = 0
       let deltaTracks = 0
-      setDrag({ ids, moved, deltaTime, deltaTracks })
+      let copying = event.altKey
+      setDrag({ ids, moved, deltaTime, deltaTracks, copying })
 
       const onMove = (move: PointerEvent) => {
         const dx = move.clientX - startX
@@ -493,11 +506,13 @@ export function TimelinePanel() {
         if (!moved && Math.abs(dx) < DRAG_THRESHOLD_PX && Math.abs(dy) < DRAG_THRESHOLD_PX) return
         moved = true
 
-        // Alt turns snapping off, for when the gap is the point.
         const raw = dx / zoom
-        deltaTime = snapDelta(move.altKey ? raw : snapDeltaToEdges(raw, chosen))
+        deltaTime = snapDelta(snapping ? snapDeltaToEdges(raw, chosen) : raw)
         deltaTracks = Math.round(dy / TRACK_HEIGHT)
-        setDrag({ ids, moved, deltaTime, deltaTracks })
+        // Read as the pointer moves rather than at the press, so the decision
+        // can be made — and unmade — while the clip is in the air.
+        copying = move.altKey
+        setDrag({ ids, moved, deltaTime, deltaTracks, copying })
       }
 
       const onUp = () => {
@@ -506,7 +521,24 @@ export function TimelinePanel() {
         window.removeEventListener('pointercancel', onUp)
         // Committed here and nowhere else: until the pointer comes up the clip
         // is still where it was, so an abandoned drag needs no undoing.
-        if (moved) moveClips(ids, deltaTime, deltaTracks)
+        if (moved && copying) {
+          /*
+           * `Alt` leaves the original where it is and puts a copy where the
+           * drag ended — which is the gesture in every NLE, and the reason
+           * snapping had to become a mode rather than a held key.
+           *
+           * The copies become the selection: what is under the pointer when
+           * you let go is what you were placing, and leaving the originals
+           * selected would mean the next drag moved the wrong clips.
+           */
+          const copies = duplicateClips(ids, deltaTime, deltaTracks)
+          if (copies.length > 0) {
+            const made = new Set(copies.map((clip) => clip.id))
+            setSelected(made)
+            selectedRef.current = made
+            setNotice(`Duplicated ${copies.length} clip${copies.length === 1 ? '' : 's'}`)
+          }
+        } else if (moved) moveClips(ids, deltaTime, deltaTracks)
         else if (!additive && chosen.size > together.length) {
           /*
            * Pressed a clip that was already part of a group, and let go without
@@ -533,7 +565,7 @@ export function TimelinePanel() {
       window.addEventListener('pointerup', onUp)
       window.addEventListener('pointercancel', onUp)
     },
-    [zoom, snapDeltaToEdges],
+    [zoom, snapping, snapDeltaToEdges],
   )
 
   // ── zoom ──────────────────────────────────────────────────────
@@ -856,6 +888,39 @@ export function TimelinePanel() {
     else setNotice('A clip on its own has nothing to link to — select both halves, or two clips')
   }, [])
 
+  const copySelected = useCallback(() => {
+    const count = copyClips([...selectedRef.current])
+    setNotice(
+      count > 0
+        ? `Copied ${count} clip${count === 1 ? '' : 's'}`
+        : 'Nothing selected to copy',
+    )
+  }, [])
+
+  /**
+   * Puts the clipboard down at the playhead.
+   *
+   * The playhead rather than the pointer, because paste is a keyboard gesture
+   * and the pointer may be anywhere — including outside the panel. It is also
+   * where every NLE pastes, for the same reason.
+   */
+  const pasteAtPlayhead = useCallback(() => {
+    const landed = pasteClips(getTime())
+    if (landed.length === 0) {
+      setNotice(clipboardCount() === 0 ? 'Nothing copied yet' : 'No room to paste that here')
+      return
+    }
+    const made = new Set(landed.map((clip) => clip.id))
+    setSelected(made)
+    selectedRef.current = made
+    const at = Math.min(...landed.map((clip) => clip.start))
+    const slid = at > getTime() + 1e-6
+    setNotice(
+      `Pasted ${landed.length} clip${landed.length === 1 ? '' : 's'}` +
+        (slid ? ` — slid to ${at.toFixed(2)}s, past what was already there` : ''),
+    )
+  }, [])
+
   useEffect(() => {
     const handle = commands.registerAll([
       {
@@ -880,6 +945,29 @@ export function TimelinePanel() {
         },
       },
       {
+        id: 'timeline.copy',
+        title: 'Copy Clips',
+        category: 'Timeline',
+        detail: 'Copies the selection, linked halves included',
+        enabled: () => selected.size > 0,
+        run: copySelected,
+      },
+      {
+        id: 'timeline.paste',
+        title: 'Paste Clips',
+        category: 'Timeline',
+        detail: 'Puts the copied clips down at the playhead',
+        enabled: () => clipboardCount() > 0,
+        run: pasteAtPlayhead,
+      },
+      {
+        id: 'timeline.toggleSnapping',
+        title: 'Toggle Snapping',
+        category: 'Timeline',
+        detail: 'Whether edges snap to clips, the playhead and the start',
+        run: () => setSnapping((on) => !on),
+      },
+      {
         id: 'timeline.toggleLink',
         title: 'Link or Unlink Selected Clips',
         category: 'Timeline',
@@ -897,7 +985,7 @@ export function TimelinePanel() {
       },
     ])
     return () => handle.dispose()
-  }, [deleteSelected, toggleLinkSelected, selected.size, zoomBy])
+  }, [copySelected, pasteAtPlayhead, deleteSelected, toggleLinkSelected, selected.size, zoomBy])
 
   // ── rendering ─────────────────────────────────────────────────
 
@@ -924,6 +1012,13 @@ export function TimelinePanel() {
             {formatTimecode(time, sequence.settings.frameRate)}
           </span>
           <span className="cb-toolbar-end">
+            <button
+              className={`cb-btn${snapping ? ' cb-btn--on' : ''}`}
+              onClick={() => setSnapping((on) => !on)}
+              title="Snap edges to clips, the playhead and the start (S)"
+            >
+              Snap
+            </button>
             <button
               className="cb-btn"
               onClick={() => setSettingsOpen(true)}
@@ -1014,6 +1109,7 @@ export function TimelinePanel() {
                   .filter((clip) => clip.trackId === track.id)
                   .map((clip) => {
                     const dragging = drag?.moved === true && drag.ids.includes(clip.id)
+                    const copying = dragging && drag?.copying === true
                     const trimming = trim?.ids.includes(clip.id) ? trim : null
                     return (
                       <ClipBlock
@@ -1023,6 +1119,7 @@ export function TimelinePanel() {
                         zoom={zoom}
                         selected={selected.has(clip.id)}
                         dragging={dragging}
+                        copying={copying}
                         // The head takes the clip's front with it and gives back
                         // the same amount of length; the tail only changes the
                         // length. Same arithmetic as the kernel's trim, so what
@@ -1430,6 +1527,7 @@ function ClipBlock({
   zoom,
   selected,
   dragging,
+  copying,
   trimStart,
   trimDuration,
   offsetX,
@@ -1442,6 +1540,7 @@ function ClipBlock({
   zoom: number
   selected: boolean
   dragging: boolean
+  copying: boolean
   trimStart: number
   trimDuration: number
   offsetX: number
@@ -1475,7 +1574,7 @@ function ClipBlock({
     <div
       className={`clip clip--${clip.kind}${state}${selected ? ' clip--selected' : ''}${
         dragging ? ' clip--dragging' : ''
-      }`}
+      }${copying ? ' clip--copying' : ''}`}
       style={{
         left: start * zoom,
         width,

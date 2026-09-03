@@ -20,6 +20,15 @@ export interface ViewState {
   timeline: {
     /** Pixels per second. 0 means "never set", so the panel picks its default. */
     zoom: number
+    /**
+     * Whether edges snap to their neighbours, the playhead and zero.
+     *
+     * A mode rather than a held key, which is what every NLE settled on — and
+     * here it is also what frees `Alt` to mean "duplicate" while dragging, the
+     * one gesture that cannot be spelled any other way. Optional so a project
+     * saved before it existed opens with snapping on rather than off.
+     */
+    snapping?: boolean
   }
   browser: {
     location: BrowserLocation

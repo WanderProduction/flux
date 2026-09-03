@@ -891,6 +891,23 @@ try {
     sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: pa.duration });
     sequence.addClip({ assetId: b.id, trackId: 'V1', start: pa.duration + ${gap}, duration: pb.duration });
     await new Promise(r => setTimeout(r, 400));
+    /*
+     * The seed checks itself.
+     *
+     * addClip refuses a duration it cannot believe, and a probe that came back
+     * empty leaves one clip where the check below expects two — which then
+     * fails as though the behaviour under test were broken. Seen once as
+     * exactly that: a move check reporting a clip at the wrong place, because
+     * the clip it was talking about had never been added. A setup that failed
+     * should say so in those words.
+     */
+    {
+      const seeded = sequence.getSequence().clips;
+      if (seeded.length !== 2) {
+        throw new Error('setup: seedClips produced ' + seeded.length + ' clips, not 2 (durations '
+          + pa.duration + ', ' + pb.duration + ')');
+      }
+    }
   `
 
   await evaluate(
@@ -899,8 +916,40 @@ try {
        .slice().sort((p, q) => p.start - q.start)
        .map(c => [c.trackId, Math.round(c.start * 1000) / 1000]);
 
+     /**
+      * Snapping is a mode now — Alt while dragging duplicates — so a check
+      * that wants a raw distance turns the mode off around the gesture rather
+      * than holding a key. Restored afterwards: a mode left off would silently
+      * change what every check below is measuring.
+      */
+     window.__withoutSnapping = async (run) => {
+       const { view } = window.__fluxDev;
+       const was = view.getView().timeline.snapping !== false;
+       // Waits for the panel to have *taken* the mode, not for a duration. The
+       // toolbar button is the observable state, and sixty milliseconds is a
+       // check that passes on a quiet machine and snaps an edge on a busy one.
+       const settle = async (want) => {
+         for (let i = 0; i < 60; i++) {
+           const button = [...document.querySelectorAll('.cb-btn')]
+             .find(b => b.textContent.trim() === 'Snap');
+           if (button && button.className.includes('cb-btn--on') === want) return;
+           await new Promise(r => setTimeout(r, 50));
+         }
+         throw new Error('the timeline never took snapping = ' + want);
+       };
+       view.recordView({ timeline: { snapping: false } });
+       await settle(false);
+       try { return await run(); }
+       finally {
+         view.recordView({ timeline: { snapping: was } });
+         await settle(was);
+       }
+     };
+
      /** Press a clip, travel, release — on the window, as a real pointer does. */
      window.__dragClip = async (index, dx, dy, opts = {}) => {
+       if (opts.noSnap) return window.__withoutSnapping(
+         () => window.__dragClip(index, dx, dy, { ...opts, noSnap: false }));
        const el = [...document.querySelectorAll('.tl-lane .clip')][index];
        if (!el) throw new Error('no clip at index ' + index);
        const box = el.getBoundingClientRect();
@@ -927,7 +976,7 @@ try {
       seedClips(4) +
         `const before = window.__clips();
          // Alt off the snapping, so this measures the drag and nothing else.
-         const after = await window.__dragClip(0, 60, 0, { altKey: true });
+         const after = await window.__dragClip(0, 60, 0, { noSnap: true });
          return { before, after };`,
     )
     assert.deepEqual(state.before[0], ['V1', 0])
@@ -939,8 +988,8 @@ try {
     const state = await evaluate(
       cdp,
       seedClips(4) +
-        `const up = await window.__dragClip(0, 0, -46, { altKey: true });
-         const down = await window.__dragClip(0, 0, 46, { altKey: true });
+        `const up = await window.__dragClip(0, 0, -46, { noSnap: true });
+         const down = await window.__dragClip(0, 0, 46, { noSnap: true });
          return { up, down, tracks: window.__fluxDev.sequence.getSequence().tracks.map(t => t.id) };`,
     )
     // V1 is the lower of the two video tracks, so "up" is V2.
@@ -961,7 +1010,7 @@ try {
     const state = await evaluate(
       cdp,
       seedClips(4) +
-        `const down = await window.__dragClip(0, 60, 300, { altKey: true });
+        `const down = await window.__dragClip(0, 60, 300, { noSnap: true });
          return down;`,
     )
     assert.equal(state[0][0], 'V1', 'V1 is the last video track, so it stays there')
@@ -971,7 +1020,7 @@ try {
   await check('a clip cannot be dragged before the start of the sequence', async () => {
     const state = await evaluate(
       cdp,
-      seedClips(4) + `return await window.__dragClip(0, -600, 0, { altKey: true });`,
+      seedClips(4) + `return await window.__dragClip(0, -600, 0, { noSnap: true });`,
     )
     assert.equal(state[0][1], 0, 'the sequence starts at zero and so does the clip')
   })
@@ -998,7 +1047,7 @@ try {
       seedClips(0.2) +
         `const seq = window.__fluxDev.sequence;
          const dragged = seq.getSequence().clips.slice().sort((p, q) => p.start - q.start)[0];
-         await window.__dragClip(0, 120, 0, { altKey: true });
+         await window.__dragClip(0, 120, 0, { noSnap: true });
          const now = seq.getSequence().clips.slice().sort((p, q) => p.start - q.start);
          const moved = now.find(c => c.id === dragged.id);
          const neighbour = now.find(c => c.id !== dragged.id);
@@ -1025,7 +1074,7 @@ try {
         `const clips = window.__fluxDev.sequence.getSequence().clips
            .slice().sort((p, q) => p.start - q.start);
          const target = clips[1].start + clips[1].duration - 0.5;
-         const after = await window.__dragClip(0, Math.round(target * 60), 0, { altKey: true });
+         const after = await window.__dragClip(0, Math.round(target * 60), 0, { noSnap: true });
          const now = window.__fluxDev.sequence.getSequence().clips
            .slice().sort((p, q) => p.start - q.start);
          const byName = now.map(c => c.assetId);
@@ -1067,16 +1116,19 @@ try {
     assert.ok(Math.abs(state.gap) < 1e-6, `left a gap of ${state.gap}s`)
   })
 
-  await check('holding Alt leaves the gap exactly where it was put', async () => {
+  await check('with snapping off, the gap stays exactly where it was put', async () => {
     const state = await evaluate(
       cdp,
       seedClips(0.2) +
-        `await window.__dragClip(1, -6, 0, { altKey: true });
+        `await window.__dragClip(1, -6, 0, { noSnap: true });
          const now = window.__fluxDev.sequence.getSequence().clips
            .slice().sort((p, q) => p.start - q.start);
          return { gapFrames: (now[1].start - (now[0].start + now[0].duration)) * 24 };`,
     )
-    assert.ok(state.gapFrames > 1, `Alt should have left a gap, got ${state.gapFrames} frames`)
+    assert.ok(
+      state.gapFrames > 1,
+      `snapping off should have left a gap, got ${state.gapFrames} frames`,
+    )
   })
 
   await check('a multi-selection travels together, keeping its shape', async () => {
@@ -1096,7 +1148,7 @@ try {
          await new Promise(r => setTimeout(r, 250));
          const selected = document.querySelectorAll('.clip--selected').length;
          const before = window.__clips();
-         const after = await window.__dragClip(0, 120, 0, { altKey: true });
+         const after = await window.__dragClip(0, 120, 0, { noSnap: true });
          return { selected, before, after };`,
     )
     assert.equal(state.selected, 2, 'shift should have added the second clip to the selection')
@@ -1343,7 +1395,7 @@ try {
       cdp,
       dropOne('voice_over.mp4', 1) +
         `const before = window.__clips();
-         await window.__dragClip(0, 120, 0, { altKey: true });
+         await window.__dragClip(0, 120, 0, { noSnap: true });
          return { before, after: window.__clips() };`,
     )
     // Both halves, both at zero, before anything moves. Compared as sets: the
@@ -1509,7 +1561,7 @@ try {
     const state = await evaluate(
       cdp,
       dropOne('voice_over.mp4', 1) +
-        `await window.__dragClip(0, 0, 46, { altKey: true });
+        `await window.__dragClip(0, 0, 46, { noSnap: true });
          return window.__fluxDev.sequence.getSequence().clips
            .map(c => c.kind + ':' + c.trackId).sort();`,
     )
@@ -2101,7 +2153,7 @@ try {
          const selected = window.__selected();
          const video = [...document.querySelectorAll('.tl-lane .clip')]
            .findIndex(el => el.className.includes('clip--video'));
-         await window.__dragClip(video, 120, 0, { altKey: true });
+         await window.__dragClip(video, 120, 0, { noSnap: true });
          return { selected, links: window.__links() };`,
     )
     assert.equal(state.selected, 1, 'clicking one of two loose clips should leave one selected')
@@ -2125,7 +2177,7 @@ try {
                           notice: document.querySelector('.tl-notice')?.textContent ?? null };
          const video = [...document.querySelectorAll('.tl-lane .clip')]
            .findIndex(el => el.className.includes('clip--video'));
-         await window.__dragClip(video, 120, 0, { altKey: true });
+         await window.__dragClip(video, 120, 0, { noSnap: true });
          return { linked, moved: window.__links() };`,
     )
     assert.deepEqual(
@@ -2215,6 +2267,31 @@ try {
    */
   const TRIM_HELPERS = `
      const r3 = (n) => Math.round(n * 1000) / 1000;
+     // Defined here as well: a reload takes every helper with it, and the trim
+     // checks are the ones that run after one.
+     window.__withoutSnapping = window.__withoutSnapping ?? (async (run) => {
+       const { view } = window.__fluxDev;
+       const was = view.getView().timeline.snapping !== false;
+       // Waits for the panel to have *taken* the mode, not for a duration. The
+       // toolbar button is the observable state, and sixty milliseconds is a
+       // check that passes on a quiet machine and snaps an edge on a busy one.
+       const settle = async (want) => {
+         for (let i = 0; i < 60; i++) {
+           const button = [...document.querySelectorAll('.cb-btn')]
+             .find(b => b.textContent.trim() === 'Snap');
+           if (button && button.className.includes('cb-btn--on') === want) return;
+           await new Promise(r => setTimeout(r, 50));
+         }
+         throw new Error('the timeline never took snapping = ' + want);
+       };
+       view.recordView({ timeline: { snapping: false } });
+       await settle(false);
+       try { return await run(); }
+       finally {
+         view.recordView({ timeline: { snapping: was } });
+         await settle(was);
+       }
+     });
      window.__shape = () => window.__fluxDev.sequence.getSequence().clips
        .slice().sort((a, b) => a.start - b.start || a.kind.localeCompare(b.kind))
        .map(c => ({ track: c.trackId, kind: c.kind, start: r3(c.start), dur: r3(c.duration),
@@ -2246,6 +2323,8 @@ try {
      };
 
      window.__trimClip = async (index, edge, dx, opts = {}) => {
+       if (opts.noSnap) return window.__withoutSnapping(
+         () => window.__trimClip(index, edge, dx, { ...opts, noSnap: false }));
        const grab = window.__grabTrim(index, edge, opts);
        for (let i = 1; i <= 4; i++) await grab.move((dx * i) / 4);
        await grab.up(dx);
@@ -2271,7 +2350,7 @@ try {
       seedTrim +
         `const before = window.__shape();
          // Alt off the snapping, so this measures the drag and nothing else.
-         const after = await window.__trimClip(0, 'end', -120, { altKey: true });
+         const after = await window.__trimClip(0, 'end', -120, { noSnap: true });
          return { before: before[0], after: after[0] };`,
     )
     assert.equal(
@@ -2295,7 +2374,7 @@ try {
       cdp,
       seedTrim +
         `const before = window.__shape();
-         const after = await window.__trimClip(0, 'start', 120, { altKey: true });
+         const after = await window.__trimClip(0, 'start', 120, { noSnap: true });
          return { before: before[0], after: after[0] };`,
     )
     assert.equal(state.after.start, state.before.start + 2, 'the head moved two seconds in')
@@ -2314,7 +2393,7 @@ try {
       cdp,
       seedTrim +
         `const before = window.__shape();
-         const after = await window.__trimClip(0, 'end', 600, { altKey: true });
+         const after = await window.__trimClip(0, 'end', 600, { noSnap: true });
          return { before: before[0], after: after[0] };`,
     )
     assert.deepEqual(state.after, state.before)
@@ -2324,9 +2403,9 @@ try {
     const state = await evaluate(
       cdp,
       seedTrim +
-        `const trimmed = await window.__trimClip(0, 'start', 120, { altKey: true });
-         const back = await window.__trimClip(0, 'start', -120, { altKey: true });
-         const further = await window.__trimClip(0, 'start', -120, { altKey: true });
+        `const trimmed = await window.__trimClip(0, 'start', 120, { noSnap: true });
+         const back = await window.__trimClip(0, 'start', -120, { noSnap: true });
+         const further = await window.__trimClip(0, 'start', -120, { noSnap: true });
          return { trimmed: trimmed[0], back: back[0], further: further[0] };`,
     )
     assert.equal(state.trimmed.off, 2, 'setup: the head should be two seconds in')
@@ -2341,7 +2420,7 @@ try {
     const state = await evaluate(
       cdp,
       seedTrim +
-        `const after = await window.__trimClip(0, 'start', 4000, { altKey: true });
+        `const after = await window.__trimClip(0, 'start', 4000, { noSnap: true });
          return { clip: after[0], fps: window.__fluxDev.sequence.getSequence().settings.frameRate };`,
     )
     assert.equal(state.clip.dur, Math.round((1 / state.fps) * 1000) / 1000, 'one frame is the floor')
@@ -2357,12 +2436,12 @@ try {
     const state = await evaluate(
       cdp,
       seedTrim +
-        `await window.__trimClip(0, 'end', -120, { altKey: true });
+        `await window.__trimClip(0, 'end', -120, { noSnap: true });
          const b = assets.getAssets().find(x => x.name === 'shot_B.mp4');
          const pb = await assets.ensureProbed(b.id);
          sequence.addClip({ assetId: b.id, trackId: 'V1', start: 3, duration: pb.duration });
          await new Promise(r => setTimeout(r, 300));
-         const after = await window.__trimClip(0, 'end', 300, { altKey: true });
+         const after = await window.__trimClip(0, 'end', 300, { noSnap: true });
          return after[0];`,
     )
     assert.equal(state.dur, 3, 'the tail should stop where the next clip begins')
@@ -2378,7 +2457,7 @@ try {
         `const before = window.__shape();
          const video = [...document.querySelectorAll('.tl-lane .clip')]
            .findIndex(el => el.className.includes('clip--video'));
-         const after = await window.__trimClip(video, 'end', -120, { altKey: true });
+         const after = await window.__trimClip(video, 'end', -120, { noSnap: true });
          return { before, after };`,
     )
     assert.equal(state.after.length, 2, 'setup: expected a pair')
@@ -2481,7 +2560,7 @@ try {
       seedTrim +
         `const el = document.querySelector('.tl-lane .clip');
          const widthBefore = el.getBoundingClientRect().width;
-         const grab = window.__grabTrim(0, 'end', { altKey: true });
+         const grab = window.__grabTrim(0, 'end', { noSnap: true });
          await grab.move(-120);
          const mid = {
            width: grab.el.getBoundingClientRect().width,
@@ -2520,7 +2599,7 @@ try {
         `const loudFirst = window.__waveColumn(0.5);
          const audio = [...document.querySelectorAll('.tl-lane .clip')]
            .findIndex(el => el.className.includes('clip--audio'));
-         await window.__trimClip(audio, 'start', 120, { altKey: true });
+         await window.__trimClip(audio, 'start', 120, { noSnap: true });
          await new Promise(r => setTimeout(r, 400));
          return {
            loudFirst,
@@ -2561,6 +2640,297 @@ try {
     assert.equal(state.off, 0, 'it started at the top of its file')
     assert.equal(state.src, 5, 'and it was the whole of it')
     assert.equal(state.dur, 5)
+  })
+
+  // ── copying, pasting and duplicating ──────────────────────────
+
+  /*
+   * Three ways to get a second copy of something, and they are the same
+   * machinery underneath: a snapshot of the clips, placed somewhere with new
+   * ids and new links. What differs is where "somewhere" comes from — the
+   * playhead, or the end of an Alt-drag.
+   */
+  await evaluate(
+    cdp,
+    `window.__key = (key, mods = {}) => window.dispatchEvent(
+       new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods }));
+     return true;`,
+  )
+
+  await check('ctrl+c then ctrl+v puts a copy down at the playhead', async () => {
+    const state = await evaluate(
+      cdp,
+      // Two clips with room between them: the playhead can only be moved
+      // inside the sequence, so pasting *at* it needs a sequence long enough to
+      // have somewhere free to land — and a gap wide enough to take the copy,
+      // or this would be checking the slide rule instead.
+      seedClips(8) +
+        `const { playback } = window.__fluxDev;
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('c', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 150));
+         playback.seek(4.5);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return { clips: window.__shape(), selected: window.__selected(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.clips.length, 3, 'there should be a third clip now')
+    const pasted = state.clips.find((clip) => clip.start === 4.5)
+    assert.ok(pasted, `nothing landed at the playhead: ${JSON.stringify(state.clips)}`)
+    assert.equal(pasted.track, 'V1', 'a copy lands on the track it came from')
+    assert.equal(pasted.dur, state.clips[0].dur, 'and it is the same length')
+    assert.equal(state.selected, 1, 'the copy is what is selected, so the next drag moves it')
+    assert.ok(state.notice?.includes('Pasted'), state.notice)
+  })
+
+  await check('a pasted pair is linked to itself, not to what it came from', async () => {
+    /*
+     * Two pairs sharing one link id would mean dragging the copy moved the
+     * original, which is the kind of bug that shows up an hour later in
+     * somebody's edit rather than here.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const { playback } = window.__fluxDev;
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('c', { ctrlKey: true });
+         playback.seek(14);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 400));
+         const clips = sequence.getSequence().clips;
+         const links = clips.map(c => c.linkId ?? null);
+         // Drag one half of the copy: its own partner must follow, and the
+         // originals must not move at all.
+         const before = clips.map(c => Math.round(c.start * 1000) / 1000);
+         const copyVideo = [...document.querySelectorAll('.tl-lane .clip')]
+           .findIndex(el => el.className.includes('clip--video') && el.className.includes('clip--selected'));
+         await window.__dragClip(copyVideo, 60, 0, { noSnap: true });
+         return { count: clips.length, links,
+                  after: sequence.getSequence().clips.map(c => Math.round(c.start * 1000) / 1000),
+                  before };`,
+    )
+    assert.equal(state.count, 4, 'a pair pasted should be two more clips')
+    const groups = new Set(state.links)
+    assert.equal(groups.size, 2, `expected two link groups, got ${JSON.stringify(state.links)}`)
+    assert.ok(!state.links.includes(null), 'both pairs should still be linked')
+
+    /*
+     * The originals are the two at zero and must not have moved; the copies are
+     * the other two and must have moved *together*. Compared as a shape rather
+     * than against fixed numbers: where the paste landed depends on how long
+     * the fixture is, and hard-coding that would make this a check about
+     * voice_over.mp4 rather than about linking.
+     */
+    const stayed = state.after.filter((start) => start === 0)
+    assert.equal(stayed.length, 2, `the originals moved: ${JSON.stringify(state.after)}`)
+    const copies = state.after.filter((start) => start !== 0)
+    assert.equal(copies.length, 2, JSON.stringify(state.after))
+    assert.equal(copies[0], copies[1], `the halves of the copy came apart: ${JSON.stringify(copies)}`)
+    const was = state.before.filter((start) => start !== 0)
+    assert.ok(
+      copies[0] > was[0],
+      `the copy should have moved, from ${was[0]} to ${copies[0]}`,
+    )
+  })
+
+  await check('pasting where something already sits slides the copy past it', async () => {
+    // The drop rule, not the move rule: these clips are new, and sliding right
+    // is the only outcome that neither loses a frame nor moves what is already
+    // placed. The whole group slides as one, or a pasted pair lands out of sync.
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `const { playback } = window.__fluxDev;
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('c', { ctrlKey: true });
+         // Straight back onto itself.
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return { clips: window.__shape(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.clips.length, 2)
+    const [first, second] = state.clips
+    assert.equal(first.start, 0, 'the original stays where it was')
+    assert.equal(
+      second.start,
+      first.dur,
+      `the copy should butt up after it, and it landed at ${second.start}`,
+    )
+    assert.ok(state.notice?.includes('slid'), `the slide has to be said: ${state.notice}`)
+  })
+
+  await check('alt-dragging a clip leaves the original and places a copy', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('clipA.mp4', 1) +
+        `window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         // Alt held for the whole gesture, which is what a hand does.
+         await window.__dragClip(0, 360, 0, { altKey: true });
+         return { clips: window.__shape(), selected: window.__selected(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.clips.length, 2, 'an alt-drag should have made a second clip')
+    assert.equal(state.clips[0].start, 0, 'the original must stay exactly where it was')
+    assert.equal(state.clips[1].start, 6, 'and the copy lands where the drag ended')
+    assert.equal(state.selected, 1, 'the copy is selected, not the clip it came from')
+    assert.ok(state.notice?.includes('Duplicated'), state.notice)
+  })
+
+  await check('an alt-drag does not disturb what was copied', async () => {
+    /*
+     * Alt-dragging something must not throw away whatever was copied a minute
+     * ago. Small, and infuriating exactly once.
+     *
+     * Two *different* clips, and they are different lengths — clipA runs four
+     * seconds and shot_B three. Copying one and duplicating the other is the
+     * only arrangement where a clipboard quietly overwritten by the drag can be
+     * told apart from one left alone: the length of what finally pastes says
+     * which clip was in it. Written first with one clip for both halves, where
+     * a canary that clobbered the clipboard with the very clip already in it
+     * changed nothing observable and sailed through.
+     */
+    const state = await evaluate(
+      cdp,
+      seedClips(8) +
+        `const { playback } = window.__fluxDev;
+         // clipA, at zero, is the one that goes to the clipboard.
+         window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('c', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 150));
+         const copied = sequence.clipboardCount();
+         const lengths = window.__shape().map(c => c.dur);
+
+         // shot_B, further along, is the one that gets duplicated.
+         await window.__dragClip(1, 180, 0, { altKey: true });
+         await new Promise(r => setTimeout(r, 200));
+
+         // The end of everything, which is as far as a playhead goes.
+         playback.goToEnd();
+         await new Promise(r => setTimeout(r, 150));
+         const at = playback.getTime();
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return { copied, at, lengths, after: sequence.clipboardCount(),
+                  clips: window.__shape() };`,
+    )
+    assert.equal(state.copied, 1, 'setup: one clip should have been copied')
+    assert.ok(
+      state.lengths[0] !== state.lengths[1],
+      `setup: the two fixtures must differ in length, got ${state.lengths.join(' and ')}`,
+    )
+    assert.equal(state.after, 1, 'the alt-drag emptied the clipboard')
+    assert.equal(state.clips.length, 4, 'two originals, a duplicate, and a paste')
+
+    const pasted = state.clips.find((clip) => clip.start === state.at)
+    assert.ok(pasted, `nothing pasted at the playhead (${state.at}): ${JSON.stringify(state.clips)}`)
+    assert.equal(
+      pasted.dur,
+      state.lengths[0],
+      'what pasted is the clip that was copied, not the one that was alt-dragged',
+    )
+  })
+
+  await check('a duplicated pair changes track together or not at all', async () => {
+    /*
+     * The same rule as moving one. Alt-dragging a pair upward from V1 and A1
+     * cannot lift the picture to V2 while the sound stays on A1 — A1 is already
+     * the top audio track, so there is no room, and the shift is limited by
+     * whichever half has least. A pair that changed track in halves would be a
+     * pair that arrived in two pieces.
+     *
+     * Found on screen rather than reasoned about: the first version clamped
+     * each clip on its own, and the copy landed with its picture a track up and
+     * its sound where it started.
+     */
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `window.__clickClip(0);
+         await new Promise(r => setTimeout(r, 150));
+         const video = [...document.querySelectorAll('.tl-lane .clip')]
+           .findIndex(el => el.className.includes('clip--video'));
+         // Up one track and along, with Alt held: a duplicate.
+         await window.__dragClip(video, 120, -46, { altKey: true });
+         return window.__shape();`,
+    )
+    assert.equal(state.length, 4, `expected two pairs, got ${JSON.stringify(state)}`)
+    const tracks = state.map((clip) => clip.track).sort()
+    assert.deepEqual(
+      tracks,
+      ['A1', 'A1', 'V1', 'V1'],
+      `the copy should have stayed on the same tracks, and it is on ${tracks.join(' ')}`,
+    )
+    const copies = state.filter((clip) => clip.start > 0)
+    assert.equal(copies.length, 2, 'both halves should have been copied')
+    assert.equal(copies[0].start, copies[1].start, 'and they must land at the same moment')
+  })
+
+  await check('copying a picture copies its sound', async () => {
+    const state = await evaluate(
+      cdp,
+      dropOne('voice_over.mp4', 1) +
+        `const video = sequence.getSequence().clips.find(c => c.kind === 'video');
+         return sequence.copyClips([video.id]);`,
+    )
+    assert.equal(state, 2, 'a linked half named on its own still copies the pair')
+  })
+
+  await check('snapping is a mode, and the toolbar says which', async () => {
+    /*
+     * It became a mode when Alt was given to duplicate-drag, and a mode you
+     * cannot see the state of is worse than a key you have to hold.
+     */
+    const state = await evaluate(
+      cdp,
+      seedClips(0.2) +
+        `const button = [...document.querySelectorAll('.cb-btn')]
+           .find(b => b.textContent.trim() === 'Snap');
+         if (!button) throw new Error('no snapping control in the toolbar');
+         const on = button.className.includes('cb-btn--on');
+         // The paint, not just the class. A mode nobody can see the state of is
+         // worse than a key you have to hold — and a class name that no rule
+         // matches looks identical from here. (Seen exactly that way: a stale
+         // stylesheet left the button unlit while every check still passed.)
+         const litBg = getComputedStyle(button).backgroundColor;
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         const afterKey = {
+           button: button.className.includes('cb-btn--on'),
+           view: window.__fluxDev.view.getView().timeline.snapping,
+           bg: getComputedStyle(button).backgroundColor,
+         };
+         // And with it off, a drag that would have snapped leaves its gap.
+         await window.__dragClip(1, -6, 0);
+         const clips = window.__fluxDev.sequence.getSequence().clips
+           .slice().sort((p, q) => p.start - q.start);
+         const gapFrames = (clips[1].start - (clips[0].start + clips[0].duration)) * 24;
+         button.click();
+         await new Promise(r => setTimeout(r, 200));
+         return { on, litBg, afterKey, gapFrames,
+                  backOn: button.className.includes('cb-btn--on') };`,
+    )
+    assert.equal(state.on, true, 'snapping should start on')
+    assert.equal(state.afterKey.button, false, 'pressing S should turn it off')
+    assert.equal(state.afterKey.view, false, 'and record it, so the project opens as it was left')
+    assert.notEqual(
+      state.litBg,
+      state.afterKey.bg,
+      `on and off look identical (${state.litBg}) — the mode is not visible`,
+    )
+    assert.ok(state.gapFrames > 1, `with snapping off the gap should survive, got ${state.gapFrames}`)
+    assert.equal(state.backOn, true, 'and the button toggles it back')
   })
 
   await check('a linked pair survives a save and a reload', async () => {
@@ -2652,8 +3022,8 @@ try {
       cdp,
       seedTrim +
         `const { store, project } = window.__fluxDev;
-         await window.__trimClip(0, 'start', 60, { altKey: true });
-         await window.__trimClip(0, 'end', -60, { altKey: true });
+         await window.__trimClip(0, 'start', 60, { noSnap: true });
+         await window.__trimClip(0, 'end', -60, { noSnap: true });
          const shape = window.__shape();
          /*
           * The setup is checked here rather than after the reload, and the

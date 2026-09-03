@@ -754,6 +754,13 @@ kbd {
   background: color-mix(in srgb, var(--flux-accent) 70%, transparent) !important;
 }
 
+/* An Alt-drag: the block under the pointer is the copy that will be placed,
+   and the original stays where it is. Dashed, because it is not there yet. */
+.clip--copying {
+  border-style: dashed;
+  border-color: var(--flux-accent);
+}
+
 /*
  * Follows the pointer without being committed.
  *
@@ -1312,6 +1319,12 @@ kbd {
   font-family: inherit;
   font-size: var(--flux-text-sm);
   cursor: pointer;
+}
+/* A mode that is on, rather than a button that was pressed. */
+.cb-btn--on {
+  border-color: color-mix(in srgb, var(--flux-accent) 60%, var(--flux-border));
+  color: var(--flux-text);
+  background: color-mix(in srgb, var(--flux-accent) 18%, transparent);
 }
 .cb-btn:hover:not(:disabled) {
   background: var(--flux-bg-hover);
@@ -2131,3 +2144,4 @@ kbd {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+

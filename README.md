@@ -52,6 +52,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
 | **Link / unlink** | `Ctrl Space` cuts a pair apart, or ties clips together. Apart, each half moves alone. |
+| **Copy, paste, duplicate** | `Ctrl C` / `Ctrl V` at the playhead, or `Alt` drag to leave a copy behind. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
@@ -274,8 +275,10 @@ Two behaviours worth knowing:
 | drag the ruler, or the playhead | scrub |
 | drag a clip | move it in time, and between tracks |
 | drag either edge of a clip | trim what it plays |
-| `Alt` while dragging a clip | ignore snapping |
+| `Alt` while dragging a clip | leave the original and place a copy |
+| `S` | snapping on or off |
 | `Shift` / `Ctrl` click | add to the selection |
+| `Ctrl C` / `Ctrl V` | copy the selection, paste it at the playhead |
 | `Ctrl Space` | link or unlink the selected clips |
 | `Space` | play / pause |
 | `Delete` | remove the selected clips |
@@ -323,9 +326,15 @@ any. A move has a history, and how far you dragged it across its neighbour is th
 meant. Neither rule overwrites, and neither shifts anything downstream.
 
 Dragging also **snaps** — to the start of the sequence, the playhead, and the edges of clips that
-are not moving, within eight pixels. Hold `Alt` to turn it off. The overlap rule already butts a
-clip against its neighbour when you overshoot; snapping is for the other half, where you stop three
-frames short and leave a gap you cannot see and cannot close by hand.
+are not moving, within eight pixels. The overlap rule already butts a clip against its neighbour
+when you overshoot; snapping is for the other half, where you stop three frames short and leave a
+gap you cannot see and cannot close by hand.
+
+Snapping is a **mode**, toggled with `S` or the button in the toolbar, and recorded with the view so
+a project opens the way it was left. It was a held `Alt` until `Alt` was needed for duplicate-drag —
+the one gesture that cannot be spelled another way — and every NLE had already made the same trade.
+A mode you cannot see the state of is worse than a key you have to hold, so the button lights when
+it is on.
 
 Nothing is committed until the pointer comes up: the block follows the cursor as a transform while
 the clip is still where it was, so an abandoned drag needs no undoing.
@@ -403,6 +412,37 @@ point of zero and a source length equal to its duration — which is not a defau
 unknown, it is what that clip actually was.
 
 Not yet: rolling and slip edits, ripple trimming, and trimming with the keyboard.
+
+#### Copying clips
+
+Three ways to get a second copy, and one machinery underneath: a snapshot of the clips, put down
+somewhere with new ids and new links.
+
+- **`Ctrl C` / `Ctrl V`** — copies the selection, pastes it at the playhead. The playhead rather
+  than the pointer, because paste is a keyboard gesture and the pointer may be anywhere, including
+  outside the panel.
+- **`Alt` and drag** — leaves the original where it is and places a copy where the drag ends.
+
+Copying a picture copies its sound, exactly as moving one moves its sound: the selection is expanded
+through links before anything is snapshotted. **A copied pair is linked to itself**, not to the pair
+it came from — two pairs sharing one link id would mean dragging the copy moved the original, which
+is the kind of bug that surfaces an hour later in somebody's edit rather than here.
+
+Pasted clips are **new clips**, so they follow the drop rule rather than the move rule: if something
+is already where they would land, the whole group slides right until every member fits. As one
+group, not clip by clip — a pair placed independently lands out of sync, and sliding right is the
+only outcome that neither loses a frame nor moves what was already there. The timeline says when it
+had to slide, because a copy that quietly landed somewhere else is a copy you will not find.
+
+Two smaller decisions worth naming. The clipboard lives in `kernel/sequence.ts` rather than in the
+system clipboard: a clip is a reference to an asset in *this* project plus a placement in time, and
+pasting one into a text editor could only ever produce nonsense. It is emptied when a project
+closes, because those asset ids mean nothing in the next one. And an `Alt`-drag deliberately does
+**not** go through it — duplicating something must not throw away what you copied a minute ago,
+which is a small thing that is infuriating exactly once.
+
+What lands becomes the selection, in both cases: what is under the pointer when you let go is what
+you were placing, and leaving the originals selected would mean the next drag moved the wrong clips.
 
 #### Moving the playhead
 

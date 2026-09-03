@@ -25,6 +25,11 @@ export const defaultKeymap: Keymap = {
   // Ctrl and the transport key: the picture and its sound are one thing to the
   // hand until this says otherwise.
   'ctrl+space': 'timeline.toggleLink',
+  'ctrl+c': 'timeline.copy',
+  'ctrl+v': 'timeline.paste',
+  // Snapping is a mode, not a held key: `Alt` is spoken for by duplicate-drag,
+  // and every NLE settled on the same answer.
+  s: 'timeline.toggleSnapping',
   // The transport. Space is the one key in a media app that is spoken for
   // before anything else is designed.
   space: 'playback.toggle',

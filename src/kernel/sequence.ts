@@ -691,6 +691,184 @@ export function withLinked(ids: Iterable<string>): string[] {
 }
 
 /**
+ * Clips lifted out of a sequence, waiting to be put back somewhere.
+ *
+ * Held here rather than in the system clipboard, and that is a real decision.
+ * A clip is a reference to an asset in *this* project plus a placement in time;
+ * pasting one into a text editor could only ever produce nonsense, and pasting
+ * something from a text editor into a timeline is not a thing to support. When
+ * FLUX can copy clips between its own windows this becomes a serialiser and the
+ * shape below is already what it would write.
+ *
+ * Starts are stored as they were, and the earliest is subtracted at paste time.
+ * Keeping them absolute means the internal shape of a copied group — the gaps,
+ * the sync between a picture and its sound — is exactly what comes back.
+ */
+interface Clipboard {
+  clips: Clip[]
+  /** Only for saying "3 clips" in a menu; the clips themselves are the truth. */
+  count: number
+}
+
+let clipboard: Clipboard = { clips: [], count: 0 }
+
+/** Clips as they would be copied: the ones asked for, plus their linked halves. */
+function snapshot(ids: string[]): Clip[] {
+  const wanted = new Set(withLinked(ids))
+  return sequence.clips.filter((clip) => wanted.has(clip.id)).map((clip) => ({ ...clip }))
+}
+
+export function copyClips(ids: string[]): number {
+  const clips = snapshot(ids)
+  if (clips.length === 0) return 0
+  clipboard = { clips, count: clips.length }
+  return clips.length
+}
+
+/** How many clips are waiting to be pasted. */
+export function clipboardCount(): number {
+  return clipboard.count
+}
+
+/**
+ * Where a set of clips can sit together, at or after `at`.
+ *
+ * The whole group moves as one, which is the difference between this and
+ * placing each clip in turn: a picture and its sound have to land at the same
+ * moment or the paste is a sync error. So a single offset is found that clears
+ * every obstacle on every track the group touches.
+ *
+ * Sliding right rather than overwriting or inserting, for the reason a drop
+ * gives: it is the only outcome that neither loses a frame nor moves something
+ * already placed. These clips are *new*, exactly as a dropped one is, so they
+ * follow the drop's rule rather than a move's midpoint rule.
+ */
+function freeOffsetFor(clips: Clip[], at: number, occupied: Clip[]): number {
+  const earliest = Math.min(...clips.map((clip) => clip.start))
+  let offset = snapToFrame(at) - earliest
+
+  // Bounded: each pass clears one obstacle, and there are only so many.
+  for (let pass = 0; pass <= occupied.length; pass++) {
+    let pushed = false
+    for (const clip of clips) {
+      const start = clip.start + offset
+      const end = start + clip.duration
+      for (const other of occupied) {
+        if (other.trackId !== clip.trackId) continue
+        if (start < other.start + other.duration - EPS && other.start < end - EPS) {
+          offset = snapToFrame(other.start + other.duration) - clip.start
+          pushed = true
+          break
+        }
+      }
+      if (pushed) break
+    }
+    if (!pushed) break
+  }
+  return offset
+}
+
+/**
+ * Copies of `clips`, placed with their earliest at or after `at`.
+ *
+ * New ids throughout, and new link ids — mapped, so a copied pair is linked to
+ * itself rather than to the clips it came from. Two pairs sharing a link would
+ * mean dragging the copy moved the original, which is the kind of bug that only
+ * shows up hours later.
+ */
+function placeCopies(clips: Clip[], at: number, trackShift: number): Clip[] {
+  if (clips.length === 0) return []
+
+  const index = (trackId: string) => sequence.tracks.findIndex((track) => track.id === trackId)
+
+  /*
+   * One shift for the whole set, limited by whichever member has least room.
+   *
+   * The same rule as moving, and for the same reason: a picture that goes up a
+   * track while its sound stays behind — because the sound was already on the
+   * bottom audio track — is a pair that arrived in two pieces. Either both
+   * change track or neither does.
+   */
+  const room = clips
+    .map((clip) => {
+      const from = index(clip.trackId)
+      if (from < 0) return null
+      const band = sequence.tracks.filter((track) => track.kind === clip.kind)
+      const first = sequence.tracks.indexOf(band[0])
+      const last = sequence.tracks.indexOf(band[band.length - 1])
+      return { up: from - first, down: last - from }
+    })
+    .filter((one): one is { up: number; down: number } => one !== null)
+  const shift = room.length
+    ? Math.min(
+        Math.max(trackShift, -Math.min(...room.map((one) => one.up))),
+        Math.min(...room.map((one) => one.down)),
+      )
+    : 0
+
+  const landing = (clip: Clip): string | null => {
+    const from = index(clip.trackId)
+    // A track that has gone since the copy: the nearest one of the same kind
+    // takes it, because a clip with nowhere to go is a clip that vanishes.
+    if (from < 0) return sequence.tracks.find((track) => track.kind === clip.kind)?.id ?? null
+    return sequence.tracks[from + shift]?.id ?? clip.trackId
+  }
+
+  const moved = clips
+    .map((clip) => ({ clip, trackId: landing(clip) }))
+    .filter((row): row is { clip: Clip; trackId: string } => row.trackId !== null)
+    .map(({ clip, trackId }) => ({ ...clip, trackId }))
+  if (moved.length === 0) return []
+
+  const offset = freeOffsetFor(moved, at, sequence.clips)
+  const links = new Map<string, string>()
+  const copies = moved.map((clip) => {
+    const linkId = clip.linkId
+      ? (links.get(clip.linkId) ?? links.set(clip.linkId, nextId('l')).get(clip.linkId)!)
+      : undefined
+    return {
+      ...clip,
+      id: nextId('c'),
+      start: Math.max(0, clip.start + offset),
+      ...(linkId ? { linkId } : { linkId: undefined }),
+    }
+  })
+
+  sequence = { ...sequence, clips: [...sequence.clips, ...copies] }
+  emit()
+  return copies
+}
+
+/**
+ * Puts the clipboard down, earliest clip at `at`.
+ *
+ * @returns the clips that landed, so the caller can select them — which is what
+ *   every editor does, and what makes a second paste land after the first
+ *   rather than on top of it.
+ */
+export function pasteClips(at: number, trackShift = 0): Clip[] {
+  return placeCopies(clipboard.clips, at, trackShift)
+}
+
+/**
+ * Copies clips where they are dragged to, leaving the originals behind.
+ *
+ * Deliberately not routed through the clipboard: `Alt`-dragging something must
+ * not throw away whatever was copied a minute ago, which is a small thing that
+ * is infuriating exactly once.
+ */
+export function duplicateClips(
+  ids: string[],
+  deltaSeconds: number,
+  deltaTracks: number,
+): Clip[] {
+  const clips = snapshot(ids)
+  if (clips.length === 0) return []
+  const earliest = Math.min(...clips.map((clip) => clip.start))
+  return placeCopies(clips, earliest + snapDelta(deltaSeconds), deltaTracks)
+}
+
+/**
  * Ties a set of clips together, or cuts them apart.
  *
  * One gesture rather than two commands, because the question a hand is asking
@@ -1170,6 +1348,10 @@ export function resetSequence(): void {
   others.clear()
   order = [sequence.id]
   loaded = false
+  // The clipboard goes with it. A clip refers to an asset by an id that means
+  // nothing in the next project, so carrying one across would paste a block
+  // pointing at footage that is not there.
+  clipboard = { clips: [], count: 0 }
   listeners.forEach((listener) => listener())
 }
 
