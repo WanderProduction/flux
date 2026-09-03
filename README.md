@@ -54,6 +54,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Link / unlink** | `Ctrl Tab` cuts a pair apart, or ties clips together. Apart, each half moves alone. |
 | **Copy, paste, duplicate** | `Ctrl C` / `Ctrl V` at the playhead, or `Alt` drag to leave a copy behind. |
 | **Selection** | Click, click-again, click-away, rubber band, `Shift` range by track and time, `Ctrl` one at a time. |
+| **Keyboard edit** | `S` takes what the playhead is on; `Alt` and the arrows walk it, swap it, and lift it between tracks. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
@@ -277,7 +278,11 @@ Two behaviours worth knowing:
 | drag a clip | move it in time, and between tracks |
 | drag either edge of a clip | trim what it plays |
 | `Alt` while dragging a clip | leave the original and place a copy |
-| `S` | snapping on or off |
+| `S` | take the clip under the playhead, or put it down |
+| `Alt` `←` `→` | walk the selection to the next cut, or swap with what it touches |
+| `Alt` `↑` `↓` | move the selection a track up or down |
+| `Alt S` | step between the halves of a linked pair |
+| `N` | snapping on or off |
 | click a clip | select it — and again to let it go |
 | click empty timeline | let go of everything |
 | drag across empty timeline | rubber-band select |
@@ -336,7 +341,7 @@ are not moving, within eight pixels. The overlap rule already butts a clip again
 when you overshoot; snapping is for the other half, where you stop three frames short and leave a
 gap you cannot see and cannot close by hand.
 
-Snapping is a **mode**, toggled with `S` or the button in the toolbar, and recorded with the view so
+Snapping is a **mode**, toggled with `N` or the button in the toolbar, and recorded with the view so
 a project opens the way it was left. It was a held `Alt` until `Alt` was needed for duplicate-drag —
 the one gesture that cannot be spelled another way — and every NLE had already made the same trade.
 A mode you cannot see the state of is worse than a key you have to hold, so the button lights when
@@ -466,6 +471,41 @@ thing "the clip I paused on" can mean.
 > sees it, and `preventDefault` cannot take it back. It is bound because it was asked for and it may
 > arrive; **`Alt A` is bound to the same command** so the feature is reachable when it does not, and
 > it is in the palette either way.
+
+#### Editing from the keyboard
+
+Everything the pointer does to a clip's *placement*, without the pointer.
+
+| | |
+|---|---|
+| `S` | take the clip the playhead is on — again to put it down |
+| `Alt` `←` `→` | to the next cut, or swap with what it is already touching |
+| `Alt` `↑` `↓` | a track up or down, inside its own band |
+| `Alt S` | step between the halves of a linked pair |
+| `Alt` click | take one half of a pair, not both |
+
+**Sideways lands on cuts, not on a step.** A fixed nudge is a number nobody
+means: the interesting places on a timeline are the edges, and landing exactly
+on one is the whole reason to do this with a key rather than by hand. So the
+clip travels until it butts against the next edge in that direction. Leftward,
+the start of the sequence is an edge like any other; rightward, with nothing
+ahead, there is no cut to go to and nothing happens.
+
+**With no gap at all, the clip trades places with what it is touching**, so a
+shot can be walked through a sequence without picking anything up. The partner
+is a *unit*, not a clip — swapping with half of a pair would take that pair
+apart — and both halves of a moving pair have to be against the *same* unit, or
+there is no single trade to make and the nudge refuses rather than guessing.
+
+**The keyboard moves exactly what is selected.** That is the one place the
+links rule bends, and it bends deliberately: `Alt S` narrows a pair to its
+picture, then to its sound, so the two can be walked apart a track at a time —
+and being handed the other half back would make the narrowing pointless. It is
+*not* the same as cutting the link. The link is still there afterwards, dragging
+either half still moves both, and a plain click takes the pair back.
+
+`Alt` on a press means the same thing it means on a drag: **this half**, or a
+copy of this half.
 
 #### Copying clips
 

@@ -2671,6 +2671,9 @@ try {
        }).sort();
      };
 
+     window.__key = (key, mods = {}) => window.dispatchEvent(
+       new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods }));
+
      window.__pressClip = (trackId, mods = {}) => {
        const el = window.__clipOn(trackId);
        if (!el) throw new Error('no clip on ' + trackId);
@@ -2938,6 +2941,241 @@ try {
     assert.equal(state.restored, false, 'and the mode toggles back off')
   })
 
+  // ── moving clips with the keyboard ────────────────────────────
+
+  /*
+   * The keyboard's version of everything the pointer does: take the clip you
+   * are parked on, walk it along its track from cut to cut, push it up and down
+   * the stack, and step between the halves of a pair.
+   *
+   * Driven through real key events at the window, so the keymap and the
+   * commands are part of what is checked — a command nothing can reach is not
+   * a feature.
+   */
+  const seedKeys = `
+    const { assets, sequence, view } = window.__fluxDev;
+    const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    const b = assets.getAssets().find(x => x.name === 'shot_B.mp4');
+    const voice = assets.getAssets().find(x => x.name === 'voice_over.mp4');
+    const pa = await assets.ensureProbed(a.id), pb = await assets.ensureProbed(b.id);
+    const pv = await assets.ensureProbed(voice.id);
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 40 } });
+    await new Promise(r => setTimeout(r, 200));
+    // clipA from zero for four seconds, shot_B from nine, and a pair on V2.
+    sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: pa.duration });
+    sequence.addClip({ assetId: b.id, trackId: 'V1', start: 9, duration: pb.duration });
+    sequence.addLinkedClips(
+      { assetId: voice.id, trackId: 'V2', start: 14, duration: pv.duration }, true);
+    await new Promise(r => setTimeout(r, 500));
+    {
+      const seeded = sequence.getSequence().clips;
+      if (seeded.length !== 4) throw new Error('setup: ' + seeded.length + ' clips, not 4');
+    }
+    /** track:start for every clip, in a stable order. */
+    window.__where = () => window.__fluxDev.sequence.getSequence().clips
+      .slice()
+      .sort((p, q) => p.trackId.localeCompare(q.trackId) || p.start - q.start)
+      .map(c => c.trackId + '@' + Math.round(c.start * 1000) / 1000);
+  `
+
+  await check('S takes the clip under the playhead, and puts it down again', async () => {
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         const taken = window.__picked();
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         const dropped = window.__picked();
+         // And where there is nothing, it says so rather than doing nothing.
+         playback.seek(7);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         return { taken, dropped, empty: window.__picked(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.taken, ['V1:clipA.mp4'], 'the clip at two seconds is on V1')
+    assert.deepEqual(state.dropped, [], 'and pressing it again lets go')
+    assert.deepEqual(state.empty, [], 'nothing is under the playhead in the gap')
+    assert.ok(state.notice?.includes('Nothing under the playhead'), state.notice)
+  })
+
+  await check('alt and an arrow walk a clip to the next cut', async () => {
+    /*
+     * Not a fixed step. The interesting places on a timeline are the cuts, and
+     * landing exactly on one is the whole reason to do this with a key rather
+     * than with a hand.
+     */
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('ArrowRight', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const right = window.__where();
+         window.__key('ArrowLeft', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const left = window.__where();
+         // Nothing to the left of zero: the start of the sequence is an edge,
+         // and once it is there a second press has nowhere to go.
+         window.__key('ArrowLeft', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return { right, left, again: window.__where(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.ok(
+      state.right.includes('V1@5'),
+      `the clip should have moved up against shot_B at nine: ${state.right.join(' ')}`,
+    )
+    assert.ok(state.left.includes('V1@0'), `and back to the start: ${state.left.join(' ')}`)
+    assert.deepEqual(state.again, state.left, 'with nowhere further to go, nothing moves')
+    assert.ok(state.notice?.includes('Already at the start'), state.notice)
+  })
+
+  await check('a clip already against its neighbour swaps with it', async () => {
+    // So a shot can be walked through a sequence without picking anything up.
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('ArrowRight', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const against = window.__where();
+         window.__key('ArrowRight', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return { against, swapped: window.__where(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    // clipA runs four seconds and shot_B three, and the two of them fill five
+    // to twelve either way round — so the swap is visible in the starts alone.
+    assert.deepEqual(state.against.filter((one) => one.startsWith('V1')), ['V1@5', 'V1@9'])
+    assert.deepEqual(
+      state.swapped.filter((one) => one.startsWith('V1')),
+      ['V1@5', 'V1@8'],
+      'the two should have traded places, staying butted together',
+    )
+    assert.ok(state.notice?.includes('Swapped'), state.notice)
+  })
+
+  await check('alt and an arrow move a clip between tracks, inside its own band', async () => {
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('ArrowUp', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const up = window.__where();
+         // V2 is the top video track: there is nowhere above it, and a picture
+         // may not fall through into the audio band either.
+         window.__key('ArrowUp', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const stuck = window.__where();
+         const notice = document.querySelector('.tl-notice')?.textContent ?? null;
+         window.__key('ArrowDown', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         window.__key('ArrowDown', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return { up, stuck, notice, down: window.__where() };`,
+    )
+    assert.ok(state.up.includes('V2@0'), `the clip should be on V2: ${state.up.join(' ')}`)
+    assert.deepEqual(state.stuck, state.up, 'and there is nothing above V2')
+    assert.ok(state.notice?.includes('No track above'), state.notice)
+    assert.ok(
+      state.down.includes('V1@0') && !state.down.some((one) => one.startsWith('A1@0')),
+      `a picture must not fall into the audio band: ${state.down.join(' ')}`,
+    )
+  })
+
+  await check('alt+S steps between the halves of a pair', async () => {
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `const { playback } = window.__fluxDev;
+         playback.seek(15);
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         const pair = window.__picked();
+         window.__key('s', { altKey: true });
+         await new Promise(r => setTimeout(r, 200));
+         const first = window.__picked();
+         window.__key('s', { altKey: true });
+         await new Promise(r => setTimeout(r, 200));
+         return { pair, first, second: window.__picked(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.pair.length, 2, `S on the playhead should take the pair: ${state.pair}`)
+    assert.deepEqual(state.first, ['V2:voice_over.mp4'], 'the picture first')
+    assert.deepEqual(state.second, ['A1:voice_over.mp4'], 'then its sound')
+    assert.ok(state.notice?.includes('Sound only'), state.notice)
+  })
+
+  await check('a half moved on its own stays linked to the other', async () => {
+    /*
+     * The whole point of narrowing the selection: being handed the other half
+     * back would make the gesture do nothing. Moving one half apart is an edit,
+     * and it is *not* the same as cutting the link — which is why the link is
+     * still there afterwards, and why dragging either half still moves both.
+     */
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `const { playback } = window.__fluxDev;
+         playback.seek(15);
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('s', { altKey: true });
+         window.__key('s', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const holding = window.__picked();
+         window.__key('ArrowDown', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const links = sequence.getSequence().clips
+           .filter(c => c.assetId === sequence.getSequence().clips.find(k => k.kind === 'audio').assetId)
+           .map(c => c.linkId ?? null);
+         return { holding, where: window.__where(), linked: new Set(links).size === 1 && !links.includes(null) };`,
+    )
+    assert.deepEqual(state.holding, ['A1:voice_over.mp4'], 'setup: the sound alone should be held')
+    assert.ok(
+      state.where.includes('A2@14'),
+      `the sound should have moved down a track: ${state.where.join(' ')}`,
+    )
+    assert.ok(
+      state.where.includes('V2@14'),
+      `and the picture should have stayed exactly where it was: ${state.where.join(' ')}`,
+    )
+    assert.equal(state.linked, true, 'moving a half apart is not the same as cutting the link')
+  })
+
+  await check('alt-clicking a clip takes only that half', async () => {
+    // The same Alt that duplicates on a drag: "just this one", and "a copy of
+    // just this one".
+    const state = await evaluate(
+      cdp,
+      seedKeys +
+        `await window.__pressClip('A1', { altKey: true });
+         const alone = window.__picked();
+         await window.__pressClip('A1');
+         return { alone, plain: window.__picked() };`,
+    )
+    assert.deepEqual(state.alone, ['A1:voice_over.mp4'], 'alt takes the half that was pressed')
+    assert.equal(state.plain.length, 2, 'and a plain click takes the pair back')
+  })
+
   // ── copying, pasting and duplicating ──────────────────────────
 
   /*
@@ -2946,13 +3184,6 @@ try {
    * ids and new links. What differs is where "somewhere" comes from — the
    * playhead, or the end of an Alt-drag.
    */
-  await evaluate(
-    cdp,
-    `window.__key = (key, mods = {}) => window.dispatchEvent(
-       new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods }));
-     return true;`,
-  )
-
   await check('ctrl+c then ctrl+v puts a copy down at the playhead', async () => {
     const state = await evaluate(
       cdp,
@@ -3200,7 +3431,9 @@ try {
          // matches looks identical from here. (Seen exactly that way: a stale
          // stylesheet left the button unlit while every check still passed.)
          const litBg = getComputedStyle(button).backgroundColor;
-         window.__key('s');
+         // N, where Resolve keeps it. S is worth more as "take the clip I am
+         // parked on", which is the keyboard's version of clicking one.
+         window.__key('n');
          await new Promise(r => setTimeout(r, 200));
          const afterKey = {
            button: button.className.includes('cb-btn--on'),
@@ -3218,7 +3451,7 @@ try {
                   backOn: button.className.includes('cb-btn--on') };`,
     )
     assert.equal(state.on, true, 'snapping should start on')
-    assert.equal(state.afterKey.button, false, 'pressing S should turn it off')
+    assert.equal(state.afterKey.button, false, 'pressing N should turn it off')
     assert.equal(state.afterKey.view, false, 'and record it, so the project opens as it was left')
     assert.notEqual(
       state.litBg,

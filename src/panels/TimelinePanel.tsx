@@ -57,6 +57,7 @@ import {
   clipsBetween,
   clipsInRegion,
   clipsAtTime,
+  nudgeClips,
   copyClips,
   pasteClips,
   duplicateClips,
@@ -555,6 +556,20 @@ export function TimelinePanel() {
       const additive = event.ctrlKey || event.metaKey
       const ranged = event.shiftKey
       /*
+       * `Alt` on a press means *this half*, not the pair.
+       *
+       * The same `Alt` that duplicates on a drag, and the two readings agree:
+       * "just this one" and "a copy of just this one". It is how the halves of
+       * a link get moved on their own without cutting the link — which is worth
+       * having, because cutting it is a decision and looking at one half is
+       * not.
+       */
+      const half = event.altKey
+      // A picture and the sound that came with it are one thing to the hand, so
+      // pressing either shows both selected. moveClips would move the pair
+      // regardless; this is so what happens is what was visibly about to.
+      const together = half ? [clip.id] : withLinked([clip.id])
+      /*
        * Whether this clip was *already* the whole selection before the press.
        *
        * The second half of the click-to-toggle rule needs to know that, and it
@@ -562,11 +577,7 @@ export function TimelinePanel() {
        * made this clip the selection either way, so "is it selected?" answers
        * yes for the first click as well as the second.
        */
-      const wasOnlyThis = sameSet(current, withLinked([clip.id]))
-      // A picture and the sound that came with it are one thing to the hand, so
-      // pressing either shows both selected. moveClips would move the pair
-      // regardless; this is so what happens is what was visibly about to.
-      const together = withLinked([clip.id])
+      const wasOnlyThis = sameSet(current, together)
       let chosen: Set<string>
       if (ranged && anchorRef.current && anchorRef.current !== clip.id) {
         // The rectangle from the anchor to here, tracks and time both. See
@@ -646,20 +657,22 @@ export function TimelinePanel() {
           setSelected(new Set())
           selectedRef.current = new Set()
           anchorRef.current = null
-        } else if (!additive && !ranged && chosen.size > together.length) {
+        } else if (!additive && !ranged && !sameSet(chosen, together)) {
           /*
-           * Pressed a clip that was already part of a group, and let go without
-           * dragging: that means "this one", not "all of them".
+           * Pressed a clip while something else was selected, and let go
+           * without dragging: that means "this one", not "all of them" and not
+           * "the half I happened to be holding".
            *
-           * The press has to keep the group, or a group could never be dragged
-           * at all — the first press would throw the rest of it away. The
-           * release is where the two intents separate, which is how every
-           * multi-select surface behaves and why nobody notices the rule.
+           * The press has to keep whatever was selected, or a group could never
+           * be dragged at all — the first press would throw the rest of it
+           * away. The release is where the two intents separate, which is how
+           * every multi-select surface behaves and why nobody notices the rule.
            *
-           * It matters most straight after unlinking a pair. Both halves are
-           * still selected, and without this the only way to move one of them
-           * alone would be to click somewhere empty first — which reads as the
-           * unlink not having worked.
+           * It narrows *and* widens. Narrowing matters straight after unlinking
+           * a pair, where both halves are still selected and dragging one would
+           * otherwise move both. Widening matters after `Alt` has taken one
+           * half of a link: a plain click means the pair again, and without
+           * this it would silently keep holding the half.
            */
           const one = new Set(together)
           setSelected(one)
@@ -1110,6 +1123,113 @@ export function TimelinePanel() {
     )
   }, [])
 
+  /**
+   * Selects, or lets go of, whatever the playhead is on.
+   *
+   * The keyboard half of clicking a clip, and it toggles for the same reason a
+   * click does: the key that selects a thing should be the key that puts it
+   * down. The front-most clip, as everywhere else — the one the Viewer is
+   * showing is the one the playhead is "on".
+   */
+  const selectAtPlayhead = useCallback(() => {
+    const under = clipsAtTime(getTime())
+    const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1)
+    if (!front) {
+      setNotice('Nothing under the playhead to select')
+      return
+    }
+    const together = withLinked([front.id])
+    const already = sameSet(selectedRef.current, together)
+    const chosen = already ? new Set<string>() : new Set(together)
+    setSelected(chosen)
+    selectedRef.current = chosen
+    anchorRef.current = already ? null : front.id
+  }, [])
+
+  /**
+   * Walks the selection along its track, or up and down the stack.
+   *
+   * Sideways lands on cuts rather than stepping by a fixed amount, and swaps
+   * with whatever is already touching — see nudgeClips, which is where the rule
+   * lives. Up and down go through the same moveClips a drag uses, so a clip
+   * cannot cross out of its own band and a pair cannot change track in halves.
+   */
+  const nudge = useCallback((direction: 'left' | 'right' | 'up' | 'down') => {
+    const ids = [...selectedRef.current]
+    if (ids.length === 0) {
+      setNotice('Select a clip first — Alt with the arrows moves what is selected')
+      return
+    }
+
+    /*
+     * Exactly what is selected, links and all — but no more than that.
+     *
+     * A whole pair moves as a pair because both halves are selected. A pair
+     * narrowed to one half with `Alt S` moves that half alone, which is the
+     * point of having narrowed it: handing the other half back would make the
+     * gesture do nothing.
+     */
+    const literal = { throughLinks: false }
+
+    if (direction === 'up' || direction === 'down') {
+      if (!moveClips(ids, 0, direction === 'up' ? -1 : 1, literal)) {
+        setNotice(
+          direction === 'up'
+            ? 'No track above this one to move to'
+            : 'No track below this one to move to',
+        )
+      }
+      return
+    }
+
+    const what = nudgeClips(ids, direction, literal)
+    if (what === null) {
+      setNotice(
+        direction === 'right'
+          ? 'Nothing to the right to move up against'
+          : 'Already at the start of the sequence',
+      )
+    } else if (what === 'swapped') {
+      setNotice('Swapped with the clip it was against')
+    } else {
+      // Cleared, not left: the last thing said was about the last thing done,
+      // and a nudge that lands cleanly has nothing to add.
+      setNotice(null)
+    }
+  }, [])
+
+  /**
+   * Steps the selection between the halves of a link.
+   *
+   * A pair narrows to its picture, the picture switches to its sound, and the
+   * sound switches back — so the two can be moved apart with the keyboard
+   * without cutting the link, which is a decision of its own. A plain click
+   * takes the pair back.
+   */
+  const toggleHalf = useCallback(() => {
+    const ids = [...selectedRef.current]
+    if (ids.length === 0) return
+    const group = withLinked(ids)
+    if (group.length < 2) {
+      setNotice('That clip is not linked to anything')
+      return
+    }
+
+    const clips = getSequence().clips.filter((clip) => group.includes(clip.id))
+    const picture = clips.find((clip) => clip.kind === 'video') ?? clips[0]
+    const rest = clips.filter((clip) => clip.id !== picture.id)
+    // Both halves in hand, or something else entirely: start at the picture.
+    const showing = ids.length === 1 ? ids[0] : null
+    const next =
+      showing === picture.id ? (rest[0]?.id ?? picture.id) : picture.id
+    const chosen = new Set([next])
+    setSelected(chosen)
+    selectedRef.current = chosen
+    anchorRef.current = next
+    const kind = getSequence().clips.find((clip) => clip.id === next)?.kind
+    setNotice(kind === 'audio' ? 'Sound only — the picture is left alone' : 'Picture only — the sound is left alone')
+  }, [])
+
   useEffect(() => {
     const handle = commands.registerAll([
       {
@@ -1148,6 +1268,51 @@ export function TimelinePanel() {
         detail: 'Puts the copied clips down at the playhead',
         enabled: () => clipboardCount() > 0,
         run: pasteAtPlayhead,
+      },
+      {
+        id: 'timeline.selectAtPlayhead',
+        title: 'Select Clip Under Playhead',
+        category: 'Timeline',
+        detail: 'Takes the clip the playhead is on, or puts it down again',
+        run: selectAtPlayhead,
+      },
+      {
+        id: 'timeline.nudgeLeft',
+        title: 'Nudge Selection To The Previous Cut',
+        category: 'Timeline',
+        detail: 'Moves it up against what is to its left, or swaps with it',
+        enabled: () => selected.size > 0,
+        run: () => nudge('left'),
+      },
+      {
+        id: 'timeline.nudgeRight',
+        title: 'Nudge Selection To The Next Cut',
+        category: 'Timeline',
+        detail: 'Moves it up against what is to its right, or swaps with it',
+        enabled: () => selected.size > 0,
+        run: () => nudge('right'),
+      },
+      {
+        id: 'timeline.nudgeUp',
+        title: 'Move Selection Up A Track',
+        category: 'Timeline',
+        enabled: () => selected.size > 0,
+        run: () => nudge('up'),
+      },
+      {
+        id: 'timeline.nudgeDown',
+        title: 'Move Selection Down A Track',
+        category: 'Timeline',
+        enabled: () => selected.size > 0,
+        run: () => nudge('down'),
+      },
+      {
+        id: 'timeline.toggleHalf',
+        title: 'Select One Half Of A Linked Pair',
+        category: 'Timeline',
+        detail: 'Steps between the picture and its sound without cutting the link',
+        enabled: () => selected.size > 0,
+        run: toggleHalf,
       },
       {
         id: 'timeline.toggleAutoSelect',
@@ -1190,7 +1355,17 @@ export function TimelinePanel() {
       },
     ])
     return () => handle.dispose()
-  }, [copySelected, pasteAtPlayhead, deleteSelected, toggleLinkSelected, selected.size, zoomBy])
+  }, [
+    copySelected,
+    pasteAtPlayhead,
+    deleteSelected,
+    toggleLinkSelected,
+    selectAtPlayhead,
+    nudge,
+    toggleHalf,
+    selected.size,
+    zoomBy,
+  ])
 
   // ── rendering ─────────────────────────────────────────────────
 
@@ -1220,7 +1395,7 @@ export function TimelinePanel() {
             <button
               className={`cb-btn${snapping ? ' cb-btn--on' : ''}`}
               onClick={() => setSnapping((on) => !on)}
-              title="Snap edges to clips, the playhead and the start (S)"
+              title="Snap edges to clips, the playhead and the start (N)"
             >
               Snap
             </button>

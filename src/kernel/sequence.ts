@@ -1175,12 +1175,17 @@ export function setSequenceSize(width: number, height: number): boolean {
  *
  * @returns true when anything actually moved.
  */
-export function moveClips(ids: string[], deltaSeconds: number, deltaTracks: number): boolean {
+export function moveClips(
+  ids: string[],
+  deltaSeconds: number,
+  deltaTracks: number,
+  options?: MoveOptions,
+): boolean {
   // Linked partners travel with what they are linked to. Expanded here rather
   // than at the caller: that a picture does not leave its sound behind is a
   // rule about the sequence, not a convenience of the panel that drags it.
   const asked = new Set(ids)
-  const moving = new Set(withLinked(ids))
+  const moving = new Set(options?.throughLinks === false ? ids : withLinked(ids))
   const chosen = sequence.clips.filter((clip) => moving.has(clip.id))
   if (chosen.length === 0) return false
 
@@ -1405,6 +1410,138 @@ export function trimClips(ids: string[], edge: TrimEdge, deltaSeconds: number): 
   sequence = { ...sequence, clips }
   emit()
   return true
+}
+
+/**
+ * How a move treats a link.
+ *
+ * `throughLinks: false` moves exactly the clips named and leaves their partners
+ * where they are — *without* cutting the link, which is a separate decision.
+ * It exists for the keyboard: having narrowed a selection to one half of a pair
+ * on purpose, being handed the other half back would make the narrowing
+ * pointless. The mouse never passes it; dragging either half drags both, which
+ * is the rule everywhere else.
+ */
+export interface MoveOptions {
+  throughLinks?: boolean
+}
+
+/** Which way a keyboard nudge is pushing. */
+export type Nudge = 'left' | 'right'
+
+/**
+ * Moves a selection to the next cut, or swaps it with what is in the way.
+ *
+ * The keyboard equivalent of shoving a clip along a track, and it is two
+ * gestures wearing one key because the answer to "move right" depends on what
+ * is to the right:
+ *
+ *   - **a gap** — the clip travels until it butts against the next edge. Not by
+ *     a fixed step: the interesting places on a timeline are the cuts, and
+ *     landing exactly on one is the whole point of doing this with a key rather
+ *     than with a hand.
+ *   - **nothing in the way** — leftward, the start of the sequence is an edge
+ *     like any other, so the clip goes there. Rightward there is no cut to go
+ *     to, and nothing happens.
+ *   - **no gap at all** — the clip and its neighbour trade places, so a shot
+ *     can be walked through a sequence without picking anything up.
+ *
+ * A linked pair moves as a unit, as everywhere else: one distance, taken from
+ * whichever half has least room. And a swap needs both halves to be up against
+ * the *same* neighbour — a pair whose picture touches one clip while its sound
+ * touches another has no unambiguous partner to trade with, and guessing would
+ * silently rearrange somebody's edit.
+ *
+ * @returns what happened, or null when nothing could.
+ */
+export function nudgeClips(
+  ids: string[],
+  direction: Nudge,
+  options?: MoveOptions,
+): 'moved' | 'swapped' | null {
+  const moving = new Set(options?.throughLinks === false ? ids : withLinked(ids))
+  const chosen = sequence.clips.filter((clip) => moving.has(clip.id))
+  if (chosen.length === 0) return null
+
+  const right = direction === 'right'
+  const others = sequence.clips.filter((clip) => !moving.has(clip.id))
+
+  /** The clip a member would run into, and how far away it is. */
+  const ahead = chosen.map((clip) => {
+    const end = clip.start + clip.duration
+    const onTrack = others.filter((other) => other.trackId === clip.trackId)
+    const touching = right
+      ? onTrack.filter((other) => other.start >= end - EPS)
+      : onTrack.filter((other) => other.start + other.duration <= clip.start + EPS)
+    if (touching.length === 0) {
+      // Leftward, zero is the edge; rightward there is nothing to aim at.
+      return { clip, neighbour: null, gap: right ? Infinity : clip.start }
+    }
+    const neighbour = right
+      ? touching.reduce((best, other) => (other.start < best.start ? other : best))
+      : touching.reduce((best, other) => (other.start > best.start ? other : best))
+    const gap = right
+      ? neighbour.start - end
+      : clip.start - (neighbour.start + neighbour.duration)
+    return { clip, neighbour, gap }
+  })
+
+  const travel = Math.min(...ahead.map((one) => one.gap))
+
+  // Somewhere to go: every member takes the same distance, which is what keeps
+  // a pair a pair.
+  if (travel > EPS && travel !== Infinity) {
+    const delta = right ? travel : -travel
+    sequence = {
+      ...sequence,
+      clips: sequence.clips.map((clip) =>
+        moving.has(clip.id) ? { ...clip, start: snapToFrame(clip.start + delta) } : clip,
+      ),
+    }
+    emit()
+    return 'moved'
+  }
+  if (travel === Infinity) return null
+
+  /*
+   * Nowhere to go, so trade places with whatever is against it.
+   *
+   * The partner is a *unit*, not a clip: swapping with half of a pair would
+   * take that pair apart. Every member of the selection has to be up against
+   * that same unit, or there is no single trade to make.
+   */
+  const blockers = ahead.map((one) => one.neighbour).filter((one): one is Clip => one !== null)
+  if (blockers.length === 0) return null
+  const partnerLink = blockers[0].linkId
+  const partner = partnerLink
+    ? sequence.clips.filter((clip) => clip.linkId === partnerLink)
+    : [blockers[0]]
+  const partnerIds = new Set(partner.map((clip) => clip.id))
+  if (!blockers.every((one) => partnerIds.has(one.id))) return null
+
+  const span = (clips: Clip[]) => {
+    const from = Math.min(...clips.map((clip) => clip.start))
+    const to = Math.max(...clips.map((clip) => clip.start + clip.duration))
+    return { from, to, length: to - from }
+  }
+  const mine = span(chosen)
+  const theirs = span(partner)
+
+  // Butted together, so the two spans occupy one stretch and exchanging their
+  // order inside it cannot overlap anything or move anything else.
+  const mineDelta = right ? theirs.length : -theirs.length
+  const theirsDelta = right ? -mine.length : mine.length
+
+  sequence = {
+    ...sequence,
+    clips: sequence.clips.map((clip) => {
+      if (moving.has(clip.id)) return { ...clip, start: snapToFrame(clip.start + mineDelta) }
+      if (partnerIds.has(clip.id)) return { ...clip, start: snapToFrame(clip.start + theirsDelta) }
+      return clip
+    }),
+  }
+  emit()
+  return 'swapped'
 }
 
 export function removeClips(ids: string[]): number {

@@ -40,9 +40,26 @@ export const defaultKeymap: Keymap = {
   'alt+a': 'timeline.toggleAutoSelect',
   'ctrl+c': 'timeline.copy',
   'ctrl+v': 'timeline.paste',
-  // Snapping is a mode, not a held key: `Alt` is spoken for by duplicate-drag,
-  // and every NLE settled on the same answer.
-  s: 'timeline.toggleSnapping',
+  /*
+   * Snapping is a mode, not a held key: `Alt` is spoken for by duplicate-drag,
+   * and every NLE settled on the same answer.
+   *
+   * On `n` rather than `s`, which is where Resolve keeps it — `s` is worth more
+   * as "take the clip I am parked on", the keyboard's version of clicking one.
+   */
+  n: 'timeline.toggleSnapping',
+  s: 'timeline.selectAtPlayhead',
+  /*
+   * Moving a clip with the keyboard: along its track to the next cut, or up and
+   * down the stack. `Alt` because the bare arrows belong to the playhead, which
+   * is what they do in every NLE and what they will do here.
+   */
+  'alt+arrowleft': 'timeline.nudgeLeft',
+  'alt+arrowright': 'timeline.nudgeRight',
+  'alt+arrowup': 'timeline.nudgeUp',
+  'alt+arrowdown': 'timeline.nudgeDown',
+  /** Which half of a linked pair the keyboard is holding. */
+  'alt+s': 'timeline.toggleHalf',
   // The transport. Space is the one key in a media app that is spoken for
   // before anything else is designed.
   space: 'playback.toggle',
