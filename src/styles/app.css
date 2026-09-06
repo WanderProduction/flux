@@ -579,10 +579,47 @@ kbd {
 .track-gain:hover {
   color: var(--flux-text);
 }
+/*
+ * A track's name, which is also the control that targets it.
+ *
+ * A button rather than a label with a click handler: it is reachable by
+ * keyboard, it announces whether it is pressed, and the browser gives it the
+ * focus ring for free. Reset to look like the text it replaced — a header
+ * 118px wide has no room for a control that looks like one.
+ */
 .track-name {
   font-family: var(--flux-font-mono);
   font-size: var(--flux-text-sm);
   color: var(--flux-text-dim);
+  padding: 1px 4px;
+  margin-left: -4px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.track-name:hover {
+  color: var(--flux-text);
+  border-color: var(--flux-border);
+}
+
+/*
+ * The targeted track, in the header and across its lane.
+ *
+ * Both, because the header is a narrow column at the edge of a panel that can
+ * be a metre wide: a mark only there is a mark you have to go and look for,
+ * and the question "where will this paste land" is asked while looking at the
+ * clips.
+ */
+.tl-header--target {
+  background: color-mix(in srgb, var(--flux-accent) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--flux-accent);
+}
+/* Doubled deliberately: an audio header colours its own name further down the
+   file, and at equal weight that rule would win over this one. */
+.tl-header.tl-header--target .track-name {
+  color: var(--flux-accent);
+  border-color: color-mix(in srgb, var(--flux-accent) 45%, transparent);
 }
 
 /*
@@ -688,6 +725,13 @@ kbd {
 }
 .tl-header--audio .track-name {
   color: color-mix(in srgb, var(--flux-audio) 55%, var(--flux-text-dim));
+}
+
+/* After the lane's own colour, not before it: a targeted audio lane has two
+   backgrounds competing for the same property, and the one that says which
+   track the keyboard is pointing at is the one that has to win. */
+.tl-lane--target {
+  background: color-mix(in srgb, var(--flux-accent) 7%, var(--flux-bg-panel));
 }
 
 .clip {

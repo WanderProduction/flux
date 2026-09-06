@@ -4513,6 +4513,400 @@ try {
     )
   })
 
+  // ── which track the keyboard is aimed at ──────────────
+
+  /*
+   * Track targeting: a *place*, not a selection.
+   *
+   * It answers the question every keyboard gesture has to ask and a pointer
+   * never does — where does this go, and what does it apply to. Three things
+   * read it, so three things are checked: where a paste lands, what S takes,
+   * and which track Alt M, Alt O and Alt V act on.
+   */
+  const seedTarget =
+    seedCuts +
+    `window.__headerOf = (trackId) => {
+       const rows = window.__fluxDev.sequence.getSequence().tracks;
+       const at = rows.findIndex(t => t.id === trackId);
+       return [...document.querySelectorAll('.tl-header')][at] ?? null;
+     };
+     /** The targeted track, read off the screen rather than out of the panel. */
+     window.__targeted = () =>
+       document.querySelector('.tl-header--target .track-name')?.textContent ?? null;
+     /*
+      * Aims at a track. Sets rather than toggles, because the click it drives
+      * is a toggle: asking for A1 when A1 was already aimed at would let go of
+      * it, and a check would then be testing whatever the check before it left
+      * behind.
+      */
+     window.__aim = async (trackId) => {
+       if (window.__targeted() === trackId) return;
+       window.__headerOf(trackId).querySelector('.track-name').click();
+       await new Promise(r => setTimeout(r, 200));
+     };
+     /*
+      * And every check starts from nothing aimed at.
+      *
+      * Reseeding the sequence does not clear it: every default sequence has the
+      * same four track ids, so a target left over from the check before still
+      * names a track that exists. That is right for the app — the tracks really
+      * are the same ones — and it is exactly what makes it leak between checks.
+      */
+     for (let i = 0; window.__targeted() && i < 8; i++) {
+       document.querySelector('.tl-header--target .track-name').click();
+       await new Promise(r => setTimeout(r, 150));
+     }
+     /*
+      * Bounded, and it throws rather than giving up quietly.
+      *
+      * This was an unbounded while, and a build where clicking a targeted
+      * name does not let go of it turned every check in this section into
+      * a hung process rather than a failing one — an hour of a suite
+      * sitting there saying nothing. A wait with no ceiling is not a wait.
+      */
+     if (window.__targeted()) {
+       throw new Error('could not let go of ' + window.__targeted());
+     }
+    `
+
+  await check('clicking a track name aims at it, and clicking again lets go', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const first = window.__targeted();
+         await window.__aim('A1');
+         const aimed = window.__targeted();
+         const lane = window.__laneOf('A1').classList.contains('tl-lane--target');
+         const said = document.querySelector('.tl-notice')?.textContent ?? null;
+         // The click itself, not __aim: __aim sets, and letting go is the very
+         // thing being checked here.
+         window.__headerOf('A1').querySelector('.track-name').click();
+         await new Promise(r => setTimeout(r, 200));
+         return { first, aimed, lane, said, after: window.__targeted() };`,
+    )
+    assert.equal(state.first, null, 'nothing is targeted to begin with')
+    assert.equal(state.aimed, 'A1', 'clicking the name targets that track')
+    assert.equal(state.lane, true, 'and the lane is marked too, not just the header')
+    assert.ok(state.said?.includes('A1 targeted'), state.said)
+    assert.equal(state.after, null, 'clicking it again lets go')
+  })
+
+  await check('Tab walks the target down the stack and Shift Tab back up', async () => {
+    /*
+     * `null` is in the ring, one stop past the bottom track. Without it the
+     * only way to stop targeting would be the mouse — a keyboard feature with
+     * a pointer-shaped hole in it.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const down = [];
+         for (let i = 0; i < 5; i++) {
+           window.__key('Tab');
+           await new Promise(r => setTimeout(r, 150));
+           down.push(window.__targeted());
+         }
+         const up = [];
+         for (let i = 0; i < 2; i++) {
+           window.__key('Tab', { shiftKey: true });
+           await new Promise(r => setTimeout(r, 150));
+           up.push(window.__targeted());
+         }
+         return { down, up };`,
+    )
+    assert.deepEqual(
+      state.down,
+      ['V2', 'V1', 'A1', 'A2', null],
+      'down the stack in the order it is drawn, then off the end of the ring',
+    )
+    assert.deepEqual(state.up, ['A2', 'A1'], 'and Shift Tab walks back up it')
+  })
+
+  await check('a paste lands on the targeted track', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { playback } = window.__fluxDev;
+         await window.__pressClip('V1');
+         window.__key('c', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 200));
+         await window.__aim('V2');
+         playback.seek(6);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return { where: window.__where(),
+                  said: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(
+      state.where,
+      ['A1@0+12', 'V1@0+4', 'V1@4+3', 'V1@7+4', 'V2@6+4'],
+      'the copy should be on V2, where the keyboard was aimed',
+    )
+    assert.ok(state.said?.includes('onto V2'), state.said)
+  })
+
+  await check('a paste aimed above where it came from takes the set up', async () => {
+    /*
+     * The distance is measured from the copied clip whose *kind* matches the
+     * target, and this is the check that can see that: a video clip on V1 and
+     * a sound on A2, aimed at A1. From the sound, the set moves up one track
+     * and lands where it was asked. From whichever clip happens to be topmost,
+     * it tries to move *down* one, which the video half has no room for, and
+     * the whole paste stays where it started.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { assets: bin, sequence: seq, playback } = window.__fluxDev;
+         const pic = bin.getAssets().find(x => x.name === 'clipA.mp4');
+         const snd = bin.getAssets().find(x => x.name === 'voice_over.mp4');
+         const pp = await bin.ensureProbed(pic.id), ps = await bin.ensureProbed(snd.id);
+         seq.clearSequence();
+         seq.addClip({ assetId: pic.id, trackId: 'V1', start: 0, duration: pp.duration });
+         seq.addClip({ assetId: snd.id, trackId: 'A2', start: 0, duration: ps.duration });
+         await new Promise(r => setTimeout(r, 400));
+         seq.copyClips(seq.getSequence().clips.map(c => c.id));
+         await window.__aim('A1');
+         playback.seek(6);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return { where: window.__where(),
+                  said: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(
+      state.where,
+      ['A1@6+12', 'A2@0+12', 'V1@0+4', 'V2@6+4'],
+      'the sound lands on A1 and the picture comes up with it',
+    )
+    assert.ok(state.said?.includes('onto A1'), state.said)
+  })
+
+  await check('a pair aimed where its other half cannot follow says so', async () => {
+    /*
+     * One shift for the whole group, clamped by whichever half has least room —
+     * the same rule as a move, and the only one that cannot land a picture and
+     * its sound on different offsets. When it bites, the clips are visibly not
+     * where they were asked for, so the panel says why.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { assets: bin, sequence: seq, playback } = window.__fluxDev;
+         const one = bin.getAssets().find(x => x.name === 'clipA.mp4');
+         const probed = await bin.ensureProbed(one.id);
+         seq.clearSequence();
+         seq.addLinkedClips(
+           { assetId: one.id, trackId: 'V1', start: 0, duration: probed.duration }, true);
+         await new Promise(r => setTimeout(r, 400));
+         const pair = seq.getSequence().clips.map(c => c.id);
+         if (pair.length !== 2) throw new Error('setup: ' + pair.length + ' clips, not a pair');
+         seq.copyClips(pair);
+         await window.__aim('A2');
+         playback.seek(4);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('v', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 350));
+         return { where: window.__where(),
+                  said: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(
+      state.where,
+      ['A1@0+4', 'A1@4+4', 'V1@0+4', 'V1@4+4'],
+      'V1 is the lowest video track, so the pair could not go down a track together',
+    )
+    assert.ok(state.said?.includes('not on A2'), state.said)
+  })
+
+  await check('S takes what is on the targeted track and nothing else', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 250));
+         const whole = window.__picked();
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         await window.__aim('A1');
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 250));
+         return { whole, aimed: window.__picked() };`,
+    )
+    assert.deepEqual(state.whole, ['V1:clipA.mp4'], 'the front-most clip, with nothing targeted')
+    assert.deepEqual(state.aimed, ['A1:voice_over.mp4'], 'and the targeted track once there is one')
+  })
+
+  await check('S on a targeted track with nothing under the playhead says which', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { playback } = window.__fluxDev;
+         await window.__aim('V2');
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 250));
+         return { picked: window.__picked(),
+                  said: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.picked, [], 'V2 is empty, so nothing is selected')
+    assert.ok(state.said?.includes('Nothing on V2'), state.said)
+  })
+
+  await check('auto-select on pause is aimed at the same track', async () => {
+    // The transport asking the same question the S key asks, so it has to get
+    // the same answer — two answers would drift apart the first time one moved.
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { playback } = window.__fluxDev;
+         window.__key('a', { altKey: true });
+         await new Promise(r => setTimeout(r, 200));
+         await window.__aim('A1');
+         playback.seek(1.5);
+         playback.play();
+         await new Promise(r => setTimeout(r, 400));
+         playback.pause();
+         await new Promise(r => setTimeout(r, 350));
+         const picked = window.__picked();
+         window.__key('a', { altKey: true });
+         await new Promise(r => setTimeout(r, 200));
+         return { picked };`,
+    )
+    assert.deepEqual(state.picked, ['A1:voice_over.mp4'], 'the targeted track, not the picture')
+  })
+
+  await check('Alt M, Alt O and Alt V act on the targeted track', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { sequence: seq } = window.__fluxDev;
+         const of = (id) => {
+           const t = seq.getSequence().tracks.find(one => one.id === id);
+           return { muted: t.muted, solo: t.solo, hidden: t.hidden };
+         };
+         await window.__aim('A1');
+         window.__key('m', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const muted = of('A1');
+         window.__key('m', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const unmuted = of('A1');
+         window.__key('o', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const soloed = of('A1');
+         window.__key('o', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         await window.__aim('V1');
+         window.__key('v', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const hidden = of('V1');
+         window.__key('v', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return { muted, unmuted, soloed, hidden, shown: of('V1'), untouched: of('A2') };`,
+    )
+    assert.equal(state.muted.muted, true, 'Alt M mutes it')
+    assert.equal(state.unmuted.muted, false, 'and unmutes it again')
+    assert.equal(state.soloed.solo, true, 'Alt O solos it')
+    assert.equal(state.hidden.hidden, true, 'Alt V takes a video track out of the picture')
+    assert.equal(state.shown.hidden, false, 'and puts it back')
+    assert.deepEqual(
+      state.untouched,
+      { muted: false, solo: false, hidden: false },
+      'and no other track was touched',
+    )
+  })
+
+  await check('a track key refuses across kinds rather than doing the nearest thing', async () => {
+    /*
+     * A video track has no level to mute and an audio track has no picture to
+     * hide. A key that silently did something else instead would teach the
+     * wrong thing about what it does, which is worse than a key that says no.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { sequence: seq } = window.__fluxDev;
+         await window.__aim('A1');
+         window.__key('v', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const onAudio = document.querySelector('.tl-notice')?.textContent ?? null;
+         await window.__aim('V1');
+         window.__key('m', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const onVideo = document.querySelector('.tl-notice')?.textContent ?? null;
+         const tracks = seq.getSequence().tracks
+           .map(t => t.id + (t.muted ? ':m' : '') + (t.hidden ? ':h' : ''));
+         return { onAudio, onVideo, tracks };`,
+    )
+    assert.ok(state.onAudio?.includes('audio track'), state.onAudio)
+    assert.ok(state.onVideo?.includes('video track'), state.onVideo)
+    assert.deepEqual(state.tracks, ['V2', 'V1', 'A1', 'A2'], 'and nothing changed')
+  })
+
+  await check('a track key with nothing targeted says so', async () => {
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `window.__key('m', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return document.querySelector('.tl-notice')?.textContent ?? null;`,
+    )
+    assert.ok(state?.includes('No track targeted'), state)
+  })
+
+  await check('the target is let go of when its track goes', async () => {
+    /*
+     * Switching sequences is what makes this necessary rather than removing a
+     * track: the new sequence has its own tracks, and an id left over from the
+     * last one would aim the keyboard at nothing while the header showed no
+     * target at all.
+     */
+    const state = await evaluate(
+      cdp,
+      seedTarget +
+        `const { sequence: seq, playback } = window.__fluxDev;
+         await window.__aim('A2');
+         const before = window.__targeted();
+         seq.removeTrack('A2');
+         await new Promise(r => setTimeout(r, 300));
+         const after = window.__targeted();
+         window.__key('m', { altKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const said = document.querySelector('.tl-notice')?.textContent ?? null;
+
+         /*
+          * Asked with the S key, because the screen cannot answer this one.
+          *
+          * A target whose track has gone has no header left to mark, so
+          * the target class is absent whether the target was let go of or
+          * is still holding a dead id \u2014 and Alt M says "No track targeted"
+          * either way, because its lookup fails for a different reason. What
+          * does differ is what S does: still aimed at a track that is not
+          * there, it reports nothing under the playhead instead of taking the
+          * front-most clip.
+          */
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 250));
+         return { before, after, said, picked: window.__picked(),
+                  onS: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.before, 'A2', 'setup: A2 was targeted')
+    assert.equal(state.after, null, 'and the target went with the track')
+    assert.ok(state.said?.includes('No track targeted'), state.said)
+    assert.deepEqual(
+      state.picked,
+      ['V1:clipA.mp4'],
+      `S should take the front-most clip again, and it said: ${state.onS}`,
+    )
+  })
+
   await check('a linked pair survives a save and a reload', async () => {
     // The promise the project format makes: everything on the timeline comes
     // back. A pair that reloads as two unrelated clips would still look right

@@ -16,6 +16,7 @@ import {
   play,
   seek,
   setClockSource,
+  stepFrames,
   subscribePlayback,
   toggle,
 } from '../kernel/playback'
@@ -80,6 +81,15 @@ import { PanelFrame } from './PanelFrame'
  * that scrubbing to where the picture already is costs nothing.
  */
 const SYNC_TOLERANCE = 0.01 + 1 / 96
+
+/**
+ * How far `Shift` and an arrow go.
+ *
+ * Frames rather than a fraction of a second, so the long step stays a whole
+ * number of frames at any rate — a jump that lands between two frames would
+ * make the next single step half a frame long.
+ */
+const JUMP_FRAMES = 5
 
 /**
  * Every clip to be drawn at `time`, bottom layer first.
@@ -452,6 +462,44 @@ export function ViewerPanel() {
       { id: 'playback.pause', title: 'Pause', category: 'Playback', run: pause },
       { id: 'playback.goToStart', title: 'Go to Start', category: 'Playback', run: goToStart },
       { id: 'playback.goToEnd', title: 'Go to End', category: 'Playback', run: goToEnd },
+      /*
+       * The arrows, and the arrows with `Shift`.
+       *
+       * Registered here rather than in the Timeline because they move the
+       * transport and nothing else — the Viewer is where the transport's
+       * commands live, and a frame step is the smallest one there is.
+       *
+       * Five for the long step: enough to cross a syllable or a footfall,
+       * short enough that what you skipped is still on screen either side.
+       */
+      {
+        id: 'playback.stepForward',
+        title: 'Next Frame',
+        category: 'Playback',
+        detail: 'One frame later',
+        run: () => stepFrames(1),
+      },
+      {
+        id: 'playback.stepBack',
+        title: 'Previous Frame',
+        category: 'Playback',
+        detail: 'One frame earlier',
+        run: () => stepFrames(-1),
+      },
+      {
+        id: 'playback.jumpForward',
+        title: 'Forward Five Frames',
+        category: 'Playback',
+        detail: 'Shift and an arrow',
+        run: () => stepFrames(JUMP_FRAMES),
+      },
+      {
+        id: 'playback.jumpBack',
+        title: 'Back Five Frames',
+        category: 'Playback',
+        detail: 'Shift and an arrow',
+        run: () => stepFrames(-JUMP_FRAMES),
+      },
     ])
     return () => handle.dispose()
   }, [])

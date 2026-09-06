@@ -105,6 +105,33 @@ export const defaultKeymap: Keymap = {
   'shift+s+arrowleft': 'timeline.addPrevious',
   'shift+s+arrowright': 'timeline.addNext',
   /*
+   * The bare arrows belong to the playhead, which is what they do in every NLE.
+   * One frame at a time, and five with `Shift` — far enough to cover ground,
+   * near enough that you can still see what you went past.
+   */
+  arrowleft: 'playback.stepBack',
+  arrowright: 'playback.stepForward',
+  'shift+arrowleft': 'playback.jumpBack',
+  'shift+arrowright': 'playback.jumpForward',
+  /*
+   * Which track the keyboard is aimed at. `Tab` walks down the stack and
+   * `Shift Tab` back up it, which is what those two keys mean everywhere else
+   * — the pair rather than the single key that was asked for, because a cycle
+   * you can only go forwards round is one you have to go the whole way round to
+   * correct a slip. `Ctrl Tab` is the link toggle and stays where it is.
+   */
+  tab: 'timeline.targetNext',
+  'shift+tab': 'timeline.targetPrevious',
+  /*
+   * What the targeted track does. `Alt M` mutes, `Alt O` solos — `Alt S` would
+   * be the obvious partner and already means "which half of the pair am I
+   * holding", so solo takes the other letter in its own name — and `Alt V`
+   * takes a video track out of the picture.
+   */
+  'alt+m': 'timeline.toggleTrackMute',
+  'alt+o': 'timeline.toggleTrackSolo',
+  'alt+v': 'timeline.toggleTrackVisible',
+  /*
    * Moving a clip with the keyboard: along its track to the next cut, or up and
    * down the stack. `Alt` because the bare arrows belong to the playhead, which
    * is what they do in every NLE and what they will do here.
@@ -223,6 +250,16 @@ export function createKeymapController(initial: Keymap = defaultKeymap): KeymapC
      * second. A command is something you ask for once.
      */
     if (e.repeat) return
+    /*
+     * A key something else has already answered is not ours.
+     *
+     * The folder tree walks its rows with the arrows and calls preventDefault
+     * on them; so does the palette. Those handlers run first — React dispatches
+     * inside the page, this listens on the window — so a handled key arrives
+     * here already marked, and without this the same arrow would move a row in
+     * the bin *and* step the playhead a frame.
+     */
+    if (e.defaultPrevented) return
 
     const key = e.key.toLowerCase()
     // Anything pressed while a chord key is down is what that key was held

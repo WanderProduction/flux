@@ -1428,6 +1428,158 @@ try {
     playback.seek(0);
     await new Promise(r => setTimeout(r, 500));`
 
+  // ── a frame at a time ────────────────────────────
+
+  /*
+   * The arrows, which every editor uses without thinking about them. What is
+   * worth checking is not that they move the playhead but *where they land*:
+   * a step that keeps a fraction of a frame is a playhead that shows the wrong
+   * frame half the time, and it is invisible until someone is matching a cut.
+   */
+  const STEP = `
+    const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+    await importPipeline.importFiles([{ path: ${LONG}, kind: 'video' }], 'link');
+    const long = assets.getAssets().find(a => a.name === 'long_take.mp4');
+    const probed = await assets.ensureProbed(long.id);
+    sequence.clearSequence();
+    sequence.updateSequenceSettings({ frameRate: 24 });
+    sequence.addClip(
+      { assetId: long.id, trackId: 'V1', start: 0, duration: probed.duration });
+    playback.pause();
+    playback.seek(0);
+    await new Promise(r => setTimeout(r, 400));
+    const fps = sequence.getSequence().settings.frameRate;
+    /** The frame the playhead is on, which is what these checks are about. */
+    const frame = () => Math.round(playback.getTime() * fps);
+    window.__press = (key, mods = {}) => {
+      window.dispatchEvent(new KeyboardEvent('keydown',
+        { key, bubbles: true, cancelable: true, ...mods }));
+      window.dispatchEvent(new KeyboardEvent('keyup',
+        { key, bubbles: true, cancelable: true, ...mods }));
+      return new Promise(r => setTimeout(r, 140));
+    };
+  `
+
+  await check('the arrows step a frame, and Shift steps five', async () => {
+    const state = await evaluate(
+      cdp,
+      STEP +
+        `playback.seek(1);
+         await new Promise(r => setTimeout(r, 200));
+         const walk = [frame()];
+         await window.__press('ArrowRight'); walk.push(frame());
+         await window.__press('ArrowRight'); walk.push(frame());
+         await window.__press('ArrowLeft');  walk.push(frame());
+         await window.__press('ArrowRight', { shiftKey: true }); walk.push(frame());
+         await window.__press('ArrowLeft', { shiftKey: true });  walk.push(frame());
+         return { fps, walk, at: walk.map(f => f - walk[0]) };`,
+    )
+    assert.equal(state.fps, 24, 'setup: the sequence should be at 24fps')
+    assert.deepEqual(
+      state.at,
+      [0, 1, 2, 1, 6, 1],
+      'one frame each way, five with Shift, and back where it started',
+    )
+  })
+
+  await check('a step lands on a frame, wherever the playhead was', async () => {
+    /*
+     * Playing, scrubbing and a trim all leave the playhead between two frames.
+     * Forward goes to the next boundary and back to the previous one — not
+     * "add a frame to whatever this is", which would keep the fraction for the
+     * rest of the session, and not "round to the nearest", which would skip a
+     * frame going forward from just past one.
+     */
+    const state = await evaluate(
+      cdp,
+      STEP +
+        `const half = (24 + 0.5) / fps;
+         playback.seek(half);
+         await new Promise(r => setTimeout(r, 200));
+         await window.__press('ArrowRight');
+         const forward = playback.getTime() * fps;
+         playback.seek(half);
+         await new Promise(r => setTimeout(r, 200));
+         await window.__press('ArrowLeft');
+         const back = playback.getTime() * fps;
+         return { forward, back };`,
+    )
+    assert.ok(
+      Math.abs(state.forward - 25) < 1e-6,
+      `forward from halfway through frame 24 should be frame 25, and it is ${state.forward}`,
+    )
+    assert.ok(
+      Math.abs(state.back - 24) < 1e-6,
+      `and back should be frame 24, not 23 — it is ${state.back}`,
+    )
+  })
+
+  await check('a step is a frame of this sequence, not a fixed slice of time', async () => {
+    // Read at the moment of the step rather than cached: the frame rate is a
+    // setting somebody can change while the playhead is sitting still.
+    const state = await evaluate(
+      cdp,
+      STEP +
+        `playback.seek(1);
+         await new Promise(r => setTimeout(r, 200));
+         const from = playback.getTime();
+         await window.__press('ArrowRight');
+         const at24 = playback.getTime() - from;
+         sequence.updateSequenceSettings({ frameRate: 60 });
+         await new Promise(r => setTimeout(r, 250));
+         playback.seek(1);
+         await new Promise(r => setTimeout(r, 150));
+         const then = playback.getTime();
+         await window.__press('ArrowRight');
+         const at60 = playback.getTime() - then;
+         sequence.updateSequenceSettings({ frameRate: 24 });
+         return { at24, at60 };`,
+    )
+    assert.ok(Math.abs(state.at24 - 1 / 24) < 1e-6, `a 24fps frame, and it moved ${state.at24}s`)
+    assert.ok(Math.abs(state.at60 - 1 / 60) < 1e-6, `a 60fps frame, and it moved ${state.at60}s`)
+  })
+
+  await check('stepping stops a transport that is running', async () => {
+    // One frame while sixteen a second are going past is not a request that can
+    // be honoured. The key means "stop, and show me this frame".
+    const state = await evaluate(
+      cdp,
+      STEP +
+        `playback.seek(1);
+         playback.play();
+         await new Promise(r => setTimeout(r, 400));
+         const running = playback.isPlaying();
+         await window.__press('ArrowRight');
+         const after = playback.isPlaying();
+         const at = playback.getTime() * fps;
+         playback.pause();
+         return { running, after, off: Math.abs(at - Math.round(at)) };`,
+    )
+    assert.equal(state.running, true, 'setup: it should have been playing')
+    assert.equal(state.after, false, 'and the step should have stopped it')
+    assert.ok(state.off < 1e-6, `landing on a frame, and it is ${state.off} of one off`)
+  })
+
+  await check('the arrows stop at both ends of the sequence', async () => {
+    const state = await evaluate(
+      cdp,
+      STEP +
+        `playback.seek(0);
+         await new Promise(r => setTimeout(r, 200));
+         await window.__press('ArrowLeft');
+         await window.__press('ArrowLeft', { shiftKey: true });
+         const atStart = playback.getTime();
+         playback.goToEnd();
+         await new Promise(r => setTimeout(r, 200));
+         const end = playback.getTime();
+         await window.__press('ArrowRight');
+         await window.__press('ArrowRight', { shiftKey: true });
+         return { atStart, end, atEnd: playback.getTime() };`,
+    )
+    assert.equal(state.atStart, 0, 'nothing before the start')
+    assert.equal(state.atEnd, state.end, 'and nothing past the end')
+  })
+
   // ── shuttling ─────────────────────────────────────────────────
 
   /*

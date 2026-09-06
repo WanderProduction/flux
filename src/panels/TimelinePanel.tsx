@@ -77,6 +77,7 @@ import {
   type Gap,
   copyClips,
   pasteClips,
+  pasteOnto,
   duplicateClips,
   clipboardCount,
   type TrimEdge,
@@ -296,6 +297,24 @@ export function TimelinePanel() {
    */
   const [autoSelect, setAutoSelect] = useState(() => getView().timeline.autoSelect === true)
   /**
+   * The track the keyboard is aimed at, or null for the whole stack.
+   *
+   * Track targeting, which every NLE has and which is not the same thing as a
+   * selection: a selection is clips, this is a *place*. It answers the question
+   * every keyboard gesture has to ask and cannot ask a pointer — where does
+   * this go, and what does it apply to.
+   *
+   * One track rather than a set. Premiere targets several at once because its
+   * source monitor inserts a picture and a sound in one gesture; nothing here
+   * does that yet, and one target is a thing you can see at a glance and cycle
+   * through with one key. It is a fact about the sequence on screen rather than
+   * about the project, so it is not written to the view: an id from another
+   * sequence would name a track that is not there.
+   */
+  const [target, setTarget] = useState<string | null>(null)
+  const targetRef = useRef<string | null>(null)
+  targetRef.current = target
+  /**
    * What the pointer is holding, from kernel/tools.ts.
    *
    * The timeline is where three of the tools mean something, so it is the
@@ -334,6 +353,30 @@ export function TimelinePanel() {
   const selectedRef = useRef(selected)
   selectedRef.current = selected
 
+  /**
+   * What the playhead is standing on, and what comes with it.
+   *
+   * The front-most clip, which is the one the Viewer is showing — unless a
+   * track is targeted, in which case it is whatever is on *that* track and
+   * nothing else. Narrowing is the whole point of a target, so the linked
+   * partner is deliberately left behind: taking it would put a clip from
+   * another track into a selection that was asked for by naming one track.
+   *
+   * Shared by the S key and by auto-select-on-pause, because they are the same
+   * question asked by a finger and by the transport, and two answers to it
+   * would drift apart the first time either changed.
+   */
+  const atPlayhead = useCallback((at: number): { front: Clip | null; ids: string[] } => {
+    const under = clipsAtTime(at)
+    const aimed = targetRef.current
+    if (aimed) {
+      const one = under.filter((clip) => clip.trackId === aimed).at(-1) ?? null
+      return { front: one, ids: one ? [one.id] : [] }
+    }
+    const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1) ?? null
+    return { front, ids: front ? withLinked([front.id]) : [] }
+  }, [])
+
   useEffect(
     () =>
       subscribePlayback(() => {
@@ -360,13 +403,12 @@ export function TimelinePanel() {
     wasPlaying.current = playing
     if (!stopped || !autoSelect) return
 
-    const under = clipsAtTime(getTime())
-    const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1)
-    const chosen = new Set(front ? withLinked([front.id]) : [])
+    const { front, ids } = atPlayhead(getTime())
+    const chosen = new Set(ids)
     setSelected(chosen)
     selectedRef.current = chosen
     anchorRef.current = front?.id ?? null
-  }, [playing, autoSelect])
+  }, [playing, autoSelect, atPlayhead])
 
 
   useEffect(() => {
@@ -389,6 +431,20 @@ export function TimelinePanel() {
         const pruned = new Set([...held].filter((id) => alive.has(id)))
         selectedRef.current = pruned
         setSelected(pruned)
+      }
+
+      /*
+       * And the same for the targeted track.
+       *
+       * Switching sequences is what makes this necessary rather than removing a
+       * track: the new sequence has its own tracks, and an id left over from
+       * the last one would aim the keyboard at nothing while the header showed
+       * no target at all.
+       */
+      const aimed = targetRef.current
+      if (aimed && !next.tracks.some((track) => track.id === aimed)) {
+        targetRef.current = null
+        setTarget(null)
       }
     })
   }, [])
@@ -1224,7 +1280,8 @@ export function TimelinePanel() {
    * where every NLE pastes, for the same reason.
    */
   const pasteAtPlayhead = useCallback(() => {
-    const landed = pasteClips(getTime())
+    const aimed = targetRef.current
+    const landed = aimed ? pasteOnto(getTime(), aimed) : pasteClips(getTime())
     if (landed.length === 0) {
       setNotice(clipboardCount() === 0 ? 'Nothing copied yet' : 'No room to paste that here')
       return
@@ -1234,8 +1291,16 @@ export function TimelinePanel() {
     selectedRef.current = made
     const at = Math.min(...landed.map((clip) => clip.start))
     const slid = at > getTime() + 1e-6
+    /*
+     * A pair aimed at a track its other half cannot reach lands where both
+     * halves fit — see pasteOnto. Saying so is the difference between a rule
+     * and a mystery: the clips are visibly not where they were asked for.
+     */
+    const missed = aimed !== null && !landed.some((clip) => clip.trackId === aimed)
     setNotice(
       `Pasted ${landed.length} clip${landed.length === 1 ? '' : 's'}` +
+        (aimed && !missed ? ` onto ${aimed}` : '') +
+        (missed ? ` — not on ${aimed}, the other half of the pair had nowhere to go` : '') +
         (slid ? ` — slid to ${at.toFixed(2)}s, past what was already there` : ''),
     )
   }, [])
@@ -1250,8 +1315,8 @@ export function TimelinePanel() {
    */
   const selectAtPlayhead = useCallback(() => {
     const at = getTime()
-    const under = clipsAtTime(at)
-    const front = under.filter((clip) => clip.kind === 'video').at(-1) ?? under.at(-1)
+    const aimed = targetRef.current
+    const { front, ids } = atPlayhead(at)
     if (!front) {
       /*
        * Nothing to stand on, so look for a hole to stand in.
@@ -1259,7 +1324,7 @@ export function TimelinePanel() {
        * The top-most track that has one, because the keyboard has no pointer to
        * say which was meant — and the same order everything else here reads in.
        */
-      const found = gapNear(at)
+      const found = aimed ? gapAt(aimed, at) : gapNear(at)
       setSelected(new Set())
       selectedRef.current = new Set()
       setGap(found)
@@ -1267,19 +1332,20 @@ export function TimelinePanel() {
       setNotice(
         found
           ? `Gap on ${found.trackId}, ${(found.end - found.start).toFixed(2)}s`
-          : 'Nothing under the playhead to select',
+          : aimed
+            ? `Nothing on ${aimed} under the playhead`
+            : 'Nothing under the playhead to select',
       )
       return
     }
-    const together = withLinked([front.id])
-    const already = sameSet(selectedRef.current, together)
-    const chosen = already ? new Set<string>() : new Set(together)
+    const already = sameSet(selectedRef.current, ids)
+    const chosen = already ? new Set<string>() : new Set(ids)
     setSelected(chosen)
     selectedRef.current = chosen
     anchorRef.current = already ? null : front.id
     setGap(null)
     gapRef.current = null
-  }, [])
+  }, [atPlayhead])
 
   /** Cuts every clip the playhead crosses. */
   const cutAtPlayhead = useCallback(() => {
@@ -1506,6 +1572,86 @@ export function TimelinePanel() {
     setNotice(kind === 'audio' ? 'Sound only — the picture is left alone' : 'Picture only — the sound is left alone')
   }, [])
 
+  /** Aims the keyboard at a track, or at nothing. */
+  const aimAt = useCallback((next: string | null) => {
+    targetRef.current = next
+    setTarget(next)
+    setNotice(
+      next
+        ? `${next} targeted — paste, S and Alt M/O/V go here`
+        : 'No track targeted — the whole stack again',
+    )
+  }, [])
+
+  /**
+   * Clicking a track's name aims at it; clicking it again lets go.
+   *
+   * The same toggle a clip has, and for the same reason: the gesture that picks
+   * a thing up is the gesture that puts it down, or there is a state you can
+   * enter and not leave without finding some other control.
+   */
+  const pickTrack = useCallback(
+    (trackId: string) => aimAt(trackId === targetRef.current ? null : trackId),
+    [aimAt],
+  )
+
+  /**
+   * Walks the target down the stack, or back up it.
+   *
+   * One more stop than there are tracks: `null` is in the ring, so the way out
+   * of targeting is the same key that got you in. A cycle that could only be
+   * left with the mouse would be a keyboard feature with a pointer-shaped hole
+   * in it.
+   */
+  const stepTarget = useCallback(
+    (direction: 1 | -1) => {
+      const tracks = getSequence().tracks
+      if (tracks.length === 0) return
+      const stops: (string | null)[] = [...tracks.map((track) => track.id), null]
+      const at = stops.indexOf(targetRef.current)
+      // Not found means the target named a track that has gone; the ring's
+      // last stop is `null`, so start from there and the next step is the top.
+      const from = at < 0 ? stops.length - 1 : at
+      aimAt(stops[(from + direction + stops.length) % stops.length])
+    },
+    [aimAt],
+  )
+
+  /**
+   * Mutes, solos or hides the targeted track.
+   *
+   * Refuses across kinds rather than doing the nearest thing: a video track has
+   * no level to mute and an audio track has no picture to hide, and a key that
+   * silently did something else would teach the wrong thing about what it does.
+   */
+  const toggleTrackFlag = useCallback((what: 'mute' | 'solo' | 'hidden') => {
+    const track = getSequence().tracks.find((one) => one.id === targetRef.current)
+    if (!track) {
+      setNotice('No track targeted — press Tab, or click a track name')
+      return
+    }
+    if (what === 'hidden') {
+      if (track.kind !== 'video') {
+        setNotice(`${track.name} is an audio track — Alt M mutes it`)
+        return
+      }
+      setTrackHidden(track.id, !track.hidden)
+      setNotice(`${track.name} ${track.hidden ? 'is in the picture again' : 'is out of the picture'}`)
+      return
+    }
+    if (track.kind !== 'audio') {
+      setNotice(`${track.name} is a video track — Alt V takes it out of the picture`)
+      return
+    }
+    if (what === 'mute') {
+      setTrackMuted(track.id, !track.muted)
+      setNotice(`${track.name} ${track.muted ? 'unmuted' : 'muted'}`)
+    } else {
+      setTrackSolo(track.id, !track.solo)
+      setNotice(`${track.name} ${track.solo ? 'unsoloed' : 'soloed'}`)
+    }
+  }, [])
+
   useEffect(() => {
     const handle = commands.registerAll([
       {
@@ -1730,6 +1876,41 @@ export function TimelinePanel() {
         run: toggleLinkSelected,
       },
       {
+        id: 'timeline.targetNext',
+        title: 'Target The Next Track Down',
+        category: 'Timeline',
+        detail: 'Tab — where paste lands and what S selects',
+        run: () => stepTarget(1),
+      },
+      {
+        id: 'timeline.targetPrevious',
+        title: 'Target The Track Above',
+        category: 'Timeline',
+        detail: 'Shift Tab',
+        run: () => stepTarget(-1),
+      },
+      {
+        id: 'timeline.toggleTrackMute',
+        title: 'Mute The Targeted Track',
+        category: 'Timeline',
+        detail: 'Alt M',
+        run: () => toggleTrackFlag('mute'),
+      },
+      {
+        id: 'timeline.toggleTrackSolo',
+        title: 'Solo The Targeted Track',
+        category: 'Timeline',
+        detail: 'Alt O',
+        run: () => toggleTrackFlag('solo'),
+      },
+      {
+        id: 'timeline.toggleTrackVisible',
+        title: 'Hide The Targeted Track',
+        category: 'Timeline',
+        detail: 'Alt V — video tracks have an eye, audio tracks have a mute',
+        run: () => toggleTrackFlag('hidden'),
+      },
+      {
         id: 'timeline.deleteSelected',
         title: 'Delete Selected Clips',
         category: 'Timeline',
@@ -1757,6 +1938,8 @@ export function TimelinePanel() {
     selectAtPlayhead,
     nudge,
     toggleHalf,
+    stepTarget,
+    toggleTrackFlag,
     selected.size,
     zoomBy,
   ])
@@ -1843,11 +2026,29 @@ export function TimelinePanel() {
           <div className="tl-header-list" ref={headersRef}>
             {sequence.tracks.map((track) => (
               <div
-                className={`tl-header tl-header--${track.kind}`}
+                className={
+                  `tl-header tl-header--${track.kind}` +
+                  (track.id === target ? ' tl-header--target' : '')
+                }
                 key={track.id}
                 style={{ height: TRACK_HEIGHT }}
               >
-                <span className="track-name">{track.name}</span>
+                {/* The name is the button. A separate target control would be a
+                    fourth thing in a header 118px wide, and the name is what a
+                    hand reaches for when it means "this track". */}
+                <button
+                  className="track-name"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => pickTrack(track.id)}
+                  title={
+                    track.id === target
+                      ? `${track.name} is targeted — click to let go`
+                      : `Target ${track.name}: paste lands here, S selects here, Alt M/O/V act here`
+                  }
+                  aria-pressed={track.id === target}
+                >
+                  {track.name}
+                </button>
                 {track.kind === 'audio' ? (
                   <TrackControls track={track} silent={!isTrackAudible(track, sequence.tracks)} />
                 ) : (
@@ -1890,7 +2091,10 @@ export function TimelinePanel() {
 
             {sequence.tracks.map((track) => (
               <div
-                className={`tl-lane tl-lane--${track.kind}`}
+                className={
+                  `tl-lane tl-lane--${track.kind}` +
+                  (track.id === target ? ' tl-lane--target' : '')
+                }
                 key={track.id}
                 style={{ height: TRACK_HEIGHT }}
                 onDragOver={(e) => onDragOver(e, track)}

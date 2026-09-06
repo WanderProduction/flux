@@ -38,7 +38,7 @@
  * stretch) the wall clock takes over, because time still has to pass there.
  */
 
-import { sequenceDuration, subscribeSequence } from './sequence'
+import { getSequence, sequenceDuration, subscribeSequence } from './sequence'
 
 /**
  * Something that is playing media and can say where it is, in sequence
@@ -325,6 +325,45 @@ export function seek(seconds: number): void {
   // however long the drag took.
   lastTick = performance.now()
   emit()
+}
+
+/**
+ * Moves the playhead a whole number of frames.
+ *
+ * The unit is the sequence's frame, not a fixed number of milliseconds: a frame
+ * is what an edit is measured in, and "one frame later" has to mean the same
+ * thing at 24fps as it does at 60. Read from the sequence at the moment of the
+ * step rather than cached, because the frame rate is a setting somebody can
+ * change while the playhead is sitting still.
+ *
+ * It lands on a frame boundary from wherever it starts — the *next* one in the
+ * direction of travel, then the rest of the step. Playing, scrubbing and a trim
+ * can all leave the playhead between two frames, and adding exactly one frame
+ * to that would carry the fraction along for ever; rounding to the nearest
+ * would make a step forward from just past a frame skip one. "Next frame" means
+ * the next boundary, which is both what the words say and what is symmetric:
+ * forward then back is where you started.
+ *
+ * Stepping stops the transport. Asking for one frame while sixteen a second are
+ * going past is not a request that can be honoured, and every NLE answers it
+ * the same way: the key means "stop, and show me this frame".
+ */
+export function stepFrames(frames: number): void {
+  const fps = getSequence().settings.frameRate
+  if (!Number.isFinite(fps) || fps <= 0 || frames === 0) return
+  if (playing) pause()
+  /*
+   * A hair of tolerance, in frames.
+   *
+   * A playhead put at frame 24 by dividing and multiplying is not always
+   * exactly 24, and without this a step forward from a boundary the arithmetic
+   * left at 23.9999999 would go to 24 rather than 25 — a key that does nothing
+   * once in a while, which is worse than one that never works.
+   */
+  const EPS = 1e-6
+  const at = time * fps
+  const boundary = frames > 0 ? Math.floor(at + EPS) : Math.ceil(at - EPS)
+  seek((boundary + frames) / fps)
 }
 
 export function goToStart(): void {

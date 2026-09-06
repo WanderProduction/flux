@@ -1119,6 +1119,35 @@ export function pasteClips(at: number, trackShift = 0): Clip[] {
 }
 
 /**
+ * Puts the clipboard down on a chosen track.
+ *
+ * The shift is measured from the copied clip that *matches the target's kind*
+ * and sits highest in the stack — so pasting onto A2 lines the topmost copied
+ * sound up with A2, and anything else in the clipboard moves by the same
+ * amount. One shift for the whole set, because a picture and its sound that
+ * landed on different offsets would be a paste that arrived out of sync.
+ *
+ * That shift is then clamped by `placeCopies`, per band, exactly as a move is.
+ * A pair targeted at a track its other half cannot follow lands where both
+ * halves can — the caller compares the result against what it asked for and
+ * says so, which is the only honest thing to do with a request that cannot be
+ * met in full.
+ */
+export function pasteOnto(at: number, trackId: string): Clip[] {
+  const target = sequence.tracks.findIndex((track) => track.id === trackId)
+  if (target < 0) return placeCopies(clipboard.clips, at, 0)
+
+  const kind = sequence.tracks[target].kind
+  const index = (id: string) => sequence.tracks.findIndex((track) => track.id === id)
+  const lead = clipboard.clips
+    .filter((clip) => clip.kind === kind && index(clip.trackId) >= 0)
+    .sort((p, q) => index(p.trackId) - index(q.trackId))[0]
+  // Nothing of that kind copied, or its track has since gone: there is no
+  // distance to measure, so the paste falls back to where it came from.
+  return placeCopies(clipboard.clips, at, lead ? target - index(lead.trackId) : 0)
+}
+
+/**
  * Copies clips where they are dragged to, leaving the originals behind.
  *
  * Deliberately not routed through the clipboard: `Alt`-dragging something must

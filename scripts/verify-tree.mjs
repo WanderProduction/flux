@@ -599,6 +599,70 @@ try {
     assert.ok(result.folder?.includes('tree-icon--folder'), `folder icon was ${result.folder}`)
   })
 
+  await check('an arrow the tree has answered does not also step the playhead', async () => {
+    /*
+     * The bare arrows step the playhead a frame at a time, which is what they
+     * do in every NLE — and the tree walks its rows with the same four keys.
+     * Both listen: the tree on the focused row, the keymap on the window. So
+     * without a rule, one press does both, and arrowing down the bin quietly
+     * drags the playhead through the sequence.
+     *
+     * The rule is that a key something else has already answered is not ours,
+     * which is why this dispatches a *cancelable* event: preventDefault on one
+     * that is not cancelable does nothing at all, and the check would then pass
+     * against a build with no guard in it.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { importPipeline, importMode, assets, sequence, playback } = window.__fluxDev;
+       importMode.setImportMode('link');
+       await importPipeline.importFiles([{ path: ${dir} + '\\\\clipA.mp4', kind: 'video' }]);
+       const one = assets.getAssets().find(a => a.name === 'clipA.mp4');
+       const probed = await assets.ensureProbed(one.id);
+       sequence.clearSequence();
+       sequence.addClip(
+         { assetId: one.id, trackId: 'V1', start: 0, duration: probed.duration });
+       playback.pause();
+       playback.seek(1);
+       await new Promise(r => setTimeout(r, 300));
+
+       const t = window.__tree;
+       await t.openChain('${PC}', ['${C_ROOT}']);
+       const row = t.byPath('${PC}', '${C_ROOT}');
+       row.focus();
+       const focused = document.activeElement === row;
+       const before = playback.getTime();
+       row.dispatchEvent(new KeyboardEvent('keydown',
+         { key: 'ArrowRight', bubbles: true, cancelable: true }));
+       window.dispatchEvent(new KeyboardEvent('keyup',
+         { key: 'ArrowRight', bubbles: true, cancelable: true }));
+       await new Promise(r => setTimeout(r, 400));
+       const after = playback.getTime();
+
+       /*
+        * And the same key with nothing in its way still steps.
+        *
+        * Without this half, a keymap that had simply stopped listening to the
+        * arrows would pass — the check would be measuring an absence and
+        * calling it a rule.
+        */
+       window.dispatchEvent(new KeyboardEvent('keydown',
+         { key: 'ArrowRight', bubbles: true, cancelable: true }));
+       window.dispatchEvent(new KeyboardEvent('keyup',
+         { key: 'ArrowRight', bubbles: true, cancelable: true }));
+       await new Promise(r => setTimeout(r, 300));
+       const stepped = playback.getTime();
+       sequence.clearSequence();
+       return { focused, before, after, stepped };`,
+    )
+    assert.equal(state.focused, true, 'setup: the row should have taken focus')
+    assert.equal(state.after, state.before, 'the tree answered the arrow, so the playhead stayed')
+    assert.ok(
+      state.stepped > state.after,
+      `and the same key with nothing in the way still steps — ${state.after} to ${state.stepped}`,
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
