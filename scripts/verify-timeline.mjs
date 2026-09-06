@@ -4312,6 +4312,207 @@ try {
     )
   })
 
+  // ── undo, and taking it back ──────────────────────────────────
+
+  /*
+   * Snapshots rather than inverse operations: an inverse for every edit is a
+   * second implementation of every edit, and it is the one nobody exercises.
+   * What has to be checked is that the snapshots are taken at the *right
+   * moments* — one per thing a person would call a change.
+   */
+  await check('ctrl+z steps back through the edit, and ctrl+shift+z forward again', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        // The *last* clip, which has open timeline after it. Moving the
+        // first one by a second lands it against its neighbour and back where
+        // it started, which is a move that does nothing to undo.
+        `const last = sequence.getSequence().clips.find(c => c.start === 7);
+         sequence.moveClips([last.id], 1, 0);
+         await new Promise(r => setTimeout(r, 250));
+         sequence.removeClips([sequence.getSequence().clips.find(c => c.start === 4).id]);
+         await new Promise(r => setTimeout(r, 250));
+         const edited = window.__where();
+
+         window.__key('z', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const back = window.__where();
+         window.__key('z', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const backAgain = window.__where();
+         window.__key('z', { ctrlKey: true, shiftKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const forward = window.__where();
+         return { edited, back, backAgain, forward,
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.deepEqual(state.edited, ['A1@0+12', 'V1@0+4', 'V1@8+4'], 'setup: moved, then deleted')
+    assert.deepEqual(
+      state.back,
+      ['A1@0+12', 'V1@0+4', 'V1@4+3', 'V1@8+4'],
+      'one step back brings the deleted clip back',
+    )
+    assert.deepEqual(
+      state.backAgain,
+      ['A1@0+12', 'V1@0+4', 'V1@4+3', 'V1@7+4'],
+      'and another undoes the move',
+    )
+    assert.deepEqual(state.forward, state.back, 'redo puts the move back')
+    assert.ok(state.notice?.includes('Redone'), state.notice)
+  })
+
+  await check('a fader dragged along is one step, not fifty', async () => {
+    /*
+     * A gain emits on every pointer move. Fifty undo steps for one gesture is
+     * an undo nobody can use, so changes that arrive together and change no
+     * *structure* are merged into one.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const before = sequence.historyDepth().past;
+         for (let i = 0; i < 20; i++) {
+           sequence.setTrackGain('A1', -i / 4);
+           await new Promise(r => setTimeout(r, 8));
+         }
+         await new Promise(r => setTimeout(r, 350));
+         const after = sequence.historyDepth().past;
+         window.__key('z', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return { steps: after - before,
+                  gain: sequence.getSequence().tracks.find(t => t.id === 'A1').gain };`,
+    )
+    assert.equal(state.steps, 1, `the drag became ${state.steps} steps`)
+    assert.equal(state.gain, 0, 'and one undo puts the whole drag back')
+  })
+
+  await check('changes that add or remove never merge, however fast', async () => {
+    /*
+     * The other half of the merging rule, and the one that keeps it honest:
+     * time alone would fold a delete into a move that happened a tenth of a
+     * second earlier. Structure always gets its own step.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const before = sequence.historyDepth().past;
+         const last = sequence.getSequence().clips.find(c => c.start === 7);
+         sequence.moveClips([last.id], 1, 0);
+         sequence.removeClips([sequence.getSequence().clips.find(c => c.start === 4).id]);
+         await new Promise(r => setTimeout(r, 300));
+         return sequence.historyDepth().past - before;`,
+    )
+    assert.equal(state, 2, `two edits in one tick became ${state} steps`)
+  })
+
+  await check('editing after an undo throws away what was undone', async () => {
+    // Keeping it would mean a redo that jumps to a version of the sequence
+    // nobody was looking at.
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const last = sequence.getSequence().clips.find(c => c.start === 7);
+         sequence.moveClips([last.id], 1, 0);
+         await new Promise(r => setTimeout(r, 250));
+         window.__key('z', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         const undone = sequence.historyDepth();
+         sequence.moveClips([sequence.getSequence().clips.find(c => c.start === 7).id], 2, 0);
+         await new Promise(r => setTimeout(r, 250));
+         const afterEdit = sequence.historyDepth();
+         window.__key('z', { ctrlKey: true, shiftKey: true });
+         await new Promise(r => setTimeout(r, 250));
+         return { undone, afterEdit, where: window.__where(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.undone.future, 1, 'setup: there was something to redo')
+    assert.equal(state.afterEdit.future, 0, 'and editing threw it away')
+    assert.ok(state.notice?.includes('Nothing to redo'), state.notice)
+  })
+
+  await check('undoing past the beginning says so', async () => {
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `// Until it runs out, and then once more — the number of steps behind
+         // a seed is not something this check should have to know.
+         for (let i = 0; i < 40 && sequence.canUndo(); i++) {
+           window.__key('z', { ctrlKey: true });
+           await new Promise(r => setTimeout(r, 120));
+         }
+         window.__key('z', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 200));
+         return { depth: sequence.historyDepth(),
+                  notice: document.querySelector('.tl-notice')?.textContent ?? null };`,
+    )
+    assert.equal(state.depth.past, 0, 'everything should have been undone')
+    assert.ok(state.notice?.includes('Nothing left to undo'), state.notice)
+  })
+
+  await check('the selection lets go of clips an undo took away', async () => {
+    /*
+     * Undo can remove a clip that is still held. A selection pointing at
+     * something that no longer exists makes Delete and every other command
+     * quietly do nothing, which is the worst way for this to fail.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const other = assets.getAssets().find(x => x.name === 'clipA.mp4');
+         const po = await assets.ensureProbed(other.id);
+         sequence.addClip({ assetId: other.id, trackId: 'V2', start: 0, duration: po.duration });
+         await new Promise(r => setTimeout(r, 300));
+         await window.__pressClip('V2');
+         /*
+          * Counted from the toolbar, not from the clips on screen.
+          *
+          * A clip that has been undone away has no element, so nothing can be
+          * drawn as selected whether the selection still holds its id or not —
+          * the DOM cannot show this failure. The Delete button is rendered from
+          * the selection itself, and says "Delete 1" over an empty timeline
+          * when the ghost is still there.
+          */
+         const count = () => {
+           const button = [...document.querySelectorAll('.cb-btn')]
+             .find(b => b.textContent.trim().startsWith('Delete'));
+           return button ? Number(button.textContent.trim().split(' ')[1]) : 0;
+         };
+         const held = count();
+         window.__key('z', { ctrlKey: true });
+         await new Promise(r => setTimeout(r, 300));
+         return { held, after: count(), onScreen: window.__picked(),
+                  clips: sequence.getSequence().clips.filter(c => c.trackId === 'V2').length };`,
+    )
+    assert.equal(state.held, 1, 'setup: the new clip should be held')
+    assert.equal(state.clips, 0, 'and undoing should have taken it away')
+    assert.equal(state.after, 0, 'so the selection lets go of it too')
+    assert.deepEqual(state.onScreen, [], 'and nothing is drawn as selected')
+  })
+
+  await check('backspace deletes and leaves the hole', async () => {
+    // The same command Delete runs. Ripple is Shift W, and it should stay a
+    // decision rather than a near-miss on the keyboard.
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         playback.seek(5);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         const held = window.__picked();
+         window.__key('Backspace');
+         await new Promise(r => setTimeout(r, 300));
+         return { held, where: window.__where() };`,
+    )
+    assert.deepEqual(state.held, ['V1:shot_B.mp4'], 'setup: the middle clip is held')
+    assert.deepEqual(
+      state.where,
+      ['A1@0+12', 'V1@0+4', 'V1@7+4'],
+      'the clip goes and nothing else moves — the hole stays',
+    )
+  })
+
   await check('a linked pair survives a save and a reload', async () => {
     // The promise the project format makes: everything on the timeline comes
     // back. A pair that reloads as two unrelated clips would still look right

@@ -22,6 +22,17 @@ export const defaultKeymap: Keymap = {
   'ctrl+alt+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
   delete: 'timeline.deleteSelected',
+  // Backspace deletes the way Delete does: the clip goes, the hole stays.
+  // Ripple is Shift W, and it should stay a decision rather than a near-miss.
+  backspace: 'timeline.deleteSelected',
+  'ctrl+z': 'timeline.undo',
+  'ctrl+shift+z': 'timeline.redo',
+  /*
+   * The shuttle, on the keys either side of S — the same pair as the cut
+   * navigation above them, which is why those took Shift.
+   */
+  a: 'playback.shuttleBack',
+  d: 'playback.shuttleForward',
   // Ctrl and the transport key: the picture and its sound are one thing to the
   // hand until this says otherwise.
   // Ctrl and the key that means "the other one of these": the picture and its

@@ -1,5 +1,6 @@
 import { getAsset } from '../assets'
 import {
+  getRate,
   getSeekToken,
   getTime,
   isPlaying,
@@ -510,7 +511,16 @@ export function connectMixer(): () => void {
   const stopSequence = subscribeSequence(applyTrackLevels)
 
   const stopPlayback = subscribePlayback(() => {
-    const playing = isPlaying()
+    /*
+     * A shuttle is silent.
+     *
+     * The mixer schedules real buffers at real moments on a device that runs at
+     * one speed forwards; four times or backwards is not something it can play,
+     * and pretending otherwise would put the sound somewhere the picture is
+     * not. So anything but 1x counts as stopped here, and the sound comes back
+     * when the transport does.
+     */
+    const playing = isPlaying() && getRate() === 1
     const token = getSeekToken()
 
     if (playing && !wasPlaying) startMix(getTime())

@@ -119,6 +119,69 @@ export function getSeekToken(): number {
 }
 
 /**
+ * The rungs a shuttle steps between.
+ *
+ * Doubling each time and stopping at sixteen, which is the ladder every deck
+ * and every NLE has used since tape: fast enough to cross a long take, slow
+ * enough that sixteen times is still a picture rather than a strobe.
+ */
+export const SHUTTLE_RATES = [-16, -8, -4, -2, -1, 1, 2, 4, 8, 16] as const
+
+let rate = 1
+
+export function getRate(): number {
+  return rate
+}
+
+/**
+ * Steps the shuttle one rung in a direction, and starts if it was stopped.
+ *
+ * Pressing the other way lands on the *first rung* of that direction rather
+ * than the mirror of where it was: running forward at sixteen and reaching for
+ * rewind means "stop going that way", not "go back just as fast". Every deck
+ * behaves like this, and it is the only reading that lets a hand slow down
+ * without watching the number.
+ *
+ * @returns the rate it landed on.
+ */
+export function shuttle(direction: 1 | -1): number {
+  const from = playing ? rate : 0
+  let next: number
+  if (from === 0) next = direction
+  else if (Math.sign(from) !== direction) next = direction
+  else {
+    const rungs = SHUTTLE_RATES.filter((one) => Math.sign(one) === direction)
+    const ordered = direction === 1 ? [...rungs] : [...rungs].reverse()
+    const at = ordered.indexOf(from as (typeof SHUTTLE_RATES)[number])
+    next = ordered[Math.min(at + 1, ordered.length - 1)]
+  }
+
+  setRate(next)
+  if (!playing) play()
+  return next
+}
+
+/**
+ * Sets the rate the playhead runs at.
+ *
+ * Anything but 1x is a *shuttle*, and a shuttle runs on the wall clock: the
+ * mixer schedules real buffers at real moments and cannot play them backwards
+ * or at four times, so it stops and the picture scrubs on its own. Sound while
+ * shuttling is a feature that needs a resampler, and pretending to have one by
+ * letting the mixer keep the clock would drag the playhead back to 1x while the
+ * picture claimed otherwise.
+ */
+export function setRate(next: number): void {
+  const wanted = Math.max(-16, Math.min(16, next))
+  if (wanted === rate) return
+  rate = wanted
+  // The baseline moves with it, or the first tick charges the new rate for time
+  // that passed at the old one.
+  lastTick = performance.now()
+  emit()
+}
+
+/**
  * Hands the clock to whatever is playing, or takes it back with null.
  *
  * Named rather than a single slot, because there are two things that can be
@@ -151,22 +214,48 @@ function tick(now: number) {
   if (!playing) return
   lastFrame = performance.now()
 
-  const said = reported()
   const elapsed = (now - lastTick) / 1000
   lastTick = now
 
   const end = sequenceDuration()
-  // The source's own position when it has one, and only otherwise the wall
-  // clock. Reading rather than accumulating is what makes a throttled animation
-  // frame cost smoothness instead of accuracy.
-  const next = said ?? time + elapsed
+  /*
+   * The source's own position when it has one, and only otherwise the wall
+   * clock. Reading rather than accumulating is what makes a throttled animation
+   * frame cost smoothness instead of accuracy.
+   *
+   * A shuttle has no source to ask: nothing is playing the sequence's audio at
+   * four times or backwards, so the wall clock is the only clock there is.
+   */
+  const said = rate === 1 ? reported() : null
+  const next = said ?? time + elapsed * rate
 
-  if (next >= end) {
+  if (next <= 0 && rate < 0) {
+    // Reached the start going backwards. Park there and stop, which is what the
+    // other end of the sequence does going forwards.
+    time = 0
+    playing = false
+    rate = 1
+    stopLoop()
+    emit()
+    return
+  }
+
+  /*
+   * The far end, and only when travelling towards it.
+   *
+   * `>=` is what makes a forward run park exactly on the last frame — and it
+   * is also true on the *first* backwards tick from the end, where no time has
+   * passed yet and `next` still equals `end`. Without the direction, a shuttle
+   * back pressed at the end of the sequence stopped on its first frame and
+   * looked like a key that did nothing.
+   */
+  if (rate > 0 && next >= end) {
     // Park exactly on the last frame rather than running past it into empty
     // space: the picture stays on screen, which is what "the clip finished"
     // should look like.
     time = end
     playing = false
+    rate = 1
     stopLoop()
     emit()
     return
@@ -193,9 +282,15 @@ function guard() {
 export function play(): void {
   const end = sequenceDuration()
   if (playing || end <= 0) return
-  // Pressing play at the end restarts rather than doing nothing, which is what
-  // every player does and what the finger expects.
-  if (time >= end) time = 0
+  /*
+   * Pressing play at the end restarts rather than doing nothing, which is what
+   * every player does and what the finger expects — and backwards, the end is
+   * where it restarts *from*. Without the second line, a shuttle back pressed
+   * at the end of the sequence jumps to zero and stops on its first tick,
+   * which looks exactly like the key doing nothing.
+   */
+  if (rate > 0 && time >= end) time = 0
+  if (rate < 0 && time <= 0) time = end
   playing = true
   lastTick = performance.now()
   lastFrame = performance.now()
@@ -207,6 +302,9 @@ export function play(): void {
 export function pause(): void {
   if (!playing) return
   playing = false
+  // A stopped transport is a 1x transport: the ladder starts from the bottom
+  // next time, which is what a hand that has just stopped expects.
+  rate = 1
   stopLoop()
   emit()
 }
@@ -240,6 +338,7 @@ export function goToEnd(): void {
 /** Drops the transport, without touching the sequence. Used when a project closes. */
 export function resetPlayback(): void {
   playing = false
+  rate = 1
   stopLoop()
   time = 0
   seekToken += 1

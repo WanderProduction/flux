@@ -18,6 +18,8 @@ import { importFiles } from '../kernel/importPipeline'
 import { importSequenceFile } from '../kernel/project'
 import {
   formatTimecode,
+  getRate,
+  shuttle,
   getTime,
   isPlaying,
   seek,
@@ -62,6 +64,8 @@ import {
   allowedStretch,
   stretchClips,
   rippleDeleteClips,
+  undo,
+  redo,
   trimToTime,
   clipNextTo,
   type Step,
@@ -259,6 +263,7 @@ export function TimelinePanel() {
   const [preview, setPreview] = useState<DropPreview | null>(null)
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
+  const [rate, setRate] = useState(getRate)
   const [drag, setDrag] = useState<ClipDrag | null>(null)
   const [trim, setTrim] = useState<ClipTrim | null>(null)
   /**
@@ -334,6 +339,7 @@ export function TimelinePanel() {
       subscribePlayback(() => {
         setTime(getTime())
         setPlaying(isPlaying())
+        setRate(getRate())
       }),
     [],
   )
@@ -365,7 +371,26 @@ export function TimelinePanel() {
 
   useEffect(() => {
     setSequence({ ...getSequence() })
-    return subscribeSequence(() => setSequence({ ...getSequence() }))
+    return subscribeSequence(() => {
+      const next = getSequence()
+      setSequence({ ...next })
+
+      /*
+       * Anything selected that no longer exists is let go of.
+       *
+       * Undo is what makes this necessary — it can take away clips that are
+       * still held, and a selection pointing at them would make Delete and
+       * every other command quietly do nothing. Cheap, and it is the same
+       * pruning that a removal from anywhere else needs.
+       */
+      const alive = new Set(next.clips.map((clip) => clip.id))
+      const held = selectedRef.current
+      if ([...held].some((id) => !alive.has(id))) {
+        const pruned = new Set([...held].filter((id) => alive.has(id)))
+        selectedRef.current = pruned
+        setSelected(pruned)
+      }
+    })
   }, [])
 
   useEffect(() => subscribeAssets(() => setAssets([...getAssets()])), [])
@@ -1369,6 +1394,22 @@ export function TimelinePanel() {
     setNotice(null)
   }, [])
 
+  /**
+   * A step back, and a step forward again.
+   *
+   * The selection is left to the pruning below rather than restored with the
+   * clips: what was selected is not part of the edit, and an undo that also
+   * moved the selection would be answering a question nobody asked.
+   */
+  const stepHistory = useCallback((direction: 'undo' | 'redo') => {
+    const moved = direction === 'undo' ? undo() : redo()
+    if (!moved) {
+      setNotice(direction === 'undo' ? 'Nothing left to undo' : 'Nothing to redo')
+      return
+    }
+    setNotice(direction === 'undo' ? 'Undone' : 'Redone')
+  }, [])
+
   /** Sends the playhead to the nearest edge in a direction. */
   const toEdge = useCallback((direction: 'previous' | 'next') => {
     const at = getTime()
@@ -1503,6 +1544,48 @@ export function TimelinePanel() {
         detail: 'Puts the copied clips down at the playhead',
         enabled: () => clipboardCount() > 0,
         run: pasteAtPlayhead,
+      },
+      {
+        id: 'timeline.undo',
+        title: 'Undo',
+        category: 'Timeline',
+        /*
+         * Deliberately not `enabled`.
+         *
+         * A disabled command is skipped by the keymap before it runs, so the
+         * key would do nothing *and say nothing* at the end of the history —
+         * and "did that key work?" is exactly the question undo must never
+         * leave you asking. It answers instead.
+         */
+        detail: 'Steps back through the edit',
+        run: () => stepHistory('undo'),
+      },
+      {
+        id: 'timeline.redo',
+        title: 'Redo',
+        category: 'Timeline',
+        detail: 'Steps forward again',
+        run: () => stepHistory('redo'),
+      },
+      {
+        id: 'playback.shuttleForward',
+        title: 'Shuttle Forward',
+        category: 'Playback',
+        detail: 'Play, then faster: 2x, 4x, 8x, 16x',
+        run: () => {
+          const at = shuttle(1)
+          setNotice(at === 1 ? null : `Forward ${at}x — silent while shuttling`)
+        },
+      },
+      {
+        id: 'playback.shuttleBack',
+        title: 'Shuttle Backwards',
+        category: 'Playback',
+        detail: 'Play backwards, then faster: 2x, 4x, 8x, 16x',
+        run: () => {
+          const at = shuttle(-1)
+          setNotice(`Back ${Math.abs(at)}x — silent while shuttling`)
+        },
       },
       {
         id: 'timeline.trimHeadToPlayhead',
@@ -1664,6 +1747,7 @@ export function TimelinePanel() {
     copySelected,
     pasteAtPlayhead,
     cutAtPlayhead,
+    stepHistory,
     trimToPlayhead,
     stepSelection,
     rippleDelete,
@@ -1701,6 +1785,11 @@ export function TimelinePanel() {
           <span className="tool-value tool-value--mono">
             {formatTimecode(time, sequence.settings.frameRate)}
           </span>
+          {playing && rate !== 1 && (
+            <span className="tool-value tool-value--shuttle" title="Shuttling — no sound">
+              {rate > 0 ? `▶▶ ${rate}×` : `◀◀ ${Math.abs(rate)}×`}
+            </span>
+          )}
           <span className="cb-toolbar-end">
             <button
               className={`cb-btn${snapping ? ' cb-btn--on' : ''}`}

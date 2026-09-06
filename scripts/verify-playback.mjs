@@ -1428,6 +1428,244 @@ try {
     playback.seek(0);
     await new Promise(r => setTimeout(r, 500));`
 
+  // ── shuttling ─────────────────────────────────────────────────
+
+  /*
+   * D and A run the transport faster and backwards, a rung at a time. The
+   * ladder is the one every deck has used since tape, and the checks below are
+   * about the three things that are easy to get wrong: where the rungs are,
+   * what happens at the ends, and what the sound does.
+   */
+  const SHUTTLE = `
+    const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+    await importPipeline.importFiles([{ path: ${VOICE}, kind: 'video' }], 'link');
+    const voice = assets.getAssets().find(a => a.name === 'voice_over.mp4');
+    const probed = await assets.ensureProbed(voice.id);
+    sequence.clearSequence();
+    sequence.addLinkedClips(
+      { assetId: voice.id, trackId: 'V1', start: 0, duration: probed.duration }, true);
+    playback.pause();
+    playback.seek(0);
+    await new Promise(r => setTimeout(r, 400));
+    window.__press = (key, mods = {}) => {
+      window.dispatchEvent(new KeyboardEvent('keydown',
+        { key, bubbles: true, cancelable: true, ...mods }));
+      window.dispatchEvent(new KeyboardEvent('keyup',
+        { key, bubbles: true, cancelable: true, ...mods }));
+      return new Promise(r => setTimeout(r, 180));
+    };
+  `
+
+  await check('D and A climb the ladder, and stop at sixteen', async () => {
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `/*
+          * A minute of timeline, and the ladder started in the middle of it.
+          *
+          * Climbing covers about eight seconds each way, and reaching either
+          * end parks the transport and puts the rate back to 1x — which is
+          * right, and would turn this into a check that passes or fails
+          * depending on how fast six key events were dispatched.
+          *
+          * Seeking between the two runs is not the way to buy that room: a seek
+          * to the end *stops* a transport running towards it, and the turn then
+          * happens from standstill, where mirroring the rung and taking the
+          * first one look identical. The turn has to happen while it is moving.
+          */
+         const { assets: fixtures, sequence: seq } = window.__fluxDev;
+         await window.__fluxDev.importPipeline.importFiles(
+           [{ path: ${LONG}, kind: 'video' }], 'link');
+         const long = fixtures.getAssets().find(a => a.name === 'long_take.mp4');
+         const longProbed = await fixtures.ensureProbed(long.id);
+         seq.clearSequence();
+         seq.addClip({ assetId: long.id, trackId: 'V1', start: 0, duration: longProbed.duration });
+         playback.seek(25);
+         await new Promise(r => setTimeout(r, 250));
+         const forward = [];
+         for (let i = 0; i < 6; i++) { await window.__press('d'); forward.push(playback.getRate()); }
+         // The first press of the other direction is the first rung that way,
+         // not the mirror of where it was: reaching for rewind at sixteen means
+         // "stop going that way", not "go back just as fast".
+         const back = [];
+         for (let i = 0; i < 6; i++) { await window.__press('a'); back.push(playback.getRate()); }
+         playback.pause();
+         return { forward, back };`,
+    )
+    assert.deepEqual(state.forward, [1, 2, 4, 8, 16, 16], 'up the rungs, and no further')
+    assert.deepEqual(
+      state.back,
+      [-1, -2, -4, -8, -16, -16],
+      'the turn lands on the first rung backwards, and the ladder goes on from there',
+    )
+  })
+
+  await check('a shuttle back from the start restarts from the end', async () => {
+    /*
+     * The mirror of "play at the end restarts from the top", which is what
+     * every player does. Backwards, the end is where there is something to
+     * travel through — starting a reverse run at zero and leaving it there
+     * would be a key that stops the moment it is pressed.
+     */
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `playback.pause();
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 200));
+         await window.__press('a');
+         const rate = playback.getRate();
+         const at = playback.getTime();
+         await new Promise(r => setTimeout(r, 300));
+         const after = playback.getTime();
+         playback.pause();
+         return { rate, at, after, end: window.__fluxDev.sequence.sequenceDuration() };`,
+    )
+    assert.equal(state.rate, -1, 'the shuttle should have started')
+    assert.ok(
+      state.at > state.end - 1,
+      `it should have jumped to the end to have somewhere to run, and it is at ${state.at}`,
+    )
+    assert.ok(state.after < state.at, 'and then travelled back from there')
+  })
+
+  await check('nothing can set a rate off the end of the ladder', async () => {
+    /*
+     * The ladder stops at sixteen, and so does the rate itself — two guards,
+     * because they answer to different callers. `shuttle` is what a key press
+     * reaches; `setRate` is the public one, and anything that can be called
+     * from outside has to hold its own bounds rather than trusting that the
+     * only caller is well behaved.
+     */
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `playback.setRate(100);
+         const high = playback.getRate();
+         playback.setRate(-100);
+         const low = playback.getRate();
+         playback.setRate(1);
+         return { high, low };`,
+    )
+    assert.equal(state.high, 16, 'a rate above the ladder is clamped to its top rung')
+    assert.equal(state.low, -16, 'and below it to the bottom one')
+  })
+
+  await check('a shuttle actually moves the playhead, both ways', async () => {
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `playback.seek(2);
+         await new Promise(r => setTimeout(r, 200));
+         await window.__press('d');
+         await window.__press('d');
+         const from = playback.getTime();
+         await new Promise(r => setTimeout(r, 700));
+         const forward = playback.getTime();
+
+         // Three presses: the turn to -1, then -2, then -4.
+         await window.__press('a');
+         await window.__press('a');
+         await window.__press('a');
+         const rate = playback.getRate();
+         const mark = playback.getTime();
+         await new Promise(r => setTimeout(r, 700));
+         const back = playback.getTime();
+         playback.pause();
+         return { from, forward, rate, mark, back };`,
+    )
+    assert.ok(
+      state.forward - state.from > 0.9,
+      `two times should cover more than a second in 700ms, and it covered ` +
+        `${(state.forward - state.from).toFixed(2)}s`,
+    )
+    assert.equal(state.rate, -4, 'setup: turned round and stepped twice more')
+    assert.ok(
+      state.mark - state.back > 0.9,
+      `and backwards it should travel back, from ${state.mark.toFixed(2)} to ${state.back.toFixed(2)}`,
+    )
+  })
+
+  await check('a shuttle back from the end starts at the end', async () => {
+    /*
+     * Play at the end restarts from the top, which is what every player does —
+     * and backwards, the end is where it restarts *from*. Without that, and
+     * without an end check that knows which way it is going, the first tick
+     * lands exactly on the end and stops: a key that looks like it did nothing.
+     */
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `playback.goToEnd();
+         await new Promise(r => setTimeout(r, 200));
+         const end = playback.getTime();
+         await window.__press('a');
+         const rate = playback.getRate();
+         await new Promise(r => setTimeout(r, 500));
+         const after = playback.getTime();
+         playback.pause();
+         return { end, rate, after, playing: after < end };`,
+    )
+    assert.equal(state.rate, -1, 'the shuttle should have started')
+    assert.ok(state.playing, `it should have travelled back from ${state.end}, and it is at ${state.after}`)
+  })
+
+  await check('reaching either end parks, stops, and comes back to 1x', async () => {
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `playback.seek(1);
+         await new Promise(r => setTimeout(r, 200));
+         /*
+          * Two presses, not four. At -4x this reaches zero *during* the run,
+          * and a further press would then restart it from the far end — which
+          * is the right behaviour and the wrong thing to be measuring here.
+          */
+         await window.__press('a');
+         await window.__press('a');
+         await new Promise(r => setTimeout(r, 900));
+         return { at: playback.getTime(), playing: playback.isPlaying(), rate: playback.getRate() };`,
+    )
+    assert.equal(state.at, 0, 'parked exactly at the start')
+    assert.equal(state.playing, false, 'and stopped there')
+    assert.equal(state.rate, 1, 'with the ladder back at the bottom for next time')
+  })
+
+  await check('a shuttle is silent, and the sound comes back at 1x', async () => {
+    /*
+     * The mixer schedules real buffers at real moments on a device that runs
+     * one speed forwards. Four times or backwards is not something it can play,
+     * so it stops — and letting it keep the clock instead would drag the
+     * playhead back to 1x while the picture claimed otherwise.
+     */
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `const { mixer } = window.__fluxDev;
+         playback.seek(1);
+         await new Promise(r => setTimeout(r, 200));
+         await window.__press('d');
+         await new Promise(r => setTimeout(r, 500));
+         const atOne = { mixing: mixer.mixerTime() !== null, rate: playback.getRate() };
+         await window.__press('d');
+         await new Promise(r => setTimeout(r, 500));
+         const shuttling = { mixing: mixer.mixerTime() !== null, rate: playback.getRate() };
+         playback.pause();
+         await new Promise(r => setTimeout(r, 200));
+         playback.seek(1);
+         playback.play();
+         await new Promise(r => setTimeout(r, 600));
+         const again = { mixing: mixer.mixerTime() !== null, rate: playback.getRate() };
+         playback.pause();
+         return { atOne, shuttling, again };`,
+    )
+    assert.equal(state.atOne.rate, 1, 'setup: one press is ordinary play')
+    assert.equal(state.atOne.mixing, true, 'which has sound')
+    assert.equal(state.shuttling.rate, 2, 'setup: two presses is a shuttle')
+    assert.equal(state.shuttling.mixing, false, 'and a shuttle is silent')
+    assert.equal(state.again.mixing, true, 'and the sound comes back when the transport does')
+  })
+
   await check('the mixer can reach an audio device at all', async () => {
     // Guarded rather than assumed: without one, every check below would fail
     // for a reason that has nothing to do with the mixer.

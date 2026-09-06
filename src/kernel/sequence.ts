@@ -235,7 +235,167 @@ let loaded = false
 const listeners = new Set<() => void>()
 
 /** Notifies only; kernel/project.ts owns writing the document. */
+/**
+ * Undo, from the module that owns what is being undone.
+ *
+ * Snapshots rather than inverse operations. An inverse for every edit is a
+ * second implementation of every edit — and it is the one nobody exercises, so
+ * it is the one that is wrong. A sequence is a few hundred small objects; a
+ * hundred of them is a rounding error next to one decoded frame.
+ *
+ * The whole collection, not the sequence being edited: creating, renaming,
+ * closing and switching sequences are edits too, and an undo that restored a
+ * sequence into a project that had moved on would be worse than no undo.
+ */
+interface Snapshot {
+  active: string
+  order: string[]
+  sequences: SequenceState[]
+  at: number
+  /** The ids and tracks in play, for deciding whether two changes are one. */
+  shape: string
+}
+
+/** Deep enough: clips and tracks are replaced wholesale by every mutator. */
+function takeSnapshot(): Snapshot {
+  const all = listSequences()
+  return {
+    active: sequence.id,
+    order: [...order],
+    sequences: all.map((one) => ({ ...one, tracks: [...one.tracks], clips: [...one.clips] })),
+    at: Date.now(),
+    shape: all
+      .map((one) => `${one.id}:${one.tracks.map((t) => t.id).join(',')}:${one.clips
+        .map((c) => c.id)
+        .join(',')}`)
+      .join('|'),
+  }
+}
+
+function restore(shot: Snapshot): void {
+  others.clear()
+  order = [...shot.order]
+  const byId = new Map(shot.sequences.map((one) => [one.id, one]))
+  sequence = byId.get(shot.active) ?? shot.sequences[0]
+  for (const one of shot.sequences) if (one.id !== sequence.id) others.set(one.id, one)
+  listeners.forEach((listener) => listener())
+}
+
+/** How many steps back it is possible to go. Old ones fall off the bottom. */
+const HISTORY_LIMIT = 200
+
+/**
+ * How close together two changes have to be to count as one.
+ *
+ * A fader dragged across a track emits on every pointer move, and fifty undo
+ * steps for one gesture is an undo nobody can use. Time alone is not enough to
+ * merge on, though — see `shape` below.
+ */
+const COALESCE_MS = 400
+
+let past: Snapshot[] = []
+let future: Snapshot[] = []
+/** What the sequence looked like at the last thing worth undoing. */
+let mark: Snapshot | null = null
+/**
+ * When the last change arrived — not when the last *entry* was pushed.
+ *
+ * The two are different in exactly the case merging exists for. A fader drag
+ * pushes one entry on its first move and then merges the rest into it, so the
+ * pushed entry's timestamp is from *before* the drag and gets older with every
+ * move. Comparing against that, nothing ever merges and one gesture becomes
+ * fifty steps — which is what happened.
+ */
+let lastChangeAt = 0
+/** True while undo or redo is writing, so the write is not recorded as an edit. */
+let rewinding = false
+
+function record() {
+  if (rewinding) return
+  const before = mark
+  mark = takeSnapshot()
+  if (!before) return
+
+  /*
+   * Two changes are one step when they arrive together *and* nothing appeared
+   * or disappeared in between.
+   *
+   * That second half is what keeps this honest: a gain dragged along merges
+   * into one step, but a clip deleted a tenth of a second after another clip
+   * moved does not, because the set of ids changed. Structure always gets its
+   * own step; only values are merged.
+   */
+  const merge =
+    past.length > 0 &&
+    mark.at - lastChangeAt < COALESCE_MS &&
+    before.shape === past[past.length - 1].shape &&
+    before.shape === mark.shape
+  lastChangeAt = mark.at
+  if (!merge) {
+    past.push(before)
+    if (past.length > HISTORY_LIMIT) past.shift()
+  }
+  // Anything done after an undo throws away what was undone. Keeping it would
+  // mean a redo that jumps to a version of the sequence nobody was looking at.
+  future = []
+}
+
+export function canUndo(): boolean {
+  return past.length > 0
+}
+
+export function canRedo(): boolean {
+  return future.length > 0
+}
+
+/** How many steps are held either way. For checks, and for saying so. */
+export function historyDepth(): { past: number; future: number } {
+  return { past: past.length, future: future.length }
+}
+
+export function undo(): boolean {
+  const shot = past.pop()
+  if (!shot) return false
+  future.push(takeSnapshot())
+  rewinding = true
+  try {
+    restore(shot)
+  } finally {
+    rewinding = false
+  }
+  mark = takeSnapshot()
+  return true
+}
+
+export function redo(): boolean {
+  const shot = future.pop()
+  if (!shot) return false
+  past.push(takeSnapshot())
+  rewinding = true
+  try {
+    restore(shot)
+  } finally {
+    rewinding = false
+  }
+  mark = takeSnapshot()
+  return true
+}
+
+/**
+ * Forgets everything, without touching the sequence.
+ *
+ * Called when a project opens or closes: undoing into another project's clips
+ * would restore ids that mean nothing here, which is the same reason the
+ * clipboard is emptied.
+ */
+export function clearHistory(): void {
+  past = []
+  future = []
+  mark = takeSnapshot()
+}
+
 function emit() {
+  record()
   listeners.forEach((listener) => listener())
 }
 
@@ -273,6 +433,8 @@ export function setSequence(next: SequenceState | null): void {
   others.clear()
   order = [sequence.id]
   loaded = true
+  // Loading is not an edit, and there is nothing behind it to go back to.
+  clearHistory()
   listeners.forEach((listener) => listener())
 }
 
@@ -298,6 +460,7 @@ export function setSequences(list: SequenceState[], active?: string): void {
     if (one.id !== sequence.id) others.set(one.id, one)
   }
   loaded = true
+  clearHistory()
   listeners.forEach((listener) => listener())
 }
 
@@ -1999,8 +2162,10 @@ export function resetSequence(): void {
   loaded = false
   // The clipboard goes with it. A clip refers to an asset by an id that means
   // nothing in the next project, so carrying one across would paste a block
-  // pointing at footage that is not there.
+  // pointing at footage that is not there. The history goes for the same
+  // reason: undoing into another project's clips would restore nothing.
   clipboard = { clips: [], count: 0 }
+  clearHistory()
   listeners.forEach((listener) => listener())
 }
 

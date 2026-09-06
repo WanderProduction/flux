@@ -1445,6 +1445,12 @@ kbd {
   color: #ded0ff;
 }
 
+/* The shuttle rate, while it is not one. Warm, because it is a mode. */
+.tool-value--shuttle {
+  color: var(--flux-warn);
+  font-family: var(--flux-font-mono);
+}
+
 .cb-btn {
   padding: 3px 9px;
   border: 1px solid var(--flux-border);
