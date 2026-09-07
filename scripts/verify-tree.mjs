@@ -65,7 +65,11 @@ const HELPERS = String.raw`
       return [...this.sectionOf(title).querySelectorAll('.tree-row')];
     },
     cards() {
-      return [...document.querySelectorAll('.cb-grid .card')].map(c => ({
+      // Media only. Sequences are cards in the same grid — they are things the
+      // project contains too — but every check that calls this is asking about
+      // footage, and folding the two together would make each one quietly
+      // depend on how many sequences the check before it left behind.
+      return [...document.querySelectorAll('.cb-grid .card:not(.card--sequence)')].map(c => ({
         name: c.querySelector('.card-name')?.textContent,
         badge: c.querySelector('.card-badge')?.textContent ?? null,
         missing: c.classList.contains('card--missing'),
@@ -627,6 +631,253 @@ try {
     )
     assert.equal(result.kind, 'video', `card kind was ${result.kind}`)
     assert.ok(result.folder?.includes('tree-icon--folder'), `folder icon was ${result.folder}`)
+  })
+
+  // ── sequences in the bin ───────────────────────
+
+  /*
+   * A sequence is a thing the project contains, so it is in the bin with the
+   * media rather than in a list of its own somewhere else. That second list is
+   * the mistake the synthetic "Assets" node was: two views of the project's
+   * contents that agree only some of the time.
+   */
+  const seedBin = `
+    const { importPipeline, importMode, sequence, commands } = window.__fluxDev;
+    importMode.setImportMode('link');
+    await importPipeline.importFiles([
+      { path: ${dir} + '\\\\clipA.mp4', kind: 'video' },
+      { path: ${dir} + '\\\\shot_B.mp4', kind: 'video' },
+    ]);
+    await commands.run('content.project');
+    /*
+     * One empty sequence, whatever the check before this one left behind.
+     *
+     * These checks make sequences, and a check that counted on starting with a
+     * particular number of them would pass or fail on the order the suite
+     * happened to run in.
+     */
+    for (const one of sequence.listSequences()) {
+      if (one.id !== sequence.getActiveSequenceId()) sequence.removeSequence(one.id);
+    }
+    sequence.renameSequence(sequence.getActiveSequenceId(), 'Sequence 1');
+    sequence.clearSequence();
+    await new Promise(r => setTimeout(r, 600));
+    window.__cards = () => [...document.querySelectorAll('.card')].map(c => ({
+      name: c.querySelector('.card-name')?.textContent,
+      sub: c.querySelector('.card-sub')?.textContent,
+      kind: c.querySelector('.card-kind')?.textContent,
+      time: c.querySelector('.seq-thumb-time')?.textContent ?? null,
+      open: c.classList.contains('card--sequence-open'),
+    }));
+    window.__seqCard = (name) =>
+      [...document.querySelectorAll('.card--sequence')]
+        .find(c => c.querySelector('.card-name')?.textContent === name) ?? null;
+    window.__rightClick = (el) => {
+      const box = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true,
+        clientX: box.left + 10, clientY: box.top + 10,
+      }));
+      return new Promise(r => setTimeout(r, 200));
+    };
+    window.__menu = () =>
+      [...document.querySelectorAll('.ctx-item')].map(b => ({
+        label: b.querySelector('.ctx-label')?.textContent,
+        disabled: b.disabled,
+      }));
+    window.__menuClick = (label) => {
+      const item = [...document.querySelectorAll('.ctx-item')]
+        .find(b => b.querySelector('.ctx-label')?.textContent === label);
+      if (!item) throw new Error('no menu item ' + label + ' in ' +
+        JSON.stringify(window.__menu().map(m => m.label)));
+      item.click();
+      return new Promise(r => setTimeout(r, 400));
+    };
+  `
+
+  await check('a sequence has a card in the bin, and it says what is in it', async () => {
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `const before = window.__cards();
+         const seq = sequence.getSequence();
+         const a = window.__fluxDev.assets.getAssets().find(x => x.name === 'clipA.mp4');
+         const probed = await window.__fluxDev.assets.ensureProbed(a.id);
+         sequence.addClip(
+           { assetId: a.id, trackId: 'V1', start: 0, duration: probed.duration });
+         await new Promise(r => setTimeout(r, 400));
+         return { before, after: window.__cards(), rate: seq.settings.frameRate };`,
+    )
+    const card = state.before.find((one) => one.kind === 'sequence')
+    assert.ok(card, `a sequence card should be in the bin: ${JSON.stringify(state.before)}`)
+    assert.equal(card.name, 'Sequence 1')
+    assert.equal(card.sub, 'empty', 'with nothing in it yet')
+    assert.equal(card.time, null, 'so the thumbnail is black rather than claiming a length')
+    assert.equal(card.open, true, 'and it is the one the Timeline is showing')
+
+    const filled = state.after.find((one) => one.kind === 'sequence')
+    assert.equal(filled.sub, '1 clip', 'once it holds something it says so')
+    assert.ok(
+      /^\d\d:\d\d:\d\d:\d\d$/.test(filled.time ?? ''),
+      `and the thumbnail becomes its length, not a picture: ${filled.time}`,
+    )
+  })
+
+  await check('right-clicking the bin offers a new sequence', async () => {
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `await window.__rightClick(document.querySelector('.cb-grid'));
+         const offered = window.__menu();
+         const before = sequence.listSequences().length;
+         await window.__menuClick('New Sequence');
+         return { offered, before, after: sequence.listSequences().length,
+                  named: sequence.listSequences().map(s => s.name) };`,
+    )
+    assert.deepEqual(
+      state.offered.map((one) => one.label),
+      ['New Sequence', 'New Sequence From 0 Clips', 'Import Media\u2026'],
+      'the menu on empty space',
+    )
+    assert.equal(
+      state.offered[1].disabled,
+      true,
+      'and making one from clips is refused when none are chosen',
+    )
+    assert.equal(state.after, state.before + 1, 'one more sequence')
+    assert.deepEqual(state.named, ['Sequence 1', 'Sequence 2'], 'named in order')
+  })
+
+  await check('Ctrl N makes a sequence from anywhere', async () => {
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `const before = sequence.listSequences().length;
+         window.dispatchEvent(new KeyboardEvent('keydown',
+           { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }));
+         window.dispatchEvent(new KeyboardEvent('keyup',
+           { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }));
+         await new Promise(r => setTimeout(r, 400));
+         return { before, after: sequence.listSequences().length,
+                  active: sequence.getSequence().name };`,
+    )
+    assert.equal(state.after, state.before + 1, 'a new sequence')
+    assert.equal(state.active, 'Sequence 2', 'and it is the one now open')
+  })
+
+  await check('a sequence can be made from the selected clips, end to end', async () => {
+    /*
+     * In the order they are listed rather than the order they were clicked. The
+     * order on screen is the only one that is visible, and a sequence assembled
+     * in click order would look shuffled for no reason anybody could see.
+     */
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `const cards = [...document.querySelectorAll('.card')]
+           .filter(c => !c.classList.contains('card--sequence'));
+         for (const card of cards) { card.click(); await new Promise(r => setTimeout(r, 120)); }
+         await window.__rightClick(document.querySelector('.cb-grid'));
+         const offered = window.__menu().map(one => one.label);
+         await window.__menuClick('New Sequence From 2 Clips');
+         await new Promise(r => setTimeout(r, 900));
+         const made = sequence.getSequence();
+         return {
+           offered,
+           name: made.name,
+           clips: made.clips
+             .filter(c => c.kind === 'video')
+             .sort((p, q) => p.start - q.start)
+             .map(c => Math.round(c.start * 100) / 100),
+           tracks: [...new Set(made.clips.map(c => c.trackId))].sort(),
+         };`,
+    )
+    assert.ok(
+      state.offered.includes('New Sequence From 2 Clips'),
+      `the menu should count the selection: ${JSON.stringify(state.offered)}`,
+    )
+    assert.equal(state.clips.length, 2, 'both clips landed')
+    assert.equal(state.clips[0], 0, 'the first at the start')
+    assert.ok(state.clips[1] > 0, `and the second after it, at ${state.clips[1]}`)
+  })
+
+  await check('double-clicking a sequence card opens it in the Timeline', async () => {
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `sequence.createSequence({ name: 'Second' });
+         await new Promise(r => setTimeout(r, 400));
+         const opened = sequence.getSequence().name;
+         const card = window.__seqCard('Sequence 1');
+         card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+         await new Promise(r => setTimeout(r, 400));
+         return { opened, now: sequence.getSequence().name,
+                  marked: window.__seqCard('Sequence 1')
+                    ?.classList.contains('card--sequence-open') };`,
+    )
+    assert.equal(state.opened, 'Second', 'setup: the new one was open')
+    assert.equal(state.now, 'Sequence 1', 'and double-clicking the card switched to it')
+    assert.equal(state.marked, true, 'the card says which one is open')
+  })
+
+  await check('a sequence card opens its settings, on that sequence', async () => {
+    /*
+     * Opening settings for a sequence that is not on screen activates it first.
+     * Every editing function in kernel/sequence.ts works on the active sequence
+     * deliberately — there is no way to mutate one nobody is looking at — and
+     * settings are not the place to punch the first hole in that.
+     */
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `sequence.createSequence({ name: 'Other' });
+         await new Promise(r => setTimeout(r, 400));
+         const wasOpen = sequence.getSequence().name;
+         await window.__rightClick(window.__seqCard('Sequence 1'));
+         const offered = window.__menu().map(one => one.label);
+         await window.__menuClick('Sequence Settings\u2026');
+         const dialog = document.querySelector('.seq-settings');
+         const titled = dialog?.querySelector('.seq-settings-title')?.textContent ?? null;
+         const nowOpen = sequence.getSequence().name;
+         window.dispatchEvent(new KeyboardEvent('keydown',
+           { key: 'Escape', bubbles: true, cancelable: true }));
+         await new Promise(r => setTimeout(r, 300));
+         return { wasOpen, offered, titled, nowOpen,
+                  closed: !document.querySelector('.seq-settings') };`,
+    )
+    assert.equal(state.wasOpen, 'Other', 'setup: a different sequence was open')
+    assert.deepEqual(
+      state.offered,
+      ['Open in Timeline', 'Sequence Settings\u2026', 'Delete Sequence'],
+      'the menu on a sequence card',
+    )
+    assert.equal(state.nowOpen, 'Sequence 1', 'the sequence being edited is the one on screen')
+    assert.equal(state.titled, 'Sequence 1', 'and the dialog says which')
+    assert.equal(state.closed, true, 'Escape puts it away')
+  })
+
+  await check('the last sequence cannot be deleted from its card', async () => {
+    // A project with no sequence has nowhere to put a clip and nothing for the
+    // Timeline to draw.
+    const state = await evaluate(
+      cdp,
+      seedBin +
+        `await window.__rightClick(window.__seqCard('Sequence 1'));
+         const only = window.__menu().find(one => one.label === 'Delete Sequence');
+         window.dispatchEvent(new KeyboardEvent('keydown',
+           { key: 'Escape', bubbles: true, cancelable: true }));
+         await new Promise(r => setTimeout(r, 200));
+         sequence.createSequence({ name: 'Spare' });
+         await new Promise(r => setTimeout(r, 400));
+         await window.__rightClick(window.__seqCard('Sequence 1'));
+         const withTwo = window.__menu().find(one => one.label === 'Delete Sequence');
+         await window.__menuClick('Delete Sequence');
+         return { only: only?.disabled, withTwo: withTwo?.disabled,
+                  left: sequence.listSequences().map(s => s.name) };`,
+    )
+    assert.equal(state.only, true, 'refused while it is the only one')
+    assert.equal(state.withTwo, false, 'offered once there is another')
+    assert.deepEqual(state.left, ['Spare'], 'and it goes')
   })
 
   await check('an arrow the tree has answered does not also step the playhead', async () => {

@@ -13,7 +13,25 @@ import {
   type MediaKind,
   type Places,
 } from '../kernel/fsBridge'
-import { getAssets, removeAssets, subscribeAssets, type Asset } from '../kernel/assets'
+import {
+  ensureProbed,
+  getAssets,
+  removeAssets,
+  subscribeAssets,
+  type Asset,
+} from '../kernel/assets'
+import {
+  activateSequence,
+  addLinkedClips,
+  createSequence,
+  getActiveSequenceId,
+  getSequence,
+  listSequences,
+  removeSequence,
+  subscribeSequence,
+  type SequenceState,
+} from '../kernel/sequence'
+import { formatTimecode } from '../kernel/playback'
 import { setAssetDragPayload, setFileDragPayload } from '../kernel/dragAssets'
 import { setImportMode } from '../kernel/importMode'
 import { importFiles, type ImportEntry } from '../kernel/importPipeline'
@@ -32,6 +50,8 @@ import { mediaKindOf } from '../../shared/mediaTypes.js'
 import { IMPORTS_DIR, projectChildPath } from '../../shared/projectNaming.js'
 import { PanelFrame } from './PanelFrame'
 import { AssetThumb } from './AssetThumb'
+import { ContextMenu, type MenuItem } from './ContextMenu'
+import { SequenceSettingsDialog } from './SequenceSettingsDialog'
 import { useSound } from './useSound'
 import { TreeView, useDiskTree } from './FolderTree'
 
@@ -84,6 +104,18 @@ export function ContentBrowserPanel() {
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null)
   const [railWidth, setRailWidth] = useState(RAIL_DEFAULT)
   const [pinnedFolders, setPinnedFolders] = useState(getPinned)
+  /**
+   * The project's sequences, mirrored from the kernel.
+   *
+   * They are shown in the bin beside the media because that is what they are:
+   * things this project contains. The alternative — a separate list somewhere
+   * else — is the same mistake the synthetic "Assets" node was, two places
+   * showing the project's contents and agreeing only some of the time.
+   */
+  const [sequences, setSequences] = useState<SequenceState[]>(() => listSequences())
+  const [activeSequence, setActiveSequence] = useState(() => getActiveSequenceId())
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   /** Where copied media lands, and where the browser opens. */
   const importsFolder = useMemo(
@@ -92,6 +124,15 @@ export function ContentBrowserPanel() {
   )
 
   useEffect(() => subscribeProject(() => setProjectState(getProject())), [])
+
+  useEffect(
+    () =>
+      subscribeSequence(() => {
+        setSequences(listSequences())
+        setActiveSequence(getActiveSequenceId())
+      }),
+    [],
+  )
 
   // Where you were browsing goes into the project document. Recorded rather
   // than saved: walking a folder tree is not an edit. See kernel/view.ts.
@@ -398,6 +439,157 @@ export function ContentBrowserPanel() {
     if (strip) strip.scrollLeft = strip.scrollWidth
   }, [crumbs])
 
+  /**
+   * A new sequence holding the chosen media, laid end to end.
+   *
+   * Anything not in the project yet is imported on the way, for the same reason
+   * dragging an unimported file onto the timeline imports it: the gesture says
+   * what the person wants, and refusing it to make a point about bookkeeping
+   * helps nobody.
+   *
+   * End to end in the order they are listed rather than the order they were
+   * clicked — the order on screen is the only one that is visible, and a
+   * sequence assembled in click order would look shuffled.
+   */
+  const newSequenceFrom = useCallback(
+    async (paths: string[]) => {
+      const wanted = paths
+        .map((path) => ({ path, kind: mediaKindOf(path) }))
+        .filter((entry): entry is ImportEntry => entry.kind !== null)
+      if (wanted.length === 0) return null
+
+      const known = new Map(getAssets().map((asset) => [asset.path, asset]))
+      const missing = wanted.filter((entry) => !known.has(entry.path))
+      if (missing.length > 0) await importFiles(missing)
+
+      const byPath = new Map(getAssets().map((asset) => [asset.path, asset]))
+      const chosen = wanted
+        .map((entry) => byPath.get(entry.path))
+        .filter((asset): asset is Asset => Boolean(asset))
+      if (chosen.length === 0) return null
+
+      const made = createSequence({ name: undefined })
+      for (const asset of chosen) {
+        const probed = (await ensureProbed(asset.id)) ?? asset
+        // A still has no duration of its own, so it gets the length every NLE
+        // gives one. Five seconds is long enough to see and short enough to
+        // trim rather than fight.
+        const length = probed.duration && probed.duration > 0 ? probed.duration : 5
+        /*
+         * Each one asks for the start and lands after the last.
+         *
+         * addClip slides a clip forward past whatever is already on the track,
+         * so the queue lays itself out; a running total here would be a second
+         * answer to the same question, and the wrong one the moment a clip
+         * landed anywhere but where the total predicted. There was one, and a
+         * canary proved it changed nothing — which is exactly what dead
+         * arithmetic looks like from the outside, and what makes the next
+         * person reading this think it is what orders the clips.
+         *
+         * The sound follows its picture's start rather than finding its own,
+         * so a pair cannot come apart here. See addLinkedClips.
+         */
+        addLinkedClips({ assetId: asset.id, trackId: 'V1', start: 0, duration: length }, true)
+      }
+      setSelected(new Set())
+      return made
+    },
+    [],
+  )
+
+  /**
+   * Opens a sequence in the Timeline.
+   *
+   * Every sequence in the project already has a tab — they are all loaded when
+   * the project opens — so this switches to it rather than making a second one.
+   * A sequence open twice would be two views of one thing that can disagree.
+   */
+  const openSequence = useCallback((id: string) => {
+    activateSequence(id)
+    void commands.run('panel.focus.timeline')
+  }, [])
+
+  /**
+   * Settings, for a sequence that may not be the one on screen.
+   *
+   * It is activated first. Every editing function in kernel/sequence.ts works
+   * on the active sequence deliberately — there is no way to mutate one nobody
+   * is looking at — and settings are not the place to punch the first hole in
+   * that. Switching to it is also what somebody about to change its frame size
+   * almost certainly wants.
+   */
+  const openSettings = useCallback((id: string) => {
+    activateSequence(id)
+    setSettingsOpen(true)
+  }, [])
+
+  const backgroundMenu = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault()
+      const chosen = [...selected]
+      setMenu({
+        x: event.clientX,
+        y: event.clientY,
+        items: [
+          {
+            id: 'new',
+            label: 'New Sequence',
+            hint: 'Ctrl N',
+            run: () => void commands.run('sequence.new'),
+          },
+          {
+            id: 'from',
+            label:
+              chosen.length === 1
+                ? 'New Sequence From Clip'
+                : `New Sequence From ${chosen.length} Clips`,
+            disabled: chosen.length === 0,
+            run: () => void newSequenceFrom(chosen),
+          },
+          {
+            id: 'import',
+            label: 'Import Media\u2026',
+            separated: true,
+            run: () => void pickAndImport(),
+          },
+        ],
+      })
+    },
+    [selected, newSequenceFrom, pickAndImport],
+  )
+
+  const sequenceMenu = useCallback(
+    (event: React.MouseEvent, one: SequenceState) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setMenu({
+        x: event.clientX,
+        y: event.clientY,
+        items: [
+          { id: 'open', label: 'Open in Timeline', run: () => openSequence(one.id) },
+          {
+            id: 'settings',
+            label: 'Sequence Settings\u2026',
+            run: () => openSettings(one.id),
+          },
+          {
+            id: 'delete',
+            label: 'Delete Sequence',
+            separated: true,
+            danger: true,
+            // The last one cannot go: a project with no sequence has nowhere to
+            // put a clip, and the timeline would have nothing to draw.
+            disabled: listSequences().length <= 1,
+            run: () => {
+              removeSequence(one.id)
+            },
+          },
+        ],
+      })
+    },
+    [openSequence, openSettings],
+  )
+
   const toggleSelect = (path: string) =>
     setSelected((current) => {
       const next = new Set(current)
@@ -405,6 +597,37 @@ export function ContentBrowserPanel() {
       else next.add(path)
       return next
     })
+
+  useEffect(() => {
+    const handle = commands.registerAll([
+      {
+        id: 'sequence.new',
+        title: 'New Sequence',
+        category: 'Sequence',
+        detail: 'An empty sequence, and switches to it',
+        run: () => {
+          createSequence()
+          void commands.run('panel.focus.timeline')
+        },
+      },
+      {
+        id: 'sequence.newFromSelection',
+        title: 'New Sequence From Selected Clips',
+        category: 'Sequence',
+        detail: 'Lays the selected media end to end in a new sequence',
+        enabled: () => selected.size > 0,
+        run: () => void newSequenceFrom([...selected]),
+      },
+      {
+        id: 'sequence.settings',
+        title: 'Sequence Settings\u2026',
+        category: 'Sequence',
+        detail: 'Frame size, rate, duration, colour and audio',
+        run: () => setSettingsOpen(true),
+      },
+    ])
+    return () => handle.dispose()
+  }, [selected, newSequenceFrom])
 
   if (!hasFilesystem) {
     return (
@@ -541,15 +764,26 @@ export function ContentBrowserPanel() {
               linkedAssets={linkedAssets}
               focusedAssetId={focusedAssetId}
               isBin={inImports}
+              sequences={inImports ? sequences : []}
+              activeSequence={activeSequence}
               onOpenFolder={openFolder}
               onToggle={toggleSelect}
               onImportOne={(file) => void importPaths([file])}
               onReveal={(path) => openFolder(path)}
+              onOpenSequence={openSequence}
+              onSequenceMenu={sequenceMenu}
+              onBackgroundMenu={backgroundMenu}
             />
           </div>
         </div>
       </div>
 
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+      )}
+      {settingsOpen && (
+        <SequenceSettingsDialog sequence={getSequence()} onClose={() => setSettingsOpen(false)} />
+      )}
     </PanelFrame>
   )
 }
@@ -641,10 +875,15 @@ function FolderGrid({
   linkedAssets,
   focusedAssetId,
   isBin,
+  sequences,
+  activeSequence,
   onOpenFolder,
   onToggle,
   onImportOne,
   onReveal,
+  onOpenSequence,
+  onSequenceMenu,
+  onBackgroundMenu,
 }: {
   status: 'idle' | 'loading' | 'denied' | 'unreadable'
   listing: DirectoryListing | null
@@ -653,10 +892,15 @@ function FolderGrid({
   linkedAssets: Asset[]
   focusedAssetId: string | null
   isBin: boolean
+  sequences: SequenceState[]
+  activeSequence: string
   onOpenFolder: (path: string) => void
   onToggle: (path: string) => void
   onImportOne: (file: ImportEntry) => void
   onReveal: (path: string) => void
+  onOpenSequence: (id: string) => void
+  onSequenceMenu: (event: React.MouseEvent, one: SequenceState) => void
+  onBackgroundMenu: (event: React.MouseEvent) => void
 }) {
   // Bring a card selected from elsewhere into view.
   useEffect(() => {
@@ -687,7 +931,10 @@ function FolderGrid({
   if (!listing) return null
 
   const empty =
-    listing.folders.length === 0 && listing.files.length === 0 && linkedAssets.length === 0
+    listing.folders.length === 0 &&
+    listing.files.length === 0 &&
+    linkedAssets.length === 0 &&
+    sequences.length === 0
 
   return (
     <>
@@ -699,18 +946,36 @@ function FolderGrid({
 
       {empty ? (
         isBin ? (
-          <div className="cb-empty">
+          // Right-clickable even when there is nothing here: an empty project is
+          // exactly where somebody reaches for "New Sequence".
+          <div className="cb-empty" onContextMenu={onBackgroundMenu}>
             <p>Nothing imported yet.</p>
             <p className="cb-empty-hint">
               Browse a folder in the tree and import, or press <kbd>Ctrl K</kbd> and run{' '}
               <em>Import Media…</em>
+            </p>
+            <p className="cb-empty-hint">
+              Right-click here, or press <kbd>Ctrl N</kbd>, for a new sequence.
             </p>
           </div>
         ) : (
           <div className="cb-empty cb-empty--quiet">Nothing here that FLUX can open.</div>
         )
       ) : (
-        <div className="cb-grid">
+        <div className="cb-grid" onContextMenu={onBackgroundMenu}>
+          {/* Sequences first. They are what the project *is* — the media is
+              what it is made of — and a sequence buried under forty clips is a
+              sequence nobody finds. */}
+          {sequences.map((one) => (
+            <SequenceCard
+              key={one.id}
+              sequence={one}
+              active={one.id === activeSequence}
+              onOpen={() => onOpenSequence(one.id)}
+              onMenu={(event) => onSequenceMenu(event, one)}
+            />
+          ))}
+
           {listing.folders.map((folder: FolderEntry) => (
             <div
               key={folder.path}
@@ -749,14 +1014,81 @@ function FolderGrid({
               kind={asset.kind}
               size={asset.size}
               asset={asset}
-              selected={false}
+              // Selectable like any other card. A linked asset lives outside
+              // the imports folder, which is why it is listed separately — but
+              // it is in the project exactly as much as a copied one, and a
+              // card that cannot be chosen is a card that cannot be built into
+              // a sequence.
+              selected={selected.has(asset.path)}
               focused={asset.id === focusedAssetId}
+              onClick={() => onToggle(asset.path)}
               onDoubleClick={() => onReveal(folderOf(asset.path))}
             />
           ))}
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * A sequence, as a card.
+ *
+ * The thumbnail is black when there is nothing in it yet, and otherwise says
+ * how long it runs. A picture would be better and is not available: drawing one
+ * means compositing a frame of the sequence, which needs a decoder per clip and
+ * a canvas per card. The length is the one fact about a sequence that is worth
+ * a glance, and it is honest — a black rectangle that claimed to be a frame
+ * would not be.
+ */
+function SequenceCard({
+  sequence,
+  active,
+  onOpen,
+  onMenu,
+}: {
+  sequence: SequenceState
+  active: boolean
+  onOpen: () => void
+  onMenu: (event: React.MouseEvent) => void
+}) {
+  const clips = sequence.clips.length
+  const runs = sequence.clips.reduce(
+    (end, clip) => Math.max(end, clip.start + clip.duration),
+    0,
+  )
+  const pinned = sequence.settings.duration > 0
+  const length = pinned ? sequence.settings.duration : runs
+
+  return (
+    <div
+      className={`card card--sequence${active ? ' card--sequence-open' : ''}`}
+      data-sequence-id={sequence.id}
+      title={`${sequence.name} — ${sequence.settings.width}×${sequence.settings.height} at ${sequence.settings.frameRate} fps`}
+      onDoubleClick={onOpen}
+      onContextMenu={onMenu}
+    >
+      <div className="thumb thumb--sequence">
+        {clips > 0 && (
+          <span className="seq-thumb-time">
+            {formatTimecode(length, sequence.settings.frameRate, 0)}
+          </span>
+        )}
+        {pinned && <span className="seq-thumb-pinned" title="This sequence has a set length" />}
+      </div>
+      <div className="card-meta">
+        <span className="card-name">{sequence.name}</span>
+        <span className="card-sub">
+          {clips === 0 ? 'empty' : `${clips} clip${clips === 1 ? '' : 's'}`}
+        </span>
+      </div>
+      <span className="card-kind card-kind--sequence">sequence</span>
+      {active && (
+        <span className="card-badge" title="Open in the Timeline">
+          open
+        </span>
+      )}
+    </div>
   )
 }
 

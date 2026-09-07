@@ -2358,3 +2358,132 @@ kbd {
   letter-spacing: 0.06em;
 }
 
+
+/* ── right-click menus ───────────────────────────────────────── */
+
+/*
+ * Positioned in the viewport rather than in a panel, because a menu clipped by
+ * the panel it was opened in is a menu with items you cannot reach.
+ */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 190px;
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  background: var(--flux-bg-elevated);
+  border: 1px solid var(--flux-border);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text);
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-item:hover:not(:disabled) {
+  background: var(--flux-accent);
+  color: var(--flux-bg);
+}
+.ctx-item:disabled {
+  color: var(--flux-text-dim);
+  cursor: default;
+}
+.ctx-item--sep {
+  margin-top: 4px;
+  border-top: 1px solid var(--flux-border);
+  padding-top: 7px;
+}
+.ctx-item--danger:hover:not(:disabled) {
+  background: var(--flux-danger, #b3403a);
+  color: #fff;
+}
+.ctx-label {
+  flex: 1;
+}
+.ctx-hint {
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+  color: var(--flux-text-dim);
+}
+.ctx-item:hover:not(:disabled) .ctx-hint {
+  color: inherit;
+  opacity: 0.75;
+}
+
+/* ── a sequence, as a card ───────────────────────────────────── */
+
+/*
+ * Black when empty, and otherwise its length. A picture would be better and is
+ * not available without compositing a frame per card; the length is the one
+ * fact worth a glance, and it is honest where a fake frame would not be.
+ */
+.thumb--sequence {
+  display: grid;
+  place-items: center;
+  position: relative;
+  background: #000;
+  border: 1px solid var(--flux-border);
+}
+.seq-thumb-time {
+  font-family: var(--flux-font-mono);
+  font-size: 11px;
+  color: var(--flux-text-dim);
+  letter-spacing: 0.04em;
+}
+.seq-thumb-pinned {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 0;
+  height: 12px;
+  border-left: 1px dashed var(--flux-warn);
+}
+.card--sequence .card-kind--sequence {
+  background: color-mix(in srgb, var(--flux-accent) 70%, transparent);
+  color: var(--flux-bg);
+}
+.card--sequence-open {
+  outline: 1px solid var(--flux-accent);
+  outline-offset: -1px;
+}
+
+/* ── the settings dialog ─────────────────────────────────────── */
+
+.seq-settings-body {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  overflow: auto;
+}
+.seq-settings-sub {
+  margin-left: 8px;
+  font-family: var(--flux-font-mono);
+  font-size: 10px;
+  color: var(--flux-text-dim);
+}
+.seq-note {
+  font-family: var(--flux-font-mono);
+  font-size: 9px;
+  color: var(--flux-text-dim);
+}
+.seq-warn {
+  margin: 2px 0 6px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--flux-warn);
+}
+.seq-inline-btn {
+  align-self: flex-start;
+  margin-top: 2px;
+}

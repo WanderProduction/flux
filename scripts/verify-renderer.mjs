@@ -565,9 +565,19 @@ try {
          await new Promise(r => setTimeout(r, 100));
        }
        await new Promise(r => setTimeout(r, 400));
-       return [...document.querySelectorAll('.card-name')].map(e => e.textContent).sort();`,
+       // Media only. The bin holds the project's sequences too — they are
+       // things it contains as much as the footage is — and this check is
+       // about what was imported.
+       return [...document.querySelectorAll('.card:not(.card--sequence) .card-name')]
+         .map(e => e.textContent).sort();`,
     )
     assert.deepEqual(names, ['clipA.mp4', 'still.jpg'])
+    const sequences = await evaluate(
+      cdp,
+      `return [...document.querySelectorAll('.card--sequence .card-name')]
+         .map(e => e.textContent);`,
+    )
+    assert.deepEqual(sequences, ['Sequence 1'], 'and the sequence is there beside them')
   })
 
   /** Reopen the verification project and read back what the document held. */

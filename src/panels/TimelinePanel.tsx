@@ -29,12 +29,6 @@ import { audioStateFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
 import { videoInfoFor } from '../kernel/media/indexCache'
 import { peakRange } from '../../shared/peaks.js'
 import {
-  FRAME_RATES,
-  PIXEL_FORMATS,
-  PREVIEW_CODECS,
-  SAMPLE_RATES,
-} from '../../shared/sequenceFormat.js'
-import {
   addClip,
   addLinkedClips,
   activateSequence,
@@ -97,6 +91,7 @@ import { getView, recordView, subscribeView } from '../kernel/view'
 import { activeTool, subscribeTool, type ToolId } from '../kernel/tools'
 import { getAssets as allAssets } from '../kernel/assets'
 import { PanelFrame } from './PanelFrame'
+import { SequenceSettingsDialog } from './SequenceSettingsDialog'
 import { useThumbnail } from './useThumbnail'
 
 /**
@@ -2421,152 +2416,6 @@ function SequenceTabs({
  * exporter and no preview render files yet — so the audio and preview groups
  * are written to the file and acted on by nothing.
  */
-function SequenceSettingsDialog({
-  sequence,
-  onClose,
-}: {
-  sequence: SequenceState
-  onClose: () => void
-}) {
-  const s = sequence.settings
-  const number = (value: string, fallback: number) => {
-    const n = Number(value)
-    return Number.isFinite(n) && n > 0 ? n : fallback
-  }
-
-  return (
-    <div className="seq-settings-scrim" onClick={onClose}>
-      <div
-        className="seq-settings"
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-label="Sequence settings"
-      >
-        <div className="seq-settings-head">
-          <span className="seq-settings-title">{sequence.name}</span>
-          <button className="cb-btn" onClick={onClose}>
-            Done
-          </button>
-        </div>
-
-        <div className="seq-settings-group">
-          <span className="seq-settings-legend">In force</span>
-          <label className="seq-field">
-            <span>Width</span>
-            <input
-              type="number"
-              value={s.width}
-              min={2}
-              onChange={(e) => updateSequenceSettings({ width: number(e.target.value, s.width) })}
-            />
-          </label>
-          <label className="seq-field">
-            <span>Height</span>
-            <input
-              type="number"
-              value={s.height}
-              min={2}
-              onChange={(e) => updateSequenceSettings({ height: number(e.target.value, s.height) })}
-            />
-          </label>
-          <label className="seq-field">
-            <span>Frame rate</span>
-            <select
-              value={String(s.frameRate)}
-              onChange={(e) => updateSequenceSettings({ frameRate: Number(e.target.value) })}
-            >
-              {[...new Set([...FRAME_RATES, s.frameRate])]
-                .sort((a, b) => a - b)
-                .map((rate) => (
-                  <option key={rate} value={String(rate)}>
-                    {rate} fps
-                  </option>
-                ))}
-            </select>
-          </label>
-        </div>
-
-        <div className="seq-settings-group">
-          <span className="seq-settings-legend">
-            Recorded — saved with the sequence, not yet acted on
-          </span>
-          <label className="seq-field">
-            <span>Sample rate</span>
-            <select
-              value={String(s.audio.sampleRate)}
-              onChange={(e) =>
-                updateSequenceSettings({
-                  audio: { ...s.audio, sampleRate: Number(e.target.value) },
-                })
-              }
-            >
-              {SAMPLE_RATES.map((rate) => (
-                <option key={rate} value={String(rate)}>
-                  {rate} Hz
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="seq-field">
-            <span>Channels</span>
-            <select
-              value={String(s.audio.channels)}
-              onChange={(e) =>
-                updateSequenceSettings({ audio: { ...s.audio, channels: Number(e.target.value) } })
-              }
-            >
-              <option value="1">Mono</option>
-              <option value="2">Stereo</option>
-            </select>
-          </label>
-          <label className="seq-field">
-            <span>Preview codec</span>
-            <select
-              value={s.preview.codec}
-              onChange={(e) =>
-                updateSequenceSettings({ preview: { ...s.preview, codec: e.target.value } })
-              }
-            >
-              {PREVIEW_CODECS.map((codec) => (
-                <option key={codec} value={codec}>
-                  {codec}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="seq-field">
-            <span>Pixel format</span>
-            <select
-              value={s.preview.pixelFormat}
-              onChange={(e) =>
-                updateSequenceSettings({ preview: { ...s.preview, pixelFormat: e.target.value } })
-              }
-            >
-              {PIXEL_FORMATS.map((format) => (
-                <option key={format} value={format}>
-                  {format}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="seq-field seq-field--check">
-            <input
-              type="checkbox"
-              checked={s.preview.cacheFrames}
-              onChange={(e) =>
-                updateSequenceSettings({
-                  preview: { ...s.preview, cacheFrames: e.target.checked },
-                })
-              }
-            />
-            <span>Cache preview frames</span>
-          </label>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 /**
  * How narrow a clip can get before its trim handles are in the way.
  *

@@ -18,6 +18,12 @@ export const defaultKeymap: Keymap = {
   'ctrl+1': 'panel.focus.viewer',
   'ctrl+2': 'panel.focus.timeline',
   'ctrl+3': 'panel.focus.content',
+  /*
+   * A new sequence, on the key every app uses for "a new one of the thing this
+   * app makes". FLUX makes sequences; a project is made once, from the
+   * launcher, and never with a keystroke in the middle of an edit.
+   */
+  'ctrl+n': 'sequence.new',
   'ctrl+s': 'project.save',
   'ctrl+alt+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
