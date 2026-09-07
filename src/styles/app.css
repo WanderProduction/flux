@@ -428,8 +428,16 @@ kbd {
   place-items: center;
   background: rgba(0, 0, 0, 0.55);
 }
+/*
+ * Wide enough for both columns.
+ *
+ * It was 420px when it held one list. The second column — the settings that
+ * are recorded and not yet acted on — was simply cut off the right-hand edge,
+ * with its dropdowns sliced mid-word. A dialog that hides half its content is
+ * worse than one that scrolls, so this is sized to the content it now has.
+ */
 .seq-settings {
-  width: min(420px, 92%);
+  width: min(760px, 94%);
   max-height: 88%;
   overflow: auto;
   padding: 14px 16px 16px;
@@ -2460,11 +2468,18 @@ kbd {
 
 /* ── the settings dialog ─────────────────────────────────────── */
 
+/*
+ * Two columns side by side, and one under the other when there is no room.
+ *
+ * The split is the point of the dialog — what is in force against what is
+ * only written down — so it survives being narrow rather than collapsing into
+ * one undifferentiated list.
+ */
 .seq-settings-body {
-  display: flex;
-  gap: 18px;
-  align-items: flex-start;
-  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 6px 22px;
+  align-items: start;
 }
 .seq-settings-sub {
   margin-left: 8px;

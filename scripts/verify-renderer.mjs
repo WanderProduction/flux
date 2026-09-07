@@ -411,6 +411,42 @@ try {
     assert.ok(tabs.includes('Content Browser'), `tabs were ${JSON.stringify(tabs)}`)
   })
 
+  await check('the status bar names the sequence that is open', async () => {
+    /*
+     * It said "Sequence 1" literally, from back when a project had exactly one
+     * and its name could not change \u2014 so it went on saying it through every
+     * rename and every switch between tabs. Nothing failed, because nothing was
+     * looking: a label that is a constant is invisible to a suite that only
+     * ever reads it once.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       const scope = () => document.querySelector('.status-scope')?.textContent?.trim() ?? null;
+
+       sequence.renameSequence(sequence.getActiveSequenceId(), 'Reel Two');
+       await new Promise(r => setTimeout(r, 500));
+       const renamed = scope();
+
+       const other = sequence.createSequence({ name: 'B Roll' });
+       await new Promise(r => setTimeout(r, 500));
+       const switched = scope();
+
+       sequence.removeSequence(other.id);
+       sequence.renameSequence(sequence.getActiveSequenceId(), 'Sequence 1');
+       await new Promise(r => setTimeout(r, 400));
+       return { renamed, switched };`,
+    )
+    assert.ok(
+      state.renamed?.endsWith('Reel Two'),
+      `a rename should reach the status bar, and it reads "${state.renamed}"`,
+    )
+    assert.ok(
+      state.switched?.endsWith('B Roll'),
+      `and so should switching to another, but it reads "${state.switched}"`,
+    )
+  })
+
   await check('the panel layout keeps itself, without being asked to', async () => {
     /*
      * It used to wait for Ctrl Alt S, which meant the ordinary way to lose a

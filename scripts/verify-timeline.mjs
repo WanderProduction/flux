@@ -660,11 +660,28 @@ try {
     cdp,
     `const { sequence, view } = window.__fluxDev;
      while (sequence.getSequence().tracks.length < 12) sequence.addTrack('video');
-     // An absolute scale, not three zoomIn calls: relative steps from whatever
-     // the last check left behind can land on MAX_ZOOM, where a zoom-in check
-     // passes by doing nothing.
-     view.recordView({ timeline: { zoom: 150 } });
+     /*
+      * A zoom chosen against this window, not a constant.
+      *
+      * The app remembers its size now, so a run inherits whatever the last one
+      * left — maximized, restored, whatever monitor it was on. A fixed 150
+      * spilled off the 1600px window this suite used to always get and fits
+      * comfortably inside a maximized one, at which point every scroll check
+      * below is measuring a surface that cannot scroll. The panel is measured
+      * and the scale set from it, so the overflow is a fact rather than a hope.
+      *
+      * The timeline draws four seconds past the end of the content, so an empty
+      * sequence still has something to be wide. 400 is the app's own ceiling.
+      */
+     const room = document.querySelector('.tl-scroll').clientWidth;
+     const span = Math.max(sequence.sequenceDuration(), 0) + 4;
+     const wide = Math.min(400, Math.max(150, Math.ceil((room * 1.6) / span)));
+     view.recordView({ timeline: { zoom: wide } });
      await new Promise(r => setTimeout(r, 400));
+
+     // Absolute, not three zoomIn calls: relative steps from whatever the last
+     // check left behind can land on MAX_ZOOM, where a zoom-in check passes by
+     // doing nothing.
 
      // Dispatched at the panel root, cancelable, the way a real wheel arrives.
      window.__wheel = (opts) => {
@@ -5504,6 +5521,48 @@ try {
     assert.deepEqual(state.onDisk.preview, {
       codec: 'prores', pixelFormat: 'yuv444p10le', scale: 0.5, cacheFrames: true,
     })
+  })
+
+  await check('the settings dialog shows both its columns, not one and a half', async () => {
+    /*
+     * The dialog grew a second column \u2014 the settings that are recorded and not
+     * yet acted on \u2014 and did not grow to hold it, so that whole half was cut
+     * off the right-hand edge with its dropdowns sliced mid-word. Every check
+     * passed: they all read values out of the DOM, and a control that is
+     * clipped is still perfectly readable there.
+     *
+     * So this asks the question the DOM cannot answer on its own \u2014 whether
+     * what is in the dialog is inside the dialog.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `[...document.querySelectorAll('.cb-btn')]
+           .find(b => b.textContent.trim() === 'Settings')
+           .click();
+         await new Promise(r => setTimeout(r, 600));
+         const dialog = document.querySelector('.seq-settings');
+         if (!dialog) throw new Error('the settings dialog did not open');
+         const box = dialog.getBoundingClientRect();
+         const groups = [...dialog.querySelectorAll('.seq-settings-group')];
+         const overflowing = groups
+           .map((g, i) => ({ i, right: Math.round(g.getBoundingClientRect().right) }))
+           .filter(g => g.right > Math.round(box.right) + 1);
+         // Every control, not just the groups: a select can spill past its own
+         // column without the column spilling past the dialog.
+         const clipped = [...dialog.querySelectorAll('select, input')]
+           .filter(el => el.getBoundingClientRect().right > box.right + 1)
+           .map(el => el.previousElementSibling?.textContent ?? el.className);
+         const legends = groups.map(g =>
+           g.querySelector('.seq-settings-legend')?.textContent?.trim().slice(0, 8));
+         document.querySelector('.seq-settings-scrim')?.click();
+         await new Promise(r => setTimeout(r, 300));
+         return { groups: groups.length, legends, overflowing, clipped };`,
+    )
+    assert.equal(state.groups, 2, 'both halves should be there')
+    assert.deepEqual(state.legends, ['In force', 'Recorded'], `legends were ${state.legends}`)
+    assert.deepEqual(state.overflowing, [], 'neither column may hang off the dialog')
+    assert.deepEqual(state.clipped, [], 'and no control may be cut off its right-hand edge')
   })
 
   await check('settings that make no sense are refused, not stored', async () => {

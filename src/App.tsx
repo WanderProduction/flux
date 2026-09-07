@@ -6,6 +6,7 @@ import { panels } from './kernel/panels'
 import { createKeymapController, defaultKeymap } from './kernel/keymap'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
+import { getSequence, subscribeSequence } from './kernel/sequence'
 import { getView, recordView } from './kernel/view'
 import { CommandPalette } from './shell/CommandPalette'
 import { ImportChoiceHost } from './shell/ImportChoiceHost'
@@ -60,6 +61,7 @@ function Workspace({ project }: { project: Project }) {
   const [activeId, setActiveId] = useState(openInRef.current)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
+  const [openSequence, setOpenSequence] = useState(() => getSequence().name)
   const [dirty, setDirty] = useState(isDirty)
   const [saving, setSaving] = useState(isSaving)
 
@@ -71,6 +73,8 @@ function Workspace({ project }: { project: Project }) {
       }),
     [],
   )
+
+  useEffect(() => subscribeSequence(() => setOpenSequence(getSequence().name)), [])
 
   // Panels are read from the registry, not hardcoded — a plugin that registers
   // before mount is picked up here with no change to the shell.
@@ -332,7 +336,13 @@ function Workspace({ project }: { project: Project }) {
 
       <footer className="statusbar">
         <span className="status-left">
-          <span className="status-scope">{project.name} ▸ Sequence 1</span>
+          {/* The sequence that is actually open. This said "Sequence 1"
+              literally, from back when a project had exactly one and its name
+              could not change — so it kept saying it through every rename and
+              every switch between tabs. */}
+          <span className="status-scope">
+            {project.name} ▸ {openSequence}
+          </span>
           <span className="status-dim">
             {saving ? 'saving…' : dirty ? 'unsaved changes' : 'saved'}
           </span>
