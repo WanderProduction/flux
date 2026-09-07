@@ -1,7 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 
 import { DIALOG_FILTERS, mediaKindOf } from '../shared/mediaTypes.js'
 import {
@@ -131,6 +132,115 @@ async function writeStore(name, value) {
   return true
 }
 
+// ── where the window was left ───────────────────────
+
+/**
+ * Size, position and state, in this installation's settings.
+ *
+ * Not in the project document: which corner of which monitor the window was in
+ * is a fact about this machine, and carrying it inside a project folder would
+ * mean opening someone else's project moved your window.
+ */
+const WINDOW_STORE = 'ui-window'
+
+/** The default, and what a window with nowhere sensible to go falls back to. */
+const DEFAULT_SIZE = { width: 1600, height: 950 }
+
+/**
+ * Read synchronously, because the window is built before anything can await.
+ *
+ * A few hundred bytes off a local disk once at startup. Making this async would
+ * mean either showing a window at the wrong size and moving it — which is
+ * visible, and looks like a bug — or delaying the window on a promise.
+ */
+function savedWindowState() {
+  try {
+    const raw = readFileSync(storePath(WINDOW_STORE), 'utf8')
+    const state = JSON.parse(raw)
+    return state && typeof state === 'object' ? state : null
+  } catch {
+    return null // absent, or corrupt: the defaults are perfectly good
+  }
+}
+
+/** How much of `bounds` lies inside `area`, in pixels. */
+function overlap(area, bounds) {
+  const width = Math.min(area.x + area.width, bounds.x + bounds.width) - Math.max(area.x, bounds.x)
+  const height =
+    Math.min(area.y + area.height, bounds.y + bounds.height) - Math.max(area.y, bounds.y)
+  return width > 0 && height > 0 ? width * height : 0
+}
+
+/**
+ * Where to open, given what was saved and what is plugged in now.
+ *
+ * The display it was on can be gone — a laptop undocked, a monitor unplugged,
+ * a projector put away — and restoring those coordinates would put the window
+ * somewhere the user cannot see or reach it. That is not a small bug: a window
+ * you cannot find looks exactly like an app that will not start.
+ *
+ * So a saved position is used only when a real part of the window would land on
+ * a display that exists. "A real part" rather than "any part": a window with two
+ * pixels on screen is as lost as one with none. Otherwise it opens centred on
+ * the primary display, which is where a window with no history goes.
+ *
+ * The size is clamped to the work area either way, because a window saved on a
+ * 4K monitor must not open larger than the 1080p one it is now opening on.
+ */
+function placeWindow(state) {
+  const primary = screen.getPrimaryDisplay()
+  const centred = (area) => ({
+    width: Math.min(DEFAULT_SIZE.width, area.width),
+    height: Math.min(DEFAULT_SIZE.height, area.height),
+    x: Math.round(area.x + (area.width - Math.min(DEFAULT_SIZE.width, area.width)) / 2),
+    y: Math.round(area.y + (area.height - Math.min(DEFAULT_SIZE.height, area.height)) / 2),
+  })
+
+  const bounds = state?.bounds
+  const sane =
+    bounds &&
+    [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) &&
+    bounds.width > 0 &&
+    bounds.height > 0
+  if (!sane) return centred(primary.workArea)
+
+  // A quarter of the window, or a reasonable patch of it, has to be on a
+  // display that is actually connected.
+  const enough = Math.min(bounds.width * bounds.height * 0.25, 200 * 200)
+  const home = screen
+    .getAllDisplays()
+    .find((display) => overlap(display.workArea, bounds) >= enough)
+  if (!home) return centred(primary.workArea)
+
+  const area = home.workArea
+  const width = Math.min(bounds.width, area.width)
+  const height = Math.min(bounds.height, area.height)
+  return {
+    width,
+    height,
+    // Nudged back inside if the display it is on has since become smaller.
+    x: Math.round(Math.min(Math.max(bounds.x, area.x), area.x + area.width - width)),
+    y: Math.round(Math.min(Math.max(bounds.y, area.y), area.y + area.height - height)),
+  }
+}
+
+/**
+ * Records the window as it is now.
+ *
+ * `getNormalBounds` rather than `getBounds`: while a window is maximized or
+ * full screen its bounds are the screen's, and saving those would mean
+ * un-maximizing it next time produced a window the size of the display rather
+ * than the size it was before it was maximized.
+ */
+function rememberWindow(win) {
+  if (!win || win.isDestroyed() || win.isMinimized()) return
+  void writeStore(WINDOW_STORE, {
+    bounds: win.getNormalBounds(),
+    maximized: win.isMaximized(),
+    fullScreen: win.isFullScreen(),
+  }).catch(() => {})
+}
+
 /** Named starting points for the Content Browser's left rail. */
 async function listPlaces() {
   const named = [
@@ -157,9 +267,9 @@ async function listPlaces() {
 }
 
 function createWindow() {
+  const saved = savedWindowState()
   const win = new BrowserWindow({
-    width: 1600,
-    height: 950,
+    ...placeWindow(saved),
     minWidth: 940,
     minHeight: 600,
     backgroundColor: '#0e0f13',
@@ -190,7 +300,49 @@ function createWindow() {
     },
   })
 
-  win.once('ready-to-show', () => win.show())
+  /*
+   * Maximized and full screen are applied before the window is shown.
+   *
+   * Doing it afterwards is visible: the window appears at its restored size and
+   * then jumps, which reads as a glitch on every single launch.
+   */
+  if (saved?.fullScreen) win.setFullScreen(true)
+  else if (saved?.maximized) win.maximize()
+
+  win.once('ready-to-show', () => {
+    win.show()
+    /*
+     * Recorded as soon as it is on screen, not only when it changes.
+     *
+     * A window that opened and was never touched has still told us something:
+     * that this is where it opens. Without this, a fresh install has no window
+     * state at all until the first drag, and "nothing was written" is
+     * indistinguishable from "nothing writes".
+     */
+    rememberWindow(win)
+  })
+
+  /*
+   * Saved as it changes, not only on the way out.
+   *
+   * A crash, a kill, or a power cut all skip 'close', and losing the window
+   * position to any of them would be a small irritation every time. Debounced
+   * because dragging a window fires these continuously.
+   */
+  let remembering = null
+  const rememberSoon = () => {
+    clearTimeout(remembering)
+    remembering = setTimeout(() => rememberWindow(win), 400)
+  }
+  for (const event of ['resize', 'move', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) {
+    win.on(event, rememberSoon)
+  }
+  // And once more on the way out, synchronously enough to beat the process
+  // ending: the debounce may not have fired for the last nudge.
+  win.on('close', () => {
+    clearTimeout(remembering)
+    rememberWindow(win)
+  })
 
   /**
    * Nothing may close over unsaved work without asking.

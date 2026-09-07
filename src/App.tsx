@@ -82,17 +82,29 @@ function Workspace({ project }: { project: Project }) {
   }, [])
 
   /** Rebuild the dock for a workspace: saved layout if there is one, else the shipped default. */
+  /**
+   * True while a layout is being torn down and rebuilt.
+   *
+   * Every one of those steps fires a layout-change event, and the first thing
+   * `applyWorkspace` does is clear the dock — so without this the arrangement
+   * saved a moment later would be the empty one, and the layout would be lost
+   * by the act of restoring it.
+   */
+  const rearranging = useRef(false)
+
   const applyWorkspace = useCallback((id: string) => {
     const api = apiRef.current
     const workspace = getWorkspace(id)
     if (!api || !workspace) return
 
+    rearranging.current = true
     api.clear()
     const saved = savedRef.current[id]
     if (saved) {
       try {
         api.fromJSON(saved as never)
         setActiveId(id)
+        rearranging.current = false
         return
       } catch (err) {
         // A saved layout can reference a panel that no longer exists — an
@@ -104,15 +116,22 @@ function Workspace({ project }: { project: Project }) {
     }
     workspace.build(api)
     setActiveId(id)
+    rearranging.current = false
+  }, [])
+
+  /** Writes the arrangement down, without saying anything about it. */
+  const rememberLayout = useCallback((id: string) => {
+    const api = apiRef.current
+    if (!api) return
+    savedRef.current = { ...savedRef.current, [id]: api.toJSON() }
+    void saveStore(LAYOUTS_STORE, savedRef.current)
   }, [])
 
   const saveWorkspace = useCallback(() => {
-    const api = apiRef.current
-    if (!api) return
-    savedRef.current = { ...savedRef.current, [activeId]: api.toJSON() }
-    void saveStore(LAYOUTS_STORE, savedRef.current)
+    if (!apiRef.current) return
+    rememberLayout(activeId)
     say(`Saved "${getWorkspace(activeId)?.name}" layout`)
-  }, [activeId, say])
+  }, [activeId, rememberLayout, say])
 
   const resetWorkspace = useCallback(() => {
     const next = { ...savedRef.current }
@@ -158,6 +177,43 @@ function Workspace({ project }: { project: Project }) {
       cancelled = true
     }
   }, [ready, applyWorkspace])
+
+  /**
+   * The arrangement is written down as it changes.
+   *
+   * It used to wait for Ctrl Alt S, which meant the ordinary way to lose a
+   * layout was to spend ten minutes building one and then close the app — and
+   * nothing on screen said that would happen. Every other thing about where
+   * you were is remembered without being asked; the panels should be too.
+   *
+   * Debounced, because dragging a splitter fires this continuously and each
+   * write is a round trip to disk. Half a second is longer than any gesture's
+   * gaps and shorter than the time between deciding you are done and closing
+   * the window.
+   *
+   * `rearranging` is what keeps a restore from overwriting what it is
+   * restoring: applying a workspace clears the dock first, and that clearing
+   * is itself a layout change.
+   */
+  useEffect(() => {
+    const api = apiRef.current
+    if (!ready || !api) return
+
+    let pending: number | undefined
+    const disposable = api.onDidLayoutChange(() => {
+      if (rearranging.current) return
+      window.clearTimeout(pending)
+      pending = window.setTimeout(() => rememberLayout(activeId), 500)
+    })
+
+    return () => {
+      window.clearTimeout(pending)
+      disposable.dispose()
+      // On the way out, keep whatever the last change was rather than dropping
+      // it because the debounce had not fired yet.
+      if (!rearranging.current) rememberLayout(activeId)
+    }
+  }, [ready, activeId, rememberLayout])
 
   // Reopening the project brings back the workspace it was left in. Recorded,
   // not saved: switching workspaces is not an edit and must not light the

@@ -411,6 +411,81 @@ try {
     assert.ok(tabs.includes('Content Browser'), `tabs were ${JSON.stringify(tabs)}`)
   })
 
+  await check('the panel layout keeps itself, without being asked to', async () => {
+    /*
+     * It used to wait for Ctrl Alt S, which meant the ordinary way to lose a
+     * layout was to spend ten minutes arranging one and then close the app \u2014
+     * and nothing on screen said that would happen. Everything else about where
+     * you were is remembered without being asked; the panels should be too.
+     *
+     * Driven by *removing* a panel rather than dragging a splitter: a drag is a
+     * gesture a harness can only approximate, and the question here is whether
+     * a change to the arrangement is written down at all, not which change.
+     */
+    const state = await evaluate(
+      cdp,
+      `const tabs = () =>
+         [...document.querySelectorAll('.dv-tab')].map(e => e.textContent.trim()).sort();
+       const before = tabs();
+
+       const panelsIn = async () => {
+         const saved = await window.flux.store.get('workspaces');
+         return JSON.stringify(saved?.edit ?? null);
+       };
+
+       // Close the Viewer, then wait past the debounce that batches a drag.
+       const viewer = [...document.querySelectorAll('.dv-tab')]
+         .find(e => e.textContent.trim() === 'Viewer');
+       viewer?.querySelector('.dv-default-tab-action')?.click();
+       await new Promise(r => setTimeout(r, 1400));
+
+       const written = await panelsIn();
+       return { before, after: tabs(), written };`,
+    )
+    assert.ok(state.before.includes('Viewer'), `setup: ${JSON.stringify(state.before)}`)
+    assert.ok(
+      !state.after.includes('Viewer'),
+      `the Viewer should have closed, and the tabs are ${JSON.stringify(state.after)}`,
+    )
+    assert.ok(state.written && state.written !== 'null', 'a layout should have been written')
+    assert.ok(
+      !state.written.includes('"viewer"'),
+      'and what was written is the arrangement as it is now, without the Viewer',
+    )
+  })
+
+  await check('the kept layout is what comes back', async () => {
+    // Written down is not the same as restored. This is the half that would
+    // still be broken if the layout were saved and then ignored on the way in.
+    const state = await evaluate(
+      cdp,
+      `const { project } = window.__fluxDev;
+       const root = project.getProject().root;
+       project.closeProject();
+       for (let i = 0; i < 60 && !document.querySelector('.launcher'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       await project.openProject(root);
+       for (let i = 0; i < 80 && !document.querySelector('.app'); i++)
+         await new Promise(r => setTimeout(r, 100));
+       await new Promise(r => setTimeout(r, 900));
+       return [...document.querySelectorAll('.dv-tab')]
+         .map(e => e.textContent.trim()).sort();`,
+    )
+    assert.ok(
+      !state.includes('Viewer'),
+      `the arrangement should come back as it was left, and the tabs are ${JSON.stringify(state)}`,
+    )
+    assert.ok(state.length > 0, 'with the panels that were still there')
+
+    // Put it back, so the checks after this one get the workspace they expect.
+    await evaluate(
+      cdp,
+      `await window.__fluxDev.commands.run('workspace.reset');
+       await new Promise(r => setTimeout(r, 900));
+       return true;`,
+    )
+  })
+
   await check('panel registers its commands while mounted', async () => {
     const ids = await evaluate(
       cdp,

@@ -31,8 +31,32 @@ if (process.platform !== 'win32') {
   process.exit(0)
 }
 
+/*
+ * Nothing here can run without the association, so it is checked once, up
+ * front, and said plainly. Every check below launches FLUX through the command
+ * Windows has on file for a .flux document.
+ */
+try {
+  registeredCommand()
+} catch {
+  console.error('  FAIL the .flux association is not registered on this machine')
+  console.error('       Run: npm run register')
+  console.error('       A shell with a virtualized registry cannot see the key even when')
+  console.error('       it is there — the Microsoft Store python alias is one such shell.')
+  process.exit(1)
+}
+
 // ── the registered command ────────────────────────────────────
 
+/**
+ * The command Windows runs for a .flux document.
+ *
+ * Read from the registry rather than reconstructed, so this checks the
+ * association `npm run register` actually wrote. A missing key is not a
+ * failure of this suite — it means the association was never set up on this
+ * machine — and it used to arrive as a raw ENOENT stack trace from the middle
+ * of the file, which says nothing about what to do next.
+ */
 function registeredCommand() {
   const raw = execFileSync(
     'reg',
@@ -61,12 +85,26 @@ function electronCount() {
   )
 }
 
+/**
+ * Stops FLUX, and does not mind if it was already stopped.
+ *
+ * `Get-Process | Stop-Process` exits 1 when the pipeline is empty, which
+ * execFileSync turns into a throw — so a suite that began with no app running
+ * died on its first line, before printing a single result. "The app never
+ * answered" is what that looks like from outside, which is a long way from
+ * "there was nothing to kill".
+ */
 function stopFlux() {
-  execFileSync(
-    'powershell',
-    ['-NoProfile', '-Command', 'Get-Process electron -EA SilentlyContinue | Stop-Process -Force'],
-    { stdio: 'ignore' },
-  )
+  try {
+    execFileSync(
+      'powershell',
+      ['-NoProfile', '-Command', 'Get-Process electron -EA SilentlyContinue | Stop-Process -Force'],
+      { stdio: 'ignore' },
+    )
+  } catch {
+    // Nothing running, or nothing this account may stop. Either way the
+    // postcondition — no FLUX in the way — is what the caller wanted.
+  }
 }
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'flux-launch-'))
@@ -180,6 +218,172 @@ try {
       electronCount() <= before,
       `a second FLUX survived: ${before} processes before, ${electronCount()} after`,
     )
+  })
+
+  // ── the window comes back where it was left ──────────
+
+  /*
+   * This is the only suite that owns the app's lifecycle, so it is the only one
+   * that can answer "and what happens when you start it again".
+   */
+  const WINDOW_STATE = path.join(os.homedir(), 'AppData', 'Roaming', 'flux', 'ui-window.json')
+
+  const readWindowState = async () => {
+    try {
+      return JSON.parse(await fs.readFile(WINDOW_STATE, 'utf8'))
+    } catch {
+      return null
+    }
+  }
+
+  /** Writes a window state, restarts FLUX, and reattaches to it. */
+  const restartWith = async (state) => {
+    /*
+     * Stopped before the state is written, not after.
+     *
+     * The running app keeps its own window state up to date, so writing the
+     * file first means racing it — and it wins, because it writes on the way
+     * out. The first version of this check did exactly that and failed with
+     * the *previous* case's bounds, which is a confusing way to be told the
+     * harness has its steps in the wrong order.
+     */
+    if (cdp) cdp.close()
+    stopFlux()
+    await new Promise((r) => setTimeout(r, 1200))
+    await fs.writeFile(WINDOW_STATE, JSON.stringify(state, null, 2))
+    const again = launchArgs(registeredCommand(), first.file)
+    spawn(again.exe, [...again.argv, '--remote-debugging-port=9222'], {
+      detached: true,
+      stdio: 'ignore',
+    }).unref()
+    cdp = await attach()
+    await evaluate(
+      cdp,
+      `for (let i = 0; i < 80 && !window.__fluxDev; i++)
+         await new Promise(r => setTimeout(r, 250));
+       return true;`,
+    )
+  }
+
+  /** A window manager is entitled to a frame, and Windows counts its shadow. */
+  const near = (a, b) => Math.abs(a - b) <= 24
+
+  await check('a window with no history writes down where it opened', async () => {
+    /*
+     * The file is deleted first, which is the whole point of the check.
+     *
+     * Reading whatever happens to be on disk would pass against a build that
+     * never writes anything at all — the settings from the last run are still
+     * sitting there. A fresh install is the case that has to work, and it is
+     * the one nobody tests by hand.
+     */
+    if (cdp) cdp.close()
+    stopFlux()
+    await new Promise((r) => setTimeout(r, 1200))
+    await fs.rm(WINDOW_STATE, { force: true })
+    const again = launchArgs(registeredCommand(), first.file)
+    spawn(again.exe, [...again.argv, '--remote-debugging-port=9222'], {
+      detached: true,
+      stdio: 'ignore',
+    }).unref()
+    cdp = await attach()
+    await evaluate(
+      cdp,
+      `for (let i = 0; i < 80 && !window.__fluxDev; i++)
+         await new Promise(r => setTimeout(r, 250));
+       return true;`,
+    )
+    // The window is shown before it is recorded, so give the write its moment.
+    await new Promise((r) => setTimeout(r, 1200))
+
+    const state = await readWindowState()
+    assert.ok(state, `nothing was written to ${WINDOW_STATE}`)
+    assert.ok(
+      Number.isFinite(state.bounds?.width) && state.bounds.width > 0,
+      `bounds should be real: ${JSON.stringify(state.bounds)}`,
+    )
+    assert.equal(typeof state.maximized, 'boolean')
+    assert.equal(typeof state.fullScreen, 'boolean')
+  })
+
+  await check('a window opens at the size and place it was closed at', async () => {
+    /*
+     * Written straight into the settings rather than dragged with a mouse. The
+     * question is whether a *saved* position is honoured; driving a window
+     * manager from a harness would only add ways for the check to be wrong.
+     */
+    const wanted = { x: 120, y: 90, width: 1180, height: 760 }
+    await restartWith({ bounds: wanted, maximized: false, fullScreen: false })
+
+    const got = await evaluate(
+      cdp,
+      `return { w: window.outerWidth, h: window.outerHeight,
+                x: window.screenX, y: window.screenY };`,
+    )
+    assert.ok(
+      near(got.w, wanted.width) && near(got.h, wanted.height),
+      `size should be about ${wanted.width}\u00d7${wanted.height}, and it is ${got.w}\u00d7${got.h}`,
+    )
+    assert.ok(
+      near(got.x, wanted.x) && near(got.y, wanted.y),
+      `position should be about ${wanted.x},${wanted.y}, and it is ${got.x},${got.y}`,
+    )
+  })
+
+  await check('a window saved on a monitor that is gone opens somewhere visible', async () => {
+    /*
+     * The one failure that matters. A laptop undocked, a monitor unplugged, a
+     * projector put away — restoring those coordinates puts the window where
+     * nobody can see or reach it, which looks exactly like an app that will not
+     * start. Coordinates far outside any real desktop stand in for the missing
+     * display, which is precisely what the app sees when one is unplugged.
+     */
+    await restartWith({
+      bounds: { x: 9000, y: 6000, width: 1200, height: 800 },
+      maximized: false,
+      fullScreen: false,
+    })
+
+    const got = await evaluate(
+      cdp,
+      `return { x: window.screenX, y: window.screenY,
+                w: window.outerWidth, h: window.outerHeight,
+                screenW: window.screen.availWidth, screenH: window.screen.availHeight };`,
+    )
+    assert.ok(
+      got.x < got.screenW && got.y < got.screenH && got.x + got.w > 0 && got.y + got.h > 0,
+      `the window should be on a screen, and it is at ${got.x},${got.y} ` +
+        `on a ${got.screenW}\u00d7${got.screenH} desktop`,
+    )
+  })
+
+  await check('a maximized window comes back maximized, and remembers its real size', async () => {
+    /*
+     * Both halves matter. Saving the bounds *while* maximized would record the
+     * screen's size, and un-maximizing next time would then give back a window
+     * the size of the display rather than the one it was before.
+     */
+    await restartWith({
+      bounds: { x: 200, y: 150, width: 1100, height: 700 },
+      maximized: true,
+      fullScreen: false,
+    })
+
+    const got = await evaluate(
+      cdp,
+      `return { w: window.outerWidth, screenW: window.screen.availWidth };`,
+    )
+    assert.ok(
+      got.w >= got.screenW - 40,
+      `maximized should fill the width: window ${got.w} against a ${got.screenW} desktop`,
+    )
+
+    const state = await readWindowState()
+    assert.ok(
+      near(state.bounds.width, 1100) && near(state.bounds.height, 700),
+      `the un-maximized size should survive: ${JSON.stringify(state.bounds)}`,
+    )
+    assert.equal(state.maximized, true, 'and it is still recorded as maximized')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {
