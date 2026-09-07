@@ -32,6 +32,7 @@ import {
   saveSequence,
   sequenceFilePath,
   sequencesPath,
+  legacySequencesPath,
 } from '../electron/project.js'
 import { makeDocument } from '../shared/projectFormat.js'
 import { SEQUENCE_FORMAT, makeSequenceDocument } from '../shared/sequenceFormat.js'
@@ -103,10 +104,14 @@ try {
   await check('the document is named after the project and lives in project_files', async () => {
     assert.deepEqual(
       (await fs.readdir(projectA)).sort(),
-      ['exports', 'imports', 'project_files', 'sequences'],
+      ['exports', 'imports', 'project_files'],
       'the project root holds folders only',
     )
-    assert.deepEqual(await fs.readdir(path.join(projectA, 'project_files')), ['Project A.flux'])
+    assert.deepEqual(
+      (await fs.readdir(path.join(projectA, 'project_files'))).sort(),
+      ['Project A.flux', 'sequences'],
+      'the document, and the sequences folder that moved in beside it',
+    )
     assert.equal(await findProjectFile(projectA), documentPath(projectA, 'Project A'))
   })
 
@@ -282,7 +287,7 @@ try {
     assert.equal(saved.ok, true, `save failed: ${saved.error}`)
     assert.deepEqual(saved.replaced, [path.join(old, 'Vintage.flux')])
 
-    assert.deepEqual((await fs.readdir(old)).sort(), ['exports', 'imports', 'project_files', 'sequences'])
+    assert.deepEqual((await fs.readdir(old)).sort(), ['exports', 'imports', 'project_files'])
     const again = await openProject(old)
     assert.equal(again.dirty, false, 'once moved, the project opens clean')
     assert.equal(again.relocated, false)
@@ -435,10 +440,107 @@ try {
       media: extra.media ?? [],
     })
 
-  await check('a new project has a sequences folder', async () => {
+  await check('a new project has a sequences folder, under project_files', async () => {
     const stat = await fs.stat(sequencesPath(seqRoot))
     assert.equal(stat.isDirectory(), true)
-    assert.ok(PROJECT_DIRS.includes('sequences'), 'and it is one of the folders a project has')
+    /*
+     * Under project_files, not in the root.
+     *
+     * The root is a place people look at, and imports and exports are the two
+     * folders there that are theirs. The app's own bookkeeping goes where the
+     * document already lives.
+     */
+    assert.equal(
+      path.dirname(sequencesPath(seqRoot)),
+      path.join(seqRoot, 'project_files'),
+      'sequences belong beside the document',
+    )
+    assert.ok(
+      !PROJECT_DIRS.includes('sequences'),
+      'and it is not one of the folders in the project root any more',
+    )
+  })
+
+  await check('sequences left in the old folder come across on open', async () => {
+    /*
+     * A project made by a build that kept sequences in the root still has to
+     * open with its sequences in it. They are moved rather than read in place:
+     * two folders that both count as "the list" is a project that disagrees
+     * with itself the moment one of them is written to.
+     */
+    const older = path.join(tmp, 'vintage-sequences')
+    await fs.mkdir(older, { recursive: true })
+    const made = await createProject(older, 'Old Layout', '0.0.1')
+    assert.ok(made.ok, made.error)
+    const root = made.project.root
+
+    // Put it back the way the old build had it.
+    await fs.rm(sequencesPath(root), { recursive: true, force: true })
+    await fs.mkdir(legacySequencesPath(root), { recursive: true })
+    const doc = makeSequenceDocument({
+      id: 's-old', name: 'From The Old Place', settings: {}, tracks: [], clips: [], media: [],
+    })
+    await fs.writeFile(
+      path.join(legacySequencesPath(root), 'From The Old Place.fluxseq'),
+      JSON.stringify(doc, null, 2),
+    )
+
+    const opened = await openProject(root)
+    assert.ok(opened.ok, opened.error)
+    assert.equal(opened.movedSequences.length, 1, 'one file should have moved')
+    assert.equal(
+      opened.dirty,
+      true,
+      'and the project is dirty, so the next save writes a format-4 document',
+    )
+
+    const now = (await fs.readdir(sequencesPath(root))).sort()
+    assert.deepEqual(now, ['From The Old Place.fluxseq'], 'it is in the new folder')
+    assert.deepEqual(
+      await fs.readdir(root).then((all) => all.sort()),
+      ['exports', 'imports', 'project_files'],
+      'and the old folder is gone from the root',
+    )
+
+    const listed = await listSequences(root)
+    assert.deepEqual(listed.map((one) => one.name), ['From The Old Place'])
+  })
+
+  await check('a migration never overwrites a sequence already in the new folder', async () => {
+    /*
+     * Two files, one name. Timid on purpose: something somebody can look at and
+     * resolve beats a file quietly replaced by another that happened to share
+     * its name. The old one is left exactly where it is, which is also what
+     * stops the old folder being removed.
+     */
+    const older = path.join(tmp, 'clashing-sequences')
+    await fs.mkdir(older, { recursive: true })
+    const made = await createProject(older, 'Clash', '0.0.1')
+    const root = made.project.root
+
+    const write = async (dir, text) => {
+      await fs.mkdir(dir, { recursive: true })
+      await fs.writeFile(path.join(dir, 'Same Name.fluxseq'), text)
+    }
+    const doc = (id) =>
+      JSON.stringify(makeSequenceDocument({
+        id, name: 'Same Name', settings: {}, tracks: [], clips: [], media: [],
+      }), null, 2)
+    await write(sequencesPath(root), doc('s-new'))
+    await write(legacySequencesPath(root), doc('s-old'))
+
+    const opened = await openProject(root)
+    assert.deepEqual(opened.movedSequences, [], 'nothing moved')
+    assert.equal(
+      JSON.parse(await fs.readFile(path.join(sequencesPath(root), 'Same Name.fluxseq'), 'utf8')).id,
+      's-new',
+      'the file already in the new folder is untouched',
+    )
+    assert.deepEqual(
+      (await fs.readdir(legacySequencesPath(root))).sort(),
+      ['Same Name.fluxseq'],
+      'and the one that could not move is still there to be dealt with',
+    )
   })
 
   await check('a sequence is written to a file named after it', async () => {

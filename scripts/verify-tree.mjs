@@ -121,6 +121,22 @@ const HELPERS = String.raw`
       if (!settled) throw new Error('row ' + p + ' never finished toggling');
       return settled;
     },
+    /*
+     * Opens a row, whether or not it was already open.
+     *
+     * toggleByPath is a *toggle*, and a check that means "have this open" and
+     * reaches for it is at the mercy of whatever the check before it left
+     * behind: given an already-open row it closes it, and the check then finds
+     * no children and fails. Roughly one run in two, which is the worst
+     * frequency there is — often enough to be noise, rare enough to look flaky
+     * rather than wrong.
+     */
+    async expandByPath(title, p) {
+      const row = await this.waitForPath(title, p);
+      if (!row) throw new Error('no row at ' + p);
+      if (row.getAttribute('aria-expanded') === 'true') return row;
+      return await this.toggleByPath(title, p);
+    },
     async collapseAll() {
       await window.__fluxDev.commands.run('content.collapseTree');
       await this.until(() =>
@@ -179,7 +195,7 @@ try {
     )
     assert.equal(rows[0].depth, 0, 'the project folder is the root')
     const children = rows.filter((r) => r.depth === 1).map((r) => r.label).sort()
-    assert.deepEqual(children, ['exports', 'imports', 'project_files', 'sequences'])
+    assert.deepEqual(children, ['exports', 'imports', 'project_files'])
   })
 
   await check('every mounted drive is its own collapsed root', async () => {
@@ -515,10 +531,24 @@ try {
     const rows = await evaluate(
       cdp,
       `const t = window.__tree;
-       await t.toggleByPath('Pinned', ${dir});
-       return t.describe('Pinned').map(r => r.label);`,
+       const before = (await t.waitForPath('Pinned', ${dir}))?.getAttribute('aria-expanded');
+       await t.expandByPath('Pinned', ${dir});
+       /*
+        * Wait for the child, not for the parent's flag.
+        *
+        * toggleByPath settles on "expanded, and not marked loading", and the
+        * loading class can be one render behind the attribute — so it can
+        * return while the children are still on their way. Reading the rows
+        * right afterwards was a coin flip, and it came up tails about one run
+        * in three. The row this check is about is the thing to wait for.
+        */
+       await t.until(() => t.describe('Pinned').some(r => r.label === 'Nested'));
+       return { before, rows: t.describe('Pinned').map(r => r.label) };`,
     )
-    assert.ok(rows.includes('Nested'), `expected the subfolder, got ${JSON.stringify(rows)}`)
+    assert.ok(
+      rows.rows.includes('Nested'),
+      `expected the subfolder, got ${JSON.stringify(rows.rows)} (was expanded: ${rows.before})`,
+    )
   })
 
   await check('unpinning removes it again', async () => {

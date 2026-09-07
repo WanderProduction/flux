@@ -3,6 +3,7 @@
  *
  *   <root>/
  *     project_files/<Project Name>.flux   the document
+ *     project_files/sequences/            one file per sequence
  *     imports/                            media copied into the project
  *     exports/                            renders
  *
@@ -33,11 +34,17 @@ export const DOCUMENT_DIR = 'project_files'
  *   2 — a single .flux document, in the project root.
  *   3 — the document moved into project_files/ and gained `view`, so reopening
  *       restores the workspace and where you were, not just the edit.
+ *   4 — sequences moved from <root>/sequences into project_files/sequences.
+ *       The document's own shape is unchanged; the number is bumped because
+ *       the *layout* is what changed, and a build that predates the move would
+ *       open a format-4 project, look in the old place, find nothing, and show
+ *       a project with no sequences in it. Refusing to open is the only honest
+ *       answer to that, and refusing is what the format number buys.
  *
  * Older documents are read and upgraded. A *newer* one is refused outright —
  * see documentProblem.
  */
-export const DOCUMENT_FORMAT = 3
+export const DOCUMENT_FORMAT = 4
 
 /**
  * @param {string} fileName

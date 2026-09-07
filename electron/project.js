@@ -23,7 +23,7 @@ import {
  *
  *   <root>/
  *     project_files/<Project Name>.flux   the document — this IS the project
- *     sequences/<Sequence Name>.fluxseq   one file per sequence
+ *     project_files/sequences/*.fluxseq   one file per sequence
  *     imports/                            media copied into the project
  *     exports/                            renders — nothing writes here yet
  *
@@ -31,7 +31,14 @@ import {
  * exercise it against a real temp directory.
  */
 
-export const PROJECT_DIRS = ['project_files', SEQUENCES_DIR, 'imports', 'exports']
+/**
+ * The folders a project has in its root.
+ *
+ * Sequences are not among them any more: they live under project_files, which
+ * is where the app's own bookkeeping goes. The root is a place people look at,
+ * and imports and exports are the two folders there that are theirs.
+ */
+export const PROJECT_DIRS = ['project_files', 'imports', 'exports']
 export const PROJECT_FILES_DIR = DOCUMENT_DIR
 export const IMPORTS_DIR = 'imports'
 
@@ -47,7 +54,61 @@ export function importsPath(root) {
 }
 
 export function sequencesPath(root) {
+  return path.join(root, PROJECT_FILES_DIR, SEQUENCES_DIR)
+}
+
+/**
+ * Where sequences used to live, before they moved under project_files.
+ *
+ * Read, migrated, and never written. A project made last week still has to
+ * open with its sequences in it.
+ */
+export function legacySequencesPath(root) {
   return path.join(root, SEQUENCES_DIR)
+}
+
+/**
+ * Moves any sequences still in the old folder into the new one.
+ *
+ * Deliberately timid. A name already taken in the new folder is left exactly
+ * where it is rather than overwritten or renamed — two files that disagree is
+ * a thing somebody can look at and resolve, and a file quietly replaced by
+ * another with the same name is not.
+ *
+ * The old folder is removed only when it is empty afterwards, and only of
+ * itself: anything else somebody put in there is theirs.
+ *
+ * @returns {Promise<string[]>} the files that moved
+ */
+export async function migrateSequences(root) {
+  const from = legacySequencesPath(root)
+  let names
+  try {
+    names = (await fs.readdir(from)).filter(isSequenceFile)
+  } catch {
+    return []
+  }
+  if (names.length === 0) {
+    await fs.rmdir(from).catch(() => {})
+    return []
+  }
+
+  await fs.mkdir(sequencesPath(root), { recursive: true }).catch(() => {})
+  const moved = []
+  for (const name of names) {
+    const target = path.join(sequencesPath(root), name)
+    try {
+      // `wx` on a copy rather than a rename: rename would clobber, and this
+      // has to refuse when the name is taken.
+      await fs.copyFile(path.join(from, name), target, fs.constants.COPYFILE_EXCL)
+      await fs.rm(path.join(from, name), { force: true })
+      moved.push(target)
+    } catch {
+      // Taken, or unreadable. Leave it be.
+    }
+  }
+  await fs.rmdir(from).catch(() => {})
+  return moved
 }
 
 /** Where this project's document belongs, given the project's name. */
@@ -158,6 +219,7 @@ export async function createProject(parent, name, appVersion) {
     for (const dir of PROJECT_DIRS) {
       await fs.mkdir(path.join(root, dir), { recursive: true })
     }
+    await fs.mkdir(sequencesPath(root), { recursive: true })
     await writeJsonAtomic(file, document)
   } catch (err) {
     return {
@@ -251,18 +313,30 @@ export async function openProject(target) {
     for (const dir of PROJECT_DIRS) {
       await fs.mkdir(path.join(root, dir), { recursive: true })
     }
+    await fs.mkdir(sequencesPath(root), { recursive: true })
   } catch {
     // Non-fatal: opening read-only media still beats refusing to open at all.
   }
+
+  /*
+   * Sequences left in the old folder come across on open.
+   *
+   * Marked dirty when anything moved, so the next save writes a format-4
+   * document. Until it does, the project still says 3 — and a build that
+   * predates the move would open it, look in a folder that is now empty, and
+   * show a project with no sequences. The save is what closes that window.
+   */
+  const movedSequences = await migrateSequences(root).catch(() => [])
 
   return {
     ok: true,
     project: { root, file, ...document },
     // `dirty` on open: a migrated or relocated project holds something the
     // document at its new path does not, so the user is told to save.
-    dirty: migrated || relocating,
+    dirty: migrated || relocating || movedSequences.length > 0,
     migrated,
     relocated: relocating,
+    movedSequences,
   }
 }
 
@@ -318,19 +392,32 @@ export async function saveProject(file, document) {
  * perfectly good.
  */
 export async function listSequences(root) {
-  let names
-  try {
-    names = (await fs.readdir(sequencesPath(root))).filter(isSequenceFile).sort()
-  } catch {
-    return []
-  }
-
+  /*
+   * Both folders, new one first.
+   *
+   * Opening a project migrates the old folder away, so in practice the second
+   * is empty — but listing is also reached without an open (the launcher's
+   * project cards), and a project that has never been opened by this build
+   * still has to say how many sequences it has. A name found in both is taken
+   * from the new folder, which is where the app writes.
+   */
+  const seen = new Set()
   const found = []
-  for (const name of names) {
-    const file = path.join(sequencesPath(root), name)
-    const doc = await readJson(file).catch(() => null)
-    if (!doc || sequenceProblem(doc)) continue
-    found.push({ ...doc, file })
+  for (const dir of [sequencesPath(root), legacySequencesPath(root)]) {
+    let names
+    try {
+      names = (await fs.readdir(dir)).filter(isSequenceFile).sort()
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      const file = path.join(dir, name)
+      const doc = await readJson(file).catch(() => null)
+      if (!doc || sequenceProblem(doc)) continue
+      found.push({ ...doc, file })
+    }
   }
   return found
 }
@@ -373,7 +460,10 @@ export async function saveSequence(root, document, previousFile) {
 /** Removes a sequence's file. The clips are gone with it; the media is not. */
 export async function deleteSequence(root, file) {
   const resolved = path.resolve(file)
-  if (path.dirname(resolved) !== path.resolve(sequencesPath(root))) {
+  // Either folder: a project opened read-only never got migrated, and its
+  // sequences are still in the old one.
+  const allowed = [sequencesPath(root), legacySequencesPath(root)].map((dir) => path.resolve(dir))
+  if (!allowed.includes(path.dirname(resolved))) {
     return { ok: false, error: 'outside-project' }
   }
   try {

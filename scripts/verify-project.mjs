@@ -90,7 +90,7 @@ try {
     )
 
     const entries = await fs.readdir(projectA)
-    assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files', 'sequences'])
+    assert.deepEqual(entries.sort(), ['exports', 'imports', 'project_files'])
   })
 
   await check('the project root is the named folder', async () => {
@@ -131,10 +131,14 @@ try {
   })
 
   await check('the document lives in project_files', async () => {
-    assert.deepEqual(await fs.readdir(path.join(projectA, 'project_files')), ['Alpha.flux'])
+    assert.deepEqual(
+      (await fs.readdir(path.join(projectA, 'project_files'))).sort(),
+      ['Alpha.flux', 'sequences'],
+      'the document, and the sequences folder beside it',
+    )
     assert.deepEqual(
       (await fs.readdir(projectA)).sort(),
-      ['exports', 'imports', 'project_files', 'sequences'],
+      ['exports', 'imports', 'project_files'],
       'the project root stays folders-only',
     )
   })
@@ -565,7 +569,7 @@ try {
 
     assert.deepEqual(
       (await fs.readdir(vintage)).sort(),
-      ['exports', 'imports', 'project_files', 'sequences'],
+      ['exports', 'imports', 'project_files'],
       'the stale document in the root should be gone',
     )
     const doc = JSON.parse(
@@ -586,11 +590,11 @@ try {
     assert.ok(!doc.sequence, 'the document should no longer carry the sequence itself')
     assert.ok(doc.activeSequence, 'it should say which sequence was open')
 
-    const files = (await fs.readdir(path.join(vintage, 'sequences'))).sort()
+    // Under project_files, which is where sequences live as of format 4.
+    const seqDir = path.join(vintage, 'project_files', 'sequences')
+    const files = (await fs.readdir(seqDir)).sort()
     assert.deepEqual(files, ['Sequence 1.fluxseq'], 'the sequence should be a file now')
-    const moved = JSON.parse(
-      await fs.readFile(path.join(vintage, 'sequences', 'Sequence 1.fluxseq'), 'utf8'),
-    )
+    const moved = JSON.parse(await fs.readFile(path.join(seqDir, 'Sequence 1.fluxseq'), 'utf8'))
     assert.equal(moved.clips.length, 1, 'with the clip it had')
     assert.equal(moved.id, doc.activeSequence, 'and it is the one the document names')
     assert.equal(moved.settings.frameRate, 24, 'its rate came across from the old shape')

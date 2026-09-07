@@ -1,7 +1,7 @@
 /**
  * The `.fluxseq` document — one sequence, as a file.
  *
- *   <root>/sequences/<Sequence Name>.fluxseq
+ *   <root>/project_files/sequences/<Sequence Name>.fluxseq
  *
  * A sequence used to live inside the project document, which was fine while
  * there was exactly one of them. Making it a file of its own buys three things
@@ -37,7 +37,15 @@
 
 export const SEQUENCE_EXTENSION = '.fluxseq'
 
-/** Sequences live beside the project document, not inside it. */
+/**
+ * Sequences live beside the project document, not inside it.
+ *
+ * The folder's *name*; where it sits is composed in electron/project.js, under
+ * project_files. It moved there because the project root is a place people
+ * look at — imports and exports are theirs, and a third folder of the app's
+ * own bookkeeping beside them is a folder they have to learn to ignore.
+ * project_files is already where the app keeps its own things.
+ */
 export const SEQUENCES_DIR = 'sequences'
 
 /**
