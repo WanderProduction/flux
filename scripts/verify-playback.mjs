@@ -1762,6 +1762,53 @@ try {
     assert.ok(state.playing, `it should have travelled back from ${state.end}, and it is at ${state.after}`)
   })
 
+  await check('a shuttle back from the end survives a busy frame', async () => {
+    /*
+     * The check above passes on an idle machine whether or not the transport
+     * knows which way it is travelling: the first backwards tick arrives a
+     * millisecond or two after the key, the playhead has already left the end,
+     * and the far-end test is false for the ordinary reason. It measures the
+     * outcome; it cannot see the rule that makes the outcome reliable.
+     *
+     * Block the main thread first and it becomes a different question. The
+     * animation frame that follows carries the timestamp of a frame that was
+     * already scheduled while the thread was busy — earlier than the moment
+     * the transport started — so the first tick is charged a *negative*
+     * elapsed time and its next position lands past the end rather than short
+     * of it. A far-end test that does not ask which way the transport is going
+     * parks there and stops, and a shuttle back pressed at the end of the
+     * sequence looks like a dead key.
+     *
+     * A busy frame is not a contrived condition. It is a decode, a waveform, a
+     * timeline being laid out — which is to say it is most frames in the app
+     * this is for, and it is why this was found by hand long before it was
+     * found here.
+     */
+    const state = await evaluate(
+      cdp,
+      SHUTTLE +
+        `playback.goToEnd();
+         await new Promise(r => setTimeout(r, 250));
+         const end = playback.getTime();
+         // About eight frames of work, which is an ordinary amount for one.
+         const until = performance.now() + 120;
+         while (performance.now() < until) { /* busy */ }
+         await window.__press('a');
+         const rate = playback.getRate();
+         const running = playback.isPlaying();
+         await new Promise(r => setTimeout(r, 400));
+         const after = playback.getTime();
+         playback.pause();
+         return { end, rate, running, after };`,
+    )
+    assert.equal(state.rate, -1, 'the shuttle should still be running backwards')
+    assert.equal(state.running, true, 'and the transport should not have parked itself')
+    assert.ok(
+      state.after < state.end - 0.1,
+      `it should have travelled back from ${state.end}, and it is at ${state.after}`,
+    )
+  })
+
   await check('reaching either end parks, stops, and comes back to 1x', async () => {
     const state = await evaluate(
       cdp,
