@@ -5352,7 +5352,9 @@ try {
     )
     assert.deepEqual(state.before, [1920, 1080, 24], 'the default, before anything was dropped')
     assert.deepEqual(state.after, [1280, 720, 25], `it became ${state.after.join('x')}`)
-    assert.deepEqual(state.audio, { sampleRate: 44100, channels: 1 })
+    // The rate and the channel count come from the file; what the sequence
+    // is *mastered* at is a decision the footage does not get to make.
+    assert.deepEqual(state.audio, { sampleRate: 44100, channels: 1, bitDepth: 24 })
   })
 
   await check('a sequence with an edit keeps its settings when more is dropped in', async () => {
@@ -5387,6 +5389,121 @@ try {
     assert.equal(state.settings.width, 3840)
     assert.ok(state.shown.includes('30 fps'), `the toolbar shows ${state.shown.join(' ')}`)
     assert.ok(state.shown.includes('3840×2160'))
+  })
+
+  await check('a pinned duration is where the sequence ends', async () => {
+    /*
+     * Pinning a length makes it a *boundary*, not a note: the transport stops
+     * there, Go To End goes there, and the timeline draws it. Somebody cutting
+     * to a 30-second delivery needs the sequence to end at 30 seconds even
+     * while the tail of the take is still hanging off the end.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         const content = sequence.contentDuration();
+         sequence.updateSequenceSettings({ duration: 5 });
+         await new Promise(r => setTimeout(r, 300));
+         const pinned = sequence.sequenceDuration();
+         playback.goToEnd();
+         await new Promise(r => setTimeout(r, 200));
+         const atEnd = playback.getTime();
+         playback.seek(11);
+         await new Promise(r => setTimeout(r, 150));
+         const clamped = playback.getTime();
+         const marker = !!document.querySelector('.tl-end');
+         sequence.updateSequenceSettings({ duration: 0 });
+         await new Promise(r => setTimeout(r, 250));
+         return { content, pinned, atEnd, clamped, marker,
+                  released: sequence.sequenceDuration(),
+                  stillThere: sequence.getSequence().clips.length,
+                  gone: !document.querySelector('.tl-end') };`,
+    )
+    assert.equal(state.content, 12, 'setup: the clips run to twelve seconds')
+    assert.equal(state.pinned, 5, 'and the sequence now ends at five')
+    assert.equal(state.atEnd, 5, 'Go To End goes to the pinned end')
+    assert.equal(state.clamped, 5, 'and the playhead cannot be put past it')
+    assert.equal(state.marker, true, 'the end is drawn')
+    assert.equal(state.stillThere, 4, 'nothing was deleted \u2014 the clips are still there')
+    assert.equal(state.released, 12, 'and zero gives the length back to the clips')
+    assert.equal(state.gone, true, 'with no line to draw once it follows them again')
+  })
+
+  await check('a start timecode is what the ruler and the readout count from', async () => {
+    /*
+     * An hour is the broadcast convention, and it exists because 00:00:00:00
+     * and "no timecode at all" are indistinguishable on a tape. What matters
+     * here is that everything on screen agrees: a ruler counting from zero
+     * beside a readout counting from an hour is worse than neither.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { playback } = window.__fluxDev;
+         playback.seek(2);
+         await new Promise(r => setTimeout(r, 200));
+         const readout = () =>
+           document.querySelector('.tl-timecode')?.textContent ?? null;
+         const ticks = () =>
+           [...document.querySelectorAll('.tl-tick span')].map(el => el.textContent);
+         const before = { readout: readout(), ticks: ticks().slice(0, 2) };
+         sequence.updateSequenceSettings({ startTimecode: 3600 });
+         await new Promise(r => setTimeout(r, 300));
+         const after = { readout: readout(), ticks: ticks().slice(0, 2) };
+         sequence.updateSequenceSettings({ startTimecode: 0 });
+         await new Promise(r => setTimeout(r, 250));
+         return { before, after };`,
+    )
+    assert.equal(state.before.readout, '00:00:02:00', 'two seconds in, counting from zero')
+    assert.equal(state.after.readout, '01:00:02:00', 'and an hour and two seconds counting from one')
+    assert.ok(
+      state.after.ticks.every((tick) => tick.startsWith('01:')),
+      `the ruler should count from the hour too, and it reads ${JSON.stringify(state.after.ticks)}`,
+    )
+    assert.ok(
+      state.before.ticks.every((tick) => !tick.startsWith('01:')),
+      `and plain minutes when it starts at zero: ${JSON.stringify(state.before.ticks)}`,
+    )
+  })
+
+  await check('every recorded setting survives a save and a reload', async () => {
+    /*
+     * Most of these are written down and not yet acted on \u2014 there is no
+     * exporter for a preview codec to be for, and nothing reads a colour space.
+     * That is exactly why they need this check: a field nothing reads is a
+     * field nobody notices has stopped being written.
+     */
+    const state = await evaluate(
+      cdp,
+      seedCuts +
+        `const { commands, project } = window.__fluxDev;
+         sequence.updateSequenceSettings({
+           duration: 8, startTimecode: 3600, pixelAspect: 2, fieldOrder: 'upper-first',
+           colour: { space: 'rec2020', transfer: 'pq', depth: 12 },
+           audio: { sampleRate: 96000, channels: 6, bitDepth: 32 },
+           preview: { codec: 'prores', pixelFormat: 'yuv444p10le', scale: 0.5, cacheFrames: true },
+         });
+         await new Promise(r => setTimeout(r, 300));
+         await commands.run('project.save');
+         await new Promise(r => setTimeout(r, 900));
+         const root = project.getProject().root;
+         const listed = await window.flux.project.listSequences(root);
+         const open = sequence.getSequence();
+         const onDisk = listed.find(one => one.id === open.id);
+         sequence.updateSequenceSettings({ duration: 0, startTimecode: 0 });
+         return { onDisk: onDisk?.settings ?? null };`,
+    )
+    assert.ok(state.onDisk, 'the sequence should be on disk')
+    assert.equal(state.onDisk.duration, 8)
+    assert.equal(state.onDisk.startTimecode, 3600)
+    assert.equal(state.onDisk.pixelAspect, 2)
+    assert.equal(state.onDisk.fieldOrder, 'upper-first')
+    assert.deepEqual(state.onDisk.colour, { space: 'rec2020', transfer: 'pq', depth: 12 })
+    assert.deepEqual(state.onDisk.audio, { sampleRate: 96000, channels: 6, bitDepth: 32 })
+    assert.deepEqual(state.onDisk.preview, {
+      codec: 'prores', pixelFormat: 'yuv444p10le', scale: 0.5, cacheFrames: true,
+    })
   })
 
   await check('settings that make no sense are refused, not stored', async () => {

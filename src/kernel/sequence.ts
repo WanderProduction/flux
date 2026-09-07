@@ -154,8 +154,21 @@ export interface SequenceSettings {
   width: number
   height: number
   frameRate: number
-  audio: { sampleRate: number; channels: number }
-  preview: { codec: string; pixelFormat: string; cacheFrames: boolean }
+  /**
+   * Where the sequence ends, in seconds — or 0 for "as long as the clips are".
+   *
+   * Zero rather than null because "follow the clips" is a real answer to the
+   * question and not a missing one, and a nullable number would have to be
+   * checked for everywhere it is read. See sequenceDuration.
+   */
+  duration: number
+  /** What the ruler counts from. An hour is the broadcast convention. */
+  startTimecode: number
+  pixelAspect: number
+  fieldOrder: string
+  colour: { space: string; transfer: string; depth: number }
+  audio: { sampleRate: number; channels: number; bitDepth: number }
+  preview: { codec: string; pixelFormat: string; scale: number; cacheFrames: boolean }
 }
 
 export interface SequenceState {
@@ -2174,7 +2187,25 @@ export function removeClips(ids: string[]): number {
 }
 
 /** Last frame occupied by any clip. Drives the scrollable width of the timeline. */
+/**
+ * How far the sequence runs: the clips, or a length that has been pinned.
+ *
+ * The one number the transport, the ruler and the viewer all read, so pinning
+ * a duration is what makes it a *boundary* rather than a note — the playhead
+ * stops there, Go To End goes there, and playing runs out there.
+ *
+ * A pinned duration shorter than the content does not delete anything. The
+ * clips past it are still in the sequence and still in the file; they are
+ * simply after the end, which is exactly what happens when somebody shortens a
+ * sequence to a delivery length and keeps the tail around.
+ */
 export function sequenceDuration(): number {
+  const pinned = sequence.settings.duration
+  return pinned > 0 ? pinned : contentDuration()
+}
+
+/** How far the clips themselves reach, whatever the sequence says its length is. */
+export function contentDuration(): number {
   return sequence.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0)
 }
 

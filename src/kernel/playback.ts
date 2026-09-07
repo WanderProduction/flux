@@ -402,9 +402,17 @@ subscribeSequence(() => {
  * `HH:MM:SS:FF`. Frames rather than milliseconds because a cut lands on a
  * frame, and a timecode that cannot name the frame you are on is decoration.
  */
-export function formatTimecode(seconds: number, frameRate: number): string {
+export function formatTimecode(seconds: number, frameRate: number, startAt = 0): string {
   const safeRate = frameRate > 0 ? frameRate : 24
-  const total = Math.max(0, Math.round(seconds * safeRate))
+  /*
+   * `startAt` is what the sequence counts *from*, not an offset into it.
+   *
+   * An hour is the broadcast convention, and the reason it exists is that
+   * 00:00:00:00 and "no timecode at all" look identical on a tape. Passing it
+   * here rather than adding it at every call site is what keeps the ruler, the
+   * readout and every notice saying the same number.
+   */
+  const total = Math.max(0, Math.round((seconds + startAt) * safeRate))
   const frames = total % safeRate
   const whole = Math.floor(total / safeRate)
   const pad = (n: number) => String(n).padStart(2, '0')

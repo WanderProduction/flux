@@ -1056,7 +1056,16 @@ export function TimelinePanel() {
                 ? { width: asset.width, height: asset.height }
                 : {}),
             ...(sound.kind === 'sound'
-              ? { audio: { sampleRate: sound.sampleRate, channels: sound.channels } }
+              ? {
+                  // The rest of the audio settings are left alone: the file
+                  // says what it was recorded at, not what the sequence should
+                  // be mastered at.
+                  audio: {
+                    ...getSequence().settings.audio,
+                    sampleRate: sound.sampleRate,
+                    channels: sound.channels,
+                  },
+                }
               : {}),
           })
         }
@@ -1965,8 +1974,8 @@ export function TimelinePanel() {
             {sequence.clips.length} clip{sequence.clips.length === 1 ? '' : 's'}
           </span>
           <span className="tool-sep" />
-          <span className="tool-value tool-value--mono">
-            {formatTimecode(time, sequence.settings.frameRate)}
+          <span className="tool-value tool-value--mono tl-timecode">
+            {formatTimecode(time, sequence.settings.frameRate, sequence.settings.startTimecode)}
           </span>
           {playing && rate !== 1 && (
             <span className="tool-value tool-value--shuttle" title="Shuttling — no sound">
@@ -2066,7 +2075,19 @@ export function TimelinePanel() {
                 const seconds = i * step
                 return (
                   <div className="tl-tick" key={i} style={{ left: seconds * zoom }}>
-                    <span>{formatTime(seconds, step)}</span>
+                    {/* Minutes and seconds while the sequence starts at zero,
+                        and full timecode once it does not: a ruler reading
+                        "0:05" on a sequence that starts at an hour is a ruler
+                        that disagrees with every other number on screen. */}
+                    <span>
+                      {sequence.settings.startTimecode > 0
+                        ? formatTimecode(
+                            seconds,
+                            sequence.settings.frameRate,
+                            sequence.settings.startTimecode,
+                          )
+                        : formatTime(seconds, step)}
+                    </span>
                   </div>
                 )
               })}
@@ -2159,6 +2180,30 @@ export function TimelinePanel() {
                 )}
               </div>
             ))}
+
+            {/*
+              * Where a pinned sequence ends.
+              *
+              * Only when one has been pinned: a line at the end of the last
+              * clip would just be redrawing the edge of the last clip. When it
+              * is there it is a boundary the transport actually stops at, so
+              * it has to be visible, and anything past it is dimmed rather
+              * than hidden — the clips are still in the sequence and still in
+              * the file, they are simply after the end.
+              */}
+            {sequence.settings.duration > 0 && (
+              <div
+                className="tl-end"
+                style={{ left: duration * zoom }}
+                title={`Sequence ends at ${formatTimecode(
+                  duration,
+                  sequence.settings.frameRate,
+                  sequence.settings.startTimecode,
+                )}`}
+              >
+                <span className="tl-end-past" />
+              </div>
+            )}
 
             {/* One playhead over every lane, drawn last so nothing covers it. */}
             <div

@@ -730,6 +730,34 @@ kbd {
 /* After the lane's own colour, not before it: a targeted audio lane has two
    backgrounds competing for the same property, and the one that says which
    track the keyboard is pointing at is the one that has to win. */
+/*
+ * Where a pinned sequence ends.
+ *
+ * A line, and everything past it dimmed. Dimmed rather than hidden because the
+ * clips out there are still in the sequence and still in the file — somebody
+ * shortened the sequence to a delivery length and kept the tail, which is an
+ * ordinary thing to do and not a mistake to be tidied away.
+ */
+.tl-end {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--flux-warn);
+  pointer-events: none;
+  z-index: 3;
+}
+.tl-end-past {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* Wide enough to cover whatever is out there; the content is only ever a few
+     seconds past the end because the panel sizes itself to the content. */
+  width: 100vw;
+  background: color-mix(in srgb, var(--flux-bg) 55%, transparent);
+}
+
 .tl-lane--target {
   background: color-mix(in srgb, var(--flux-accent) 7%, var(--flux-bg-panel));
 }
