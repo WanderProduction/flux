@@ -1,5 +1,5 @@
 import { assetUrl } from '../fsBridge'
-import { readAudioTrack, readVideoTrack } from '../../../shared/mp4.js'
+import { displaySize, readAudioTrack, readVideoTrack } from '../../../shared/mp4.js'
 import { BYTES_PER_SAMPLE, decodeTrack, encodeTrack } from '../../../shared/mp4Index.js'
 
 /**
@@ -57,6 +57,13 @@ export interface VideoTrack {
   pts: Float64Array
   key: Uint8Array
   order: Int32Array
+  /**
+   * Degrees clockwise the picture must be turned to be upright.
+   *
+   * `width` and `height` above stay coded, so a vertically shot clip is
+   * 1920x1080 with a rotation of 90. See displaySize() in shared/mp4.js.
+   */
+  rotation: number
 }
 
 export type TrackResult = { ok: true; track: VideoTrack } | { ok: false; reason: string }
@@ -188,11 +195,23 @@ export async function forgetIndex(path: string, kind: TrackKind = 'video'): Prom
 }
 
 export interface VideoInfo {
+  /**
+   * As displayed, with the file's rotation already applied — so a vertically
+   * shot clip reports 1080x1920 even though it is coded 1920x1080.
+   *
+   * This is the shape a sequence takes from its first clip, which is the only
+   * thing this is used for, and the displayed shape is the only one that
+   * answers it. Reporting the coded shape gave a landscape sequence for
+   * vertical footage with the picture letterboxed inside it — on two in five
+   * files in the library this was built against.
+   */
   width: number
   height: number
   /** Frames per second, from the sample table rather than a container field. */
   frameRate: number
   duration: number
+  /** Degrees clockwise the picture carries. 0 unless the file is turned. */
+  rotation: number
 }
 
 /**
@@ -206,8 +225,9 @@ export interface VideoInfo {
 export async function videoInfoFor(path: string): Promise<VideoInfo | null> {
   const index = await trackFor(path, 'video')
   if (!index.ok || !(index.track.duration > 0)) return null
-  const { width, height, count, duration } = index.track
-  return { width, height, duration, frameRate: count / duration }
+  const { count, duration, rotation } = index.track
+  const shown = displaySize(index.track)
+  return { width: shown.width, height: shown.height, duration, frameRate: count / duration, rotation }
 }
 
 /** Reads bytes for the demuxer through the same ranged protocol the decoder uses. */

@@ -26,6 +26,9 @@ import * as indexCache from './kernel/media/indexCache'
 import * as peaks from './kernel/media/peaks'
 import * as mixer from './kernel/media/mixer'
 import * as audioSource from './kernel/media/audioSource'
+import * as batchImport from './kernel/batchImport'
+import * as batchExport from './kernel/batchExport'
+import * as renderBridge from './kernel/renderBridge'
 
 // Panels register before the first render so the dock's component map is
 // complete on mount. Plugins will hook in here later, ahead of this call.
@@ -80,6 +83,17 @@ if (import.meta.env.DEV) {
       indexCache,
       peaks,
       mixer,
+      /*
+       * The batch modules go on the handle for the reason attach() gives: a
+       * harness that reaches them by dynamic import gets a *different module
+       * instance*, and these two mutate the sequence and asset stores. A
+       * separate instance would lay its clips into a store nothing is showing,
+       * and the checks would read an empty timeline and fail for a reason that
+       * has nothing to do with the code under test.
+       */
+      batchImport,
+      batchExport,
+      renderBridge,
       media: { audioSource },
     },
   })

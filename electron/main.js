@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, screen, shell } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
@@ -11,8 +11,11 @@ import {
   listDirectory,
   listDrives,
   listSubfolders,
+  scanFootage,
 } from './filesystem.js'
 import { serveFile } from './assetServer.js'
+import { checkEncoder, findTools } from './render.js'
+import { RenderQueue } from './renderQueue.js'
 import {
   forgetDerived,
   pruneCache,
@@ -428,6 +431,25 @@ ipcMain.handle('fs:subfolders', async (_e, dirPath) => {
 ipcMain.handle('fs:exists', (_e, paths) => existsMany(paths))
 
 /**
+ * Every media file under a folder, for a batch import.
+ *
+ * Takes as long as the tree does — 11,213 files across 1,080 folders measured
+ * at 407ms — which is why it is one call rather than the renderer walking the
+ * tree a listing at a time over IPC. The same walk done as 1,080 round trips
+ * is a window that stops repainting.
+ */
+ipcMain.handle('fs:scan', async (_e, dirPath) => {
+  try {
+    return { ok: true, scan: await scanFootage(dirPath) }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err.code === 'EACCES' || err.code === 'EPERM' ? 'denied' : 'unreadable',
+    }
+  }
+})
+
+/**
  * Project state lives inside the project folder, not in userData: opening a
  * different project must show a different timeline, and copying a project
  * folder to another machine has to bring its contents with it.
@@ -520,6 +542,74 @@ ipcMain.handle('dialog:pickDirectory', async (event) => {
   })
   return result.canceled ? null : (result.filePaths[0] ?? null)
 })
+
+ipcMain.handle('dialog:pickOutputDirectory', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Where should the exports go?',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  return result.canceled ? null : (result.filePaths[0] ?? null)
+})
+
+/**
+ * The export queue.
+ *
+ * One at a time, app-wide, and held here rather than in the renderer: an export
+ * runs for minutes or hours and must not be at the mercy of a panel closing or
+ * a workspace being switched. See electron/renderQueue.js.
+ *
+ * Progress is pushed rather than polled. A queue of four hundred jobs emits on
+ * every ffmpeg stats line, so the renderer gets told and coalesces it into a
+ * render; asking every frame for the state of something that changes twice a
+ * second is work for nothing.
+ */
+let queue = null
+
+ipcMain.handle('render:tools', async () => {
+  const found = await findTools()
+  if (!found.ok) return { ok: false, error: found.error }
+  const encoder = await checkEncoder()
+  if (!encoder.ok) return { ok: false, error: encoder.error, version: found.version }
+  return { ok: true, version: found.version }
+})
+
+ipcMain.handle('render:start', async (event, jobs, config) => {
+  if (queue && !queue.finished) return { ok: false, error: 'an export is already running' }
+
+  const sender = event.sender
+  queue = new RenderQueue({
+    jobs,
+    outDir: config.outDir,
+    concurrency: config.concurrency,
+    options: config.options,
+    resume: config.resume !== false,
+    onEvent: (payload) => {
+      // The window can be gone while an export is still running.
+      if (!sender.isDestroyed()) sender.send('render:event', payload)
+    },
+  })
+
+  const summary = await queue.run()
+  return { ok: true, summary }
+})
+
+ipcMain.handle('render:cancel', () => {
+  if (!queue || queue.finished) return false
+  queue.cancel()
+  return true
+})
+
+ipcMain.handle('render:state', () => (queue ? queue.state() : null))
+
+/**
+ * Opens the output folder in the OS file manager.
+ *
+ * An export's whole point is a folder of files somewhere else, so "show me"
+ * is the obvious next thing to want, and making someone navigate to a path they
+ * just watched scroll past is a small cruelty.
+ */
+ipcMain.handle('render:reveal', (_e, dirPath) => shell.openPath(dirPath))
 
 ipcMain.handle('dialog:pickFiles', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)

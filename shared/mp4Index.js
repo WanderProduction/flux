@@ -55,8 +55,15 @@ const MAGIC = 0x464c5849
  *   1 — offset/bytes/dts/pts/key/order, presentation times shifted to zero.
  *   2 — channel count and sample rate, so an audio track's index is as
  *       complete as a video track's.
+ *   3 — display rotation. An index written by format 2 has no way to say "this
+ *       clip is a quarter turn out", and the honest default for a missing field
+ *       is zero — which is indistinguishable from a file that really is
+ *       upright. Two in five files in the library this was built for are
+ *       rotated, so reusing those indexes would draw them on their side with
+ *       nothing anywhere saying why. They are rejected and rebuilt instead,
+ *       which costs milliseconds.
  */
-export const FORMAT = 2
+export const FORMAT = 3
 
 /**
  * Fixed part of the header; the codec string and avcC record follow it.
@@ -73,7 +80,7 @@ export const FORMAT = 2
  *   22  u16  avcC length
  *   24  u32  checksum of everything past this header
  *   28  u16  channel count (0 on a video track)
- *   30  u16  reserved
+ *   30  u16  display rotation, degrees clockwise (0, 90, 180, 270)
  *   32  f64  duration, seconds
  *   40  u32  sample rate (0 on a video track)
  *   44  u32  reserved
@@ -156,6 +163,7 @@ export function encodeTrack(track) {
   head.setUint16(20, codec.length, true)
   head.setUint16(22, description.length, true)
   head.setUint16(28, track.channels ?? 0, true)
+  head.setUint16(30, track.rotation ?? 0, true)
   head.setFloat64(32, track.duration, true)
   head.setUint32(40, track.sampleRate ?? 0, true)
 
@@ -221,6 +229,7 @@ export function decodeTrack(bytes) {
     width: head.getUint16(12, true),
     height: head.getUint16(14, true),
     channels: head.getUint16(28, true),
+    rotation: head.getUint16(30, true),
     sampleRate: head.getUint32(40, true),
     timescale: head.getUint32(16, true),
     duration: head.getFloat64(32, true),

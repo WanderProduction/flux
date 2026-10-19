@@ -3,10 +3,14 @@
 **A keyboard-driven media engine where the timeline and the node graph are the same project —
 and every kind of media can drive every other kind, in real time.**
 
-> **Status: pre-alpha shell.** What runs today is the application frame — panels, workspaces,
-> the command palette and the keyboard spine. **There is no media engine yet.** Nothing decodes,
-> renders, plays or exports. Panels show static scaffolding so the shell can be evaluated as a
-> shell. Do not mistake any panel for a working feature.
+> **Status: pre-alpha.** The application frame is real — panels, workspaces, the command palette
+> and the keyboard spine — and so now is a working slice of the engine: mp4 is demuxed here and
+> decoded through WebCodecs, sequences play with summed audio, the timeline edits, and
+> [Batch](#batch-a-folder-in-a-folder-out) imports a folder of footage and renders what survives
+> review through ffmpeg. **What is not here is everything the engine is eventually for**: the
+> signal graph, the node map, the compute scheduler, a real exporter, plugins. Seven of the nine
+> tools in the strip are unbuilt and say so. Nothing in the UI is painted on — if a panel offers
+> something, it does it — but this is a long way from a finished editor.
 
 - [`VISION.md`](VISION.md) — what this is and why it exists.
 - [`docs/INTERACTION-MODEL.md`](docs/INTERACTION-MODEL.md) — panels, workspaces, the nested node
@@ -35,6 +39,17 @@ npm run dev:renderer
 The renderer runs fine in a plain browser — layouts fall back to `localStorage` instead of the
 Electron store, so the whole shell stays testable without booting the desktop app.
 
+**[Batch](#batch-a-folder-in-a-folder-out) needs ffmpeg**, and only Batch does. Everything else —
+browsing, importing, editing, playback — runs without it.
+
+```bash
+winget install Gyan.FFmpeg
+```
+
+`ffmpeg` and `ffprobe` have to be reachable: `PATH` first, then the usual Windows install
+locations. The encode uses `hevc_nvenc`, so it also wants an NVIDIA card. Both are checked once
+when the panel opens and reported plainly, rather than discovered as four hundred failed encodes.
+
 ---
 
 ## What works today
@@ -47,7 +62,7 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
-| **Panel focus** | `Ctrl 1`–`Ctrl 3`, opening the panel if the workspace doesn't have it. |
+| **Panel focus** | `Ctrl 1`–`Ctrl 4`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
@@ -62,16 +77,20 @@ Electron store, so the whole shell stays testable without booting the desktop ap
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
 | **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
-| **Decode pipeline** | H.264 mp4 is demuxed here and decoded through WebCodecs onto a canvas. |
+| **Decode pipeline** | H.264 and HEVC mp4 are demuxed here and decoded through WebCodecs onto a canvas. |
 | **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
 | **No sound, said out loud** | A file with none says so on its card and on the drop, rather than landing as picture alone in silence. |
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 | **Level, mute, solo** | Per track, in decibels, saved with the project. |
 | **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
 | **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
+| **HEVC** | 4:2:2 10-bit included — the profile the cameras in this archive shoot. |
+| **Rotation** | Footage shot with the body turned lands and renders upright, not on its side. |
+| **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
+| **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
 
-Four built-in panels: **Viewer**, **Timeline**, **Content Browser** and **Tools** — and all four do
-real work.
+Five built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools** and **Batch** — and
+all five do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
 not exist yet, and a tour of empty rooms says less about where this is going than three that are
 furnished. They come back when there is something to put in them.
@@ -839,6 +858,236 @@ compressed track in memory.
 Not yet: any UI for removing a track (the kernel refuses to remove the last one, since a sequence
 with none has nowhere to drop).
 
+### Batch: a folder in, a folder out
+
+`Ctrl 4`. Built for one job: an archive of 10,898 video files across 343 folders, 2.3TB of
+camera footage that has to be reviewed, culled and compressed. It is three steps, and the
+middle one is not in the panel.
+
+#### The timeline is the manifest
+
+This is the whole idea, and it is why there is no render list, job grid or selection model
+anywhere in the batch code.
+
+A clip already carries everything one encode needs: which file it plays, where in that file it
+starts, how long it runs and at what rate. So a folder laid out as clips end to end **is** the
+render list — and every tool that already exists is already a tool for editing it. The razor
+splits a take into the two bits worth keeping. Trimming the edges drops the handles. `Shift W`
+ripples a bad take out. `Delete` removes what should not survive. Drag reorders.
+
+Then export writes one file per clip left on a video track. Nothing was ever "marked for
+export"; the edit is the instruction.
+
+That is also what makes the cuts **frame-accurate**. The export re-encodes from the original
+rather than copying out of an archive, so there is no keyframe to snap to — a 4.000s cut from a
+50fps source comes out at exactly 200 frames, verified on real footage.
+
+#### 1 · Import a folder
+
+Choose a folder and FLUX scans it, then says what importing it would mean *before* doing it —
+how many files, how much footage, and which folders it walked past. The last one matters more
+than it sounds: an editing suite writes a `Proxies` folder of low-resolution stand-ins next to
+the originals, with the same filenames and a suffix. Measured in this archive: folders of 178
+proxies beside the 178 originals. An import that took both would bring every shot in twice and
+look like a success, so the scan skips them — and **names every folder it skipped**, because a
+filter you cannot read is a filter you are trusting.
+
+The list lives in [`shared/footageFilter.js`](shared/footageFilter.js): `Proxies`,
+`Media Cache`, `Peak Files`, `Auto-Save`, `Project Backups`, `LOCAL CACHE`. Render folders —
+`EX`, `AE`, `Pre-comp` — are deliberately **not** on it. They hold finished exports rather than
+duplicates of camera footage, and some are the only copy of something delivered; skipping them
+would be a decision about someone's work rather than about clutter.
+
+Scanning 11,213 files across 1,080 folders takes about 400ms, so this is one IPC call rather
+than the renderer walking the tree a listing at a time.
+
+Everything is **linked, never copied**, and not as a preference — copying hundreds of gigabytes
+into the project to review it is not a thing anyone wants. The copy-or-link question the
+Content Browser asks is therefore not asked here.
+
+**Stills are left out, and counted.** A batch import is for footage. A still has no duration of
+its own, so it arrives as a five-second clip of a static picture — and a folder of camera
+footage with a logo and three reference shots in it becomes a review with four frozen clips
+padding it out. They are reported rather than silently dropped, because "14 files, 9 clips" is a
+discrepancy someone would otherwise have to go and explain to themselves. The Content Browser
+still imports images exactly as before.
+
+Export refuses a still too, for the same reason plus one more: it *could* encode one —
+`-loop 1 -framerate n` makes a video of a held frame — and that is precisely why leaving it out
+is a decision rather than an oversight. The five seconds come from a UI default, so the length
+of the file produced would be a number nobody chose.
+
+Clips land end to end on a new sequence named after the folder, in scan order, which for camera
+footage is also chronological. The sequence takes its shape from the first clip the same way a
+hand drop does.
+
+**Two thousand clips is the limit**, and it is a limit on what can be reviewed rather than on
+what the timeline holds. Past a couple of thousand blocks a sequence stops being something you
+scrub and becomes a list you scroll. Pointing at a whole drive therefore does not import it: it
+answers with the folders holding the most footage, so the next move is obvious. The busiest
+folder in this archive holds 406 files, so a per-shoot import always fits.
+
+**An import is one undo step.** Placing 406 clips by calling `addClip` 406 times would push 406
+history entries, overflow the 200-entry limit and throw away everything the session had done
+before it — leaving an import that takes 406 presses to undo. `asOneStep` in
+[`kernel/sequence.ts`](src/kernel/sequence.ts) suspends the notification and the snapshot and
+publishes once, so `Ctrl Z` takes the whole import back out, which is the only sensible meaning
+of undoing an import.
+
+Clips are laid out in **whole frames**, which is subtler than it looks. `addClip` snaps every
+start to the frame grid, so placing a clip at the exact second the previous one ended lands it
+up to half a frame *before* that end — the two overlap, both are under the playhead for one
+frame, and the compositor blends them. Across a hundred clips that is a hundred single-frame
+cross-dissolves nobody asked for, each too brief to see and too consistent to be an accident
+once noticed. Whole frames make one clip's end exactly the next one's start.
+
+#### 2 · Review it on the timeline
+
+The panel says so and then gets out of the way. This step is the editor.
+
+#### 3 · Export
+
+Choose an output folder and FLUX reads the sequence: how many clips, how much footage, how much
+it will read and roughly how much it will write. The plan is rebuilt whenever the sequence
+changes, so the numbers next to the button belong to the edit on screen rather than to the one
+from twenty minutes ago.
+
+**Flat output, original names kept.** Two kinds of collision follow, and they mean different
+things. Several cuts of one source — a clip razored in three — get `DSCF3957.mp4`,
+`DSCF3957_02.mp4`, `DSCF3957_03.mp4`, numbered in timeline order. A *different* source with the
+same name, because camera filenames restart in every shoot folder, gets `DSCF3957_1.mp4`. Both
+suffixes are necessary and they are only one character apart, which is the real cost of flat
+output: which shoot a clip came from is not recoverable from its name. The export log carries
+the full source path for every row, which is where that question gets answered.
+
+**Three clips are refused rather than guessed at**, and each is listed by name: a missing or
+offline source, a clip with no length, and a clip that has been **stretched**. The last one is
+the interesting refusal — a speed change needs a frame-rate decision, and the format refuses to
+conform frame rates at all for the reason below. Undo the stretch and it exports.
+
+Two at a time by default. NVENC allows eight concurrent sessions and encoding runs about six
+times realtime, so the GPU is not what saturates first — the disk is, and four parallel reads of
+large files off one spindle is slower in total than two.
+
+**The queue lives in the main process.** An export of a shoot folder is tens of minutes and of a
+drive is hours; owned by a React component it would be at the mercy of a re-render or a panel
+being closed, and "I closed the panel and my nine-hour render stopped" is not a thing an
+archiver may do.
+
+**Resumable.** A run skips every output that already exists *and* verifies. The `and` is the
+point: skipping on existence alone would permanently adopt whatever a killed process left
+behind, which is a hole in the archive that nothing would ever look for again.
+
+**Nothing is ever moved or deleted.** Outputs are written alongside, a human deletes the
+originals after spot-checking, and the log is what makes that safe.
+
+#### The encode, and why every flag is what it is
+
+[`shared/renderFormat.js`](shared/renderFormat.js) holds it once — imported by the renderer to
+show it, the main process to run it, and the harness to check it.
+
+```
+ffmpeg -ss <in> -i SOURCE -t <len> \
+  -c:v hevc_nvenc -preset p6 -rc vbr -cq 26 -b:v 0 -g 30 \
+  -pix_fmt p010le -tag:v hvc1 \
+  -c:a aac -b:a 192k -dn -movflags +faststart \
+  -f mp4 OUT.mp4
+```
+
+None of those numbers is taste. Each was measured against this archive's own footage with VMAF,
+against x265 and against Adobe Media Encoder on identical clips.
+
+| | |
+|---|---|
+| `-cq 26` | Constant quality. Worst 1% low measured anywhere: **95.64 VMAF** — the visual transparency threshold. Matched x265 CRF 20 on size and mean quality, 10–13× faster. |
+| `-b:v 0` | **Mandatory**, not redundant with `-rc vbr`. Without it NVENC silently caps the bitrate and constant quality stops being constant. |
+| `-g 30` | One-second keyframes, so the *archive* can be re-cut later with `-c copy` at no quality cost. Costs 4.9% size; VMAF measured flat across GOP 250/60/30/15, so the precision is bought with storage alone. |
+| `-pix_fmt p010le` | 10-bit from 10-bit. This footage gets re-encoded again when it is reused, and ten bits survives that second generation far better than eight. |
+| `-tag:v hvc1` | **Mandatory.** Without it HEVC-in-MP4 will not play in QuickTime, Finder preview or Premiere on macOS, which makes the archive unusable on half the machines that need to read it. |
+| `-f mp4` | Stated rather than inferred: an encode writes to a `.flux-part` temporary and renames on success, and ffmpeg picks its muxer from the extension. Without this the whole command is refused with `Error opening output files: Invalid argument`. |
+| no `-vf scale` | 4K stays 4K. Punch-in is the main value of 4K b-roll, and an archive that threw it away would have to be shot again. |
+| no rate conform | 25, 29.97 and 50fps all stay as shot. The 50fps material is kept for slow motion. |
+
+Two measured findings worth keeping, because both are counterintuitive:
+
+**Adaptive quantisation lost.** `-spatial-aq`, `-temporal-aq` and `-rc-lookahead` were tested on
+four clips including deliberately-chosen hard strobing footage, on the theory that they would
+help exactly there. They used 9–16% *more* bitrate **and** scored worse on mean, 1% low and
+minimum, on 4 of 4. They are absent on purpose rather than by omission. The honest caveat: VMAF
+under-rewards AQ, because AQ targets banding and VMAF barely weights it. The decision stands on
+consistency and on it also costing more — but if banding ever turns up in dark gradients,
+re-test by eye rather than by VMAF.
+
+**Strobing footage is easier to compress, not harder.** The hardest-looking clip in the archive
+scored 99.91 VMAF at 5.8 Mbps. A strobe-lit room is mostly near-black between flashes and blown
+flat during them, and neither holds detail. What costs bitrate is fine detail in motion —
+daylight foliage, crowds, texture. Nobody should over-engineer for the strobes.
+
+Measured compression: 10.6× to 23.9× across varied content. **12× is the planning figure**, and
+it is what the panel's estimate uses.
+
+#### Why an encode is not finished when ffmpeg exits 0
+
+This is the part that justifies its own module. During the encode tests, an Adobe Media Encoder
+export produced **1108 frames at 29.97fps from an 1850-frame 50fps source**. Exit code fine.
+File plays. Thumbnail correct. Two thirds of the motion gone, and nothing anywhere said so — it
+would have surfaced months later, when someone went looking for slow motion they thought they
+had archived.
+
+So every output is re-opened and asserted against its source before it counts as done: same
+displayed size, same frame rate, the frame count the cut asked for, `Main 10`, `yuv420p10le`,
+duration within a second. A file that fails is reported as a failure and **not counted**, which
+is the only thing that makes the saving at the end mean anything.
+
+**The frame count is counted, not read.** `nb_frames` is a container field an encoder can get
+wrong, and a wrong one is exactly the failure being guarded against.
+
+**The size comparison is against the source's *displayed* size**, and that is the trap that
+nearly got through. ffmpeg applies the display matrix on decode and writes upright pixels, so a
+source coded 1920×1080 with `rotation: 90` produces a correct output that is 1080×1920 with no
+rotation flag at all. A verifier comparing `width` to `width` fails it — on **two files in
+five** in this archive.
+
+An encode writes to a `.flux-part` temporary and renames on success, for the same reason the
+project document does: a crash or a cancel must not leave a half-written file where a finished
+one should be, because a resumable run asks "does the output exist" and a truncated file that
+answers yes is a hole nothing would find. A file that fails *verification* is kept, under its
+temporary name — it is the evidence for diagnosing the one clip that went wrong, and no resume
+will mistake it for finished work.
+
+**Never write a bigger file.** Some of this material is already a 35 Mbps delivery export, and
+some of it — finished logo animations, social exports — is already compressed hard enough that
+re-encoding a few seconds of it costs more than it saves. Where the encode loses and the cut is
+the whole file, the original is copied instead. Where it loses on a *trim* there is no original
+of that range to keep, so the encode is kept and the row is flagged in the log. The panel says
+"larger by 1.3×" rather than "0.8× smaller", which is not a sentence.
+
+#### The log is the point
+
+Every finished job appends a row to `flux-export-log.csv` in the output folder: source, its
+size, output, its size, the ratio, the cut, the source and output frame rates, the frame count
+and the frame count expected.
+
+Two reasons, and neither is bookkeeping. The first is that it is the only way the saving is
+*provable* — "2.3TB became 195GB" is a claim, and a file with one row per clip and a ratio on
+each is the evidence. It is what makes it safe to delete an original. The second is that it is
+how the one clip that went wrong gets found, which is not something a progress bar can do across
+four hundred encodes.
+
+A log that cannot be written says so once and does not stop the export. Losing nine hours of
+encoding because a CSV was open in Excel would be absurd.
+
+#### What it needs, and what it does not do yet
+
+ffmpeg and ffprobe on `PATH` — `winget install Gyan.FFmpeg` — plus an NVIDIA card for
+`hevc_nvenc`. Both are checked once, up front, and said plainly: the difference between "no
+NVIDIA card" and "your first 400 encodes failed" is worth one probe.
+
+*Not yet: the unattended whole-tree mode that compresses an archive with no review at all. The
+pieces are all here — the scan, the format, the queue, the verifier and the log — and what is
+missing is the job that walks a tree writing a parallel output tree rather than reading a
+sequence.*
+
 ### Serving media
 
 [`electron/assetServer.js`](electron/assetServer.js) exists for one reason: **byte ranges**.
@@ -862,6 +1111,53 @@ One trap worth naming, because it bit the checks before it bit anyone else: **a 
 fine with no range support at all**, because Chromium simply buffers the whole thing. A check that
 watches a short fixture seek therefore passes on a completely broken server. The contract is checked
 against the headers directly instead.
+
+### What the demuxer reads, and what the pictures do about rotation
+
+Two additions that only real camera footage would have forced, both in
+[`shared/mp4.js`](shared/mp4.js).
+
+**HEVC.** The demuxer read `avcC` and nothing else, so every HEVC file fell back to the `<video>`
+element — which plays, so nothing looked broken; it just quietly stopped being
+frame-addressable, which is the entire point of the pipeline. Sampled across this archive: 29% is
+HEVC **4:2:2 10-bit** (`Rext`, what the Fujifilm bodies shoot) and 13% is HEVC Main. Measured
+directly against this machine's Chromium, all of it configures *and decodes* — including the 4:2:2
+profile, which is the one a reasonable person would assume a browser could not touch.
+
+The codec string is the fiddly part. `avc1.PPCCLL` is a transcription of three bytes; HEVC's is a
+derivation, and the field that catches people is the compatibility mask — the bitstream stores
+`flag[j]` MSB-first and the codec string wants that same 32-bit word **with its bit order
+reversed**. Main 10, whose only set flag is `flag[2]`, is `0x20000000` in the file and the single
+digit `4` in the string. Chromium's `isConfigSupported` was measured not to validate that field at
+all, so getting it wrong would not fail here — it would be worse: a string that is wrong and
+accepted, carried into the index cache and printed in diagnostics, disagreeing with every other
+tool that reads the same file.
+
+**Rotation.** Cameras do not rotate pixels. A clip shot with the body turned is coded exactly as the
+sensor read it — 1920×1080 — and the container carries a 3×3 matrix in `tkhd` saying how to put it
+back up. In this archive that is not an edge case: **two files in five** are vertical, every one
+coded landscape with `rotation: 90`.
+
+Nothing in FLUX read that matrix, and the reason it went unnoticed is instructive. Chromium applies
+it for `<video>` itself, so thumbnails and the probe had always drawn these upright — the same clip
+looked right on its card and lay on its side on the canvas. Parsing is checked against `ffprobe` on
+real files rather than against a fixture, and agreed on 29 of 29 including a 270° case.
+
+`width` and `height` stay **coded**, because that is what a decoder must be configured with; a
+separate `displaySize()` gives the shape on screen. Collapsing the two is how a vertical clip ends
+up configured 1080×1920 and decoding nothing. The compositor fits on the *displayed* shape and then
+rotates — fit first and rotate after and the picture overflows one axis and gaps the other.
+
+The displayed shape is also what a sequence takes from its first clip, which was a real bug before
+rotation was read: a folder of vertical footage produced a landscape sequence with the whole review
+letterboxed inside it.
+
+**Audio FLUX still cannot read:** 38% of this archive is `pcm_s24le`, and the demuxer handles only
+AAC. Those files land as picture with no sound — and the card says *"FLUX cannot read this file's
+audio yet"* rather than *"no soundtrack"*, which is the distinction
+[`media/peaks.ts`](src/kernel/media/peaks.ts) exists to keep. Telling someone the second when it is
+the first is a lie they could act on, by going to look for a fault in their footage. PCM needs no
+decoder — it is raw samples — so this is a demuxer gap rather than a platform one.
 
 ### Playback
 
@@ -1278,22 +1574,25 @@ in the skinning system.
 src/
   kernel/       commands · panels · keymap · workspaces · store
                 project · view · playback · fsBridge · assets · sequence
-                importPipeline · thumbnails · mediaProbe          (the seams)
+                importPipeline · thumbnails · mediaProbe
+                batchImport · batchExport · renderBridge           (the seams)
     media/      the decode pipeline: demux index -> VideoDecoder -> frames
                 audio peaks -> the waveform on a clip
                 the mixer: every audio clip under the playhead, summed
                 (the compositor lives in the Viewer, which owns the canvas)
                 and the cache that means a file is read once, not once per open
   launcher/     the project chooser, shown until a project is open
-  panels/       the three built-in panels, registered via the SDK
+  panels/       the five built-in panels, registered via the SDK
   shell/        command palette · the import-choice host
   styles/       theme tokens + app styles
-shared/         media types, project naming, the .flux and .fluxseq formats,
-                the mp4 demuxer, and the on-disk shape of its index and of audio peaks
+shared/         media types, footage filter, project naming, the .flux and .fluxseq formats,
+                the archive encode settings, the mp4 demuxer, and the on-disk shape of its
+                index and of audio peaks
                 — imported by BOTH main and renderer, and by the harness
 build/          icons, generated by npm run icons (the script is the source)
 electron/       main process · preload bridge · filesystem reads · project layout
                 media cache (indexes, kept with the app's data, not the project)
+                render: one ffmpeg cut, verified · renderQueue: many, with a log
 scripts/        verification harnesses
 ```
 
@@ -1372,6 +1671,59 @@ It also covers the modules that let an index be kept rather than rebuilt, and th
 peaks, for the same reason: none of them imports electron, so all of them run against a real file in
 a temp directory. The questions there are whether a restored index is the *same* index in every
 element of every array, and whether a stale, torn or rotted one is refused rather than believed.
+
+#### Against real footage, not fixtures
+
+Four suites take a path and run against whatever a camera actually wrote. The fixtures are built to
+be awkward in known ways, which is what makes them good for the demuxer and useless for the things
+below — each of these checks something that could only have been found on real material.
+
+```bash
+npm run verify:footage -- "E:\FOOTAGE\WANDER\DSCF2308.MOV"
+```
+
+Decodes a file through the real pipeline in the running app: the demuxer's answer compared against
+`ffprobe`'s, a frame actually drawn, the canvas confirmed non-black, and the picture confirmed to
+have reached it through the **pipeline rather than the element**. That last one is the check that
+matters — a fallback plays, so nothing looks wrong when HEVC quietly stops being decoded here.
+
+```bash
+npm run verify:render -- "E:\FOOTAGE\WANDER\DSCF2308.MOV"
+```
+
+No app. Encodes a cut and checks the output is the length, rate, frame count and format it was asked
+for, that a **rotated** source comes out upright and is *accepted* rather than failed for changing
+shape, that a cancel leaves nothing finished-looking behind, and that resume only skips an output
+that genuinely verifies.
+
+Two of its checks are canaries, and without them the suite proves nothing — a verifier that accepts
+everything passes all the others. One truncates a good output and requires it to be **rejected**;
+the other deliberately reproduces the Adobe failure, re-encoding at 29.97 from a 50fps source, and
+requires that to be rejected too. That is the exact error the whole verification step was built for.
+
+```bash
+npm run verify:queue -- "E:\FOOTAGE\WANDER\DSCF2308.MOV" "E:\FOOTAGE\AG GROUPS\REELS\DSCF1906.MOV"
+```
+
+No app. Runs the queue: every job reaching a terminal state, the log carrying a verifiable row per
+job, a second run skipping what already verified, a damaged output being **re-encoded rather than
+skipped**, and cancel stopping it promptly. Each source is cut twice so the `_02` naming is
+exercised.
+
+```bash
+npm run verify:batch -- "E:\FOOTAGE\AG GROUPS\REELS"
+```
+
+The round trip, and the only check that proves the idea. It walks the folder itself — not sharing
+the scan's implementation, only the two shared definitions it is contracted to — and compares. Then
+it imports, checks the import is **one undo step**, that clips abut exactly with no gap or overlap,
+that they are in scan order, and that a vertical first clip gives a vertical sequence.
+
+Then it *edits*: deletes most of the clips, razors one in two, trims the head of another — exactly
+what a review pass does — and exports. No export list is ever built, so the number of files that
+appear has to follow from what was left on the timeline. It then looks at the folder on disk: one
+`.mp4` per surviving clip, exactly one carrying the `_02` suffix, a log beside them, and nothing
+empty.
 
 > **A cache is very good at hiding the code that fills it.** Two checks here passed with the builder
 > deliberately broken, because clearing the in-memory layer still left the entry on disk and the
@@ -1468,8 +1820,15 @@ move behind the kernel seam to native later without touching the UI.
 ## Not built yet
 
 Everything below the shell: the signal graph, the compute scheduler (GPU/CPU/RAM split), caching and
-proxies, playback, the audio graph, rendering, export, plugins, skinning UI. Audio files are not
-importable yet — the Content Browser is image and video only.
+proxies, the audio graph, plugins, skinning UI. Audio files are not importable yet — the Content
+Browser is image and video only, and `pcm_s24le` soundtracks are read as *unreadable* rather than
+decoded.
+
+**Rendering is batch-only.** [Batch](#batch-a-folder-in-a-folder-out) exports one file per clip
+through ffmpeg, which is a long way from an exporter: there is no render of a *sequence* as a single
+piece, no composite of stacked layers, no mixdown of the audio graph, and no preview render files.
+What exists is the path an archive needs — cut, encode, verify, log — and it deliberately bypasses
+the compositor rather than going through it.
 
 ## License
 
