@@ -15,6 +15,7 @@ import { ViewerPanel } from './ViewerPanel'
 import { TimelinePanel } from './TimelinePanel'
 import { ContentBrowserPanel } from './ContentBrowserPanel'
 import { ToolsPanel } from './ToolsPanel'
+import { BatchPanel } from './BatchPanel'
 
 export function registerBuiltinPanels() {
   panels.registerAll([
@@ -41,6 +42,12 @@ export function registerBuiltinPanels() {
       title: 'Content Browser',
       description: 'Browse the machine and import media into the project',
       component: ContentBrowserPanel,
+    },
+    {
+      id: 'batch',
+      title: 'Batch',
+      description: 'Import a folder of footage, and export what survives review',
+      component: BatchPanel,
     },
   ])
 }

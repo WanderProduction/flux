@@ -407,9 +407,58 @@ export function clearHistory(): void {
   mark = takeSnapshot()
 }
 
+/**
+ * Depth of nested asOneStep calls, and whether anything changed inside them.
+ *
+ * A counter rather than a flag so the outermost caller is the one that
+ * publishes: a batch that calls another batched helper must not have its step
+ * closed early by the inner one finishing.
+ */
+let grouping = 0
+let groupChanged = false
+
 function emit() {
+  if (grouping > 0) {
+    groupChanged = true
+    return
+  }
   record()
   listeners.forEach((listener) => listener())
+}
+
+/**
+ * Runs many edits as one change: one undo step, one notification.
+ *
+ * Every mutation here calls `emit`, which snapshots for undo and re-renders
+ * whatever is listening. That is right for an edit made by a hand — and wrong
+ * for one made by a loop. A batch import placing 406 clips would otherwise push
+ * 406 history entries, overflowing HISTORY_LIMIT and throwing away everything
+ * the session had done before it, leaving an import that takes 406 presses to
+ * undo. It would also re-render the timeline 406 times while building it.
+ *
+ * So the work is wrapped and the step is published once at the end. Undo then
+ * takes the whole import back out, which is the only sensible meaning of
+ * undoing an import.
+ *
+ * **The work must be synchronous.** An `await` inside it would return to the
+ * event loop with the group still open, so an unrelated edit arriving in that
+ * gap would be swallowed into the same step — and if the promise rejected, the
+ * group would never close and nothing would ever repaint again. Anything that
+ * has to wait (probing files, reading indexes) belongs before the call, which
+ * is also the shape that lets a batch report progress while it waits.
+ */
+export function asOneStep<T>(work: () => T): T {
+  grouping += 1
+  try {
+    return work()
+  } finally {
+    grouping -= 1
+    if (grouping === 0 && groupChanged) {
+      groupChanged = false
+      record()
+      listeners.forEach((listener) => listener())
+    }
+  }
 }
 
 /** Every sequence in the project, in tab order. */

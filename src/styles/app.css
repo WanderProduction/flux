@@ -2502,3 +2502,200 @@ kbd {
   align-self: flex-start;
   margin-top: 2px;
 }
+
+/* ── Batch panel ──────────────────────────────────────────────────
+   Import a folder, review it on the timeline, export what survives.
+   Every colour here resolves through a theme token, so a skin restyles
+   this panel by redefining tokens and touching nothing in this file. */
+.batch {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 10px 12px 18px;
+  font-size: var(--flux-text-md);
+  color: var(--flux-text);
+}
+.batch-step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-step--quiet {
+  opacity: 0.78;
+}
+.batch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--flux-text-lg);
+  font-weight: 600;
+  color: var(--flux-text);
+}
+.batch-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--flux-bg-active);
+  color: var(--flux-text-dim);
+  font-family: var(--flux-font-mono);
+  font-size: 10px;
+}
+.batch-button {
+  align-self: flex-start;
+  padding: 5px 11px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  cursor: pointer;
+}
+.batch-button:hover:not(:disabled) {
+  background: var(--flux-bg-hover);
+}
+.batch-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.batch-button--go {
+  border-color: var(--flux-accent-dim);
+  background: var(--flux-accent-dim);
+  color: #061218;
+  font-weight: 600;
+}
+.batch-button--go:hover:not(:disabled) {
+  background: var(--flux-accent);
+}
+.batch-button--quiet {
+  font-size: var(--flux-text-sm);
+  padding: 3px 9px;
+}
+.batch-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+}
+.batch-path {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+/* A row of label-over-value pairs that wraps rather than scrolling: this
+   panel is often docked narrow beside the timeline. */
+.batch-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 0;
+}
+.batch-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.batch-facts dt {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--flux-text-faint);
+}
+.batch-facts dd {
+  margin: 0;
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-md);
+  color: var(--flux-text);
+}
+.batch-bad {
+  color: var(--flux-warn);
+}
+.batch-note {
+  margin: 0;
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+  color: var(--flux-text-dim);
+}
+.batch-note code {
+  font-family: var(--flux-font-mono);
+  color: var(--flux-text);
+}
+.batch-done {
+  margin: 0;
+  font-size: var(--flux-text-md);
+  line-height: 1.5;
+  color: var(--flux-text);
+}
+.batch-error {
+  margin: 0;
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+  color: var(--flux-warn);
+}
+.batch-warn {
+  margin: 0;
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+  color: var(--flux-warn);
+}
+.batch-warn-inline {
+  color: var(--flux-warn);
+}
+.batch-details {
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+.batch-details summary {
+  cursor: pointer;
+  padding: 2px 0;
+}
+.batch-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-family: var(--flux-font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.batch-list strong {
+  font-family: var(--flux-font);
+  color: var(--flux-text);
+}
+.batch-count {
+  display: inline-block;
+  min-width: 34px;
+  color: var(--flux-accent);
+}
+.batch-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+}
+.batch-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--flux-bg-active);
+  overflow: hidden;
+}
+.batch-bar-fill {
+  height: 100%;
+  background: var(--flux-accent);
+  /* Not animated on width: progress here arrives twice a second from ffmpeg,
+     and a transition longer than the gap between updates makes the bar lag
+     behind the number next to it. */
+}

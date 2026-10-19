@@ -24,7 +24,11 @@
     "verify:timeline": "node scripts/verify-timeline.mjs",
     "verify:launch": "node scripts/verify-launch.mjs",
     "verify:playback": "node scripts/verify-playback.mjs",
-    "verify:demux": "node scripts/verify-demux.mjs"
+    "verify:demux": "node scripts/verify-demux.mjs",
+    "verify:footage": "node scripts/verify-footage.mjs",
+    "verify:batch": "node scripts/verify-batch.mjs",
+    "verify:render": "node scripts/verify-render.mjs",
+    "verify:queue": "node scripts/verify-queue.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",

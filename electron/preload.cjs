@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('flux', {
     list: (dirPath) => ipcRenderer.invoke('fs:list', dirPath),
     subfolders: (dirPath) => ipcRenderer.invoke('fs:subfolders', dirPath),
     exists: (paths) => ipcRenderer.invoke('fs:exists', paths),
+    scan: (dirPath) => ipcRenderer.invoke('fs:scan', dirPath),
+    pickOutputDirectory: () => ipcRenderer.invoke('dialog:pickOutputDirectory'),
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles'),
     pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
     pickProjectFile: () => ipcRenderer.invoke('dialog:pickProjectFile'),
@@ -91,6 +93,26 @@ contextBridge.exposeInMainWorld('flux', {
     /** A .flux double-clicked while FLUX was already running. */
     onOpenTarget: (handler) => {
       ipcRenderer.on('project:open-target', (_e, file) => handler(file))
+    },
+  },
+  /**
+   * Rendering. The queue lives in main — see electron/renderQueue.js — so this
+   * is a remote control for it rather than a wrapper around a local object.
+   *
+   * `onEvent` returns its own unsubscribe, because a panel that mounts and
+   * unmounts repeatedly would otherwise stack a listener per mount and get the
+   * same progress event a dozen times.
+   */
+  render: {
+    tools: () => ipcRenderer.invoke('render:tools'),
+    start: (jobs, config) => ipcRenderer.invoke('render:start', jobs, config),
+    cancel: () => ipcRenderer.invoke('render:cancel'),
+    state: () => ipcRenderer.invoke('render:state'),
+    reveal: (dirPath) => ipcRenderer.invoke('render:reveal', dirPath),
+    onEvent: (handler) => {
+      const listener = (_e, payload) => handler(payload)
+      ipcRenderer.on('render:event', listener)
+      return () => ipcRenderer.removeListener('render:event', listener)
     },
   },
   platform: process.platform,

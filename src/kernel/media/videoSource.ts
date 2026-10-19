@@ -73,6 +73,15 @@ export interface SourceInfo {
   height: number
   duration: number
   frames: number
+  /**
+   * Degrees clockwise the picture must be turned to be upright.
+   *
+   * The width and height above stay *coded* — the shape the decoder hands
+   * back, and the shape it has to be configured with. Anything laying the
+   * picture out wants the two swapped on a quarter turn, which is what
+   * `displaySize` in shared/mp4.js is for.
+   */
+  rotation: number
 }
 
 export type OpenFailure =
@@ -187,6 +196,7 @@ export class VideoSource {
       height: this.track.height,
       duration: this.track.duration,
       frames: this.track.count,
+      rotation: this.track.rotation ?? 0,
     }
   }
 

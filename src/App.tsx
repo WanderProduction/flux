@@ -350,7 +350,13 @@ function Workspace({ project }: { project: Project }) {
         <span className="status-right">
           {flash && <span className="status-flash">{flash}</span>}
           <span className="status-dim">{isDesktop ? 'desktop' : 'browser'}</span>
-          <span className="status-dim">shell only — no engine</span>
+          {/*
+            Said plainly rather than left as "shell only — no engine", which
+            stopped being true once mp4 was demuxed and decoded here. "pre-alpha"
+            is the honest word: a working slice of the engine, a long way from a
+            finished editor, and nothing in the UI painted on.
+          */}
+          <span className="status-dim">pre-alpha</span>
         </span>
       </footer>
 

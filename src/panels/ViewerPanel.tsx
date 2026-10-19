@@ -132,6 +132,57 @@ function fitted(frame: { displayWidth: number; displayHeight: number }, width: n
   return { x: (width - w) / 2, y: (height - h) / 2, w, h }
 }
 
+/**
+ * Draws a frame into the sequence's frame, turned upright and centred.
+ *
+ * A decoder hands back the picture exactly as it was coded, which for two in
+ * five files in a camera library means lying on its side — the container's
+ * display matrix is what says so, and nothing in WebCodecs applies it. The
+ * element path never needed this because Chromium rotates for `<video>`
+ * itself, which is precisely why the pipeline drawing these sideways went
+ * unnoticed: the same clip looked right on its card and wrong on the canvas.
+ *
+ * The fit is computed on the *displayed* shape rather than the coded one. Fit
+ * first and rotate after and a vertical clip is scaled to fill a landscape box
+ * and then turned, so it overflows the frame on one axis and leaves a gap on
+ * the other.
+ *
+ * Inside the rotated space the box's axes have swapped, so the frame is drawn
+ * at the box's other dimensions — a 90-degree turn makes the box's height the
+ * width to draw at. Getting that the wrong way round is a picture that is
+ * upright and squashed, which reads as a bad aspect ratio rather than as a
+ * rotation bug.
+ */
+function drawUpright(
+  context: CanvasRenderingContext2D,
+  frame: VideoFrame,
+  width: number,
+  height: number,
+  rotation: number,
+) {
+  const quarter = rotation === 90 || rotation === 270
+  const box = fitted(
+    quarter
+      ? { displayWidth: frame.displayHeight, displayHeight: frame.displayWidth }
+      : frame,
+    width,
+    height,
+  )
+
+  if (rotation === 0) {
+    context.drawImage(frame, box.x, box.y, box.w, box.h)
+    return
+  }
+
+  context.save()
+  context.translate(box.x + box.w / 2, box.y + box.h / 2)
+  context.rotate((rotation * Math.PI) / 180)
+  const w = quarter ? box.h : box.w
+  const h = quarter ? box.w : box.h
+  context.drawImage(frame, -w / 2, -h / 2, w, h)
+  context.restore()
+}
+
 export function ViewerPanel() {
   const [sequence, setSequence] = useState<SequenceState>(getSequence)
   const [assets, setAssets] = useState<Asset[]>(getAssets)
@@ -352,10 +403,12 @@ export function ViewerPanel() {
 
         let drawn = 0
         let front: VideoFrame | null = null
-        for (const frame of frames) {
+        for (const [index, frame] of frames.entries()) {
           if (!frame) continue
-          const box = fitted(frame, width, height)
-          context.drawImage(frame, box.x, box.y, box.w, box.h)
+          // Per layer, because a stack can mix a vertical phone clip with a
+          // landscape camera one and each has to be put up on its own terms.
+          const rotation = sourcesRef.current.get(layers[index].id)?.info.rotation ?? 0
+          drawUpright(context, frame, width, height, rotation)
           drawn += 1
           front = frame
         }

@@ -38,6 +38,27 @@ export type SubfolderResult =
   | { ok: true; folders: FolderEntry[]; truncated: boolean }
   | { ok: false; error: 'denied' | 'unreadable' }
 
+/** A folder a scan walked past, and why. See shared/footageFilter.js. */
+export interface SkippedFolder {
+  path: string
+  reason: 'proxies-or-cache' | 'system'
+}
+
+export interface FootageScan {
+  root: string
+  files: FileEntry[]
+  /** Folders walked, including those that held nothing. */
+  folders: number
+  skipped: SkippedFolder[]
+  unreadable: Array<{ path: string; error: string }>
+  /** True when the scan hit its file cap and stopped. */
+  truncated: boolean
+}
+
+export type ScanResult =
+  | { ok: true; scan: FootageScan }
+  | { ok: false; error: 'denied' | 'unreadable' }
+
 export interface Places {
   places: FolderEntry[]
   drives: FolderEntry[]
@@ -48,6 +69,7 @@ interface FsBridge {
   list: (dirPath: string) => Promise<ListResult>
   subfolders: (dirPath: string) => Promise<SubfolderResult>
   exists: (paths: string[]) => Promise<Record<string, boolean>>
+  scan: (dirPath: string) => Promise<ScanResult>
   pickFiles: () => Promise<string[]>
   assetUrl: (filePath: string) => string
 }
@@ -72,6 +94,8 @@ export const listSubfolders = (dirPath: string): Promise<SubfolderResult> =>
   requireFs().subfolders(dirPath)
 export const existsMany = (paths: string[]): Promise<Record<string, boolean>> =>
   requireFs().exists(paths)
+/** Every media file under a folder, proxy and cache folders walked past. */
+export const scanFootage = (dirPath: string): Promise<ScanResult> => requireFs().scan(dirPath)
 export const pickFiles = (): Promise<string[]> => requireFs().pickFiles()
 export const assetUrl = (filePath: string): string => requireFs().assetUrl(filePath)
 
