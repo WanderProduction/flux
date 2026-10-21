@@ -14,6 +14,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "icons": "node scripts/make-icons.mjs",
+    "fixtures": "node scripts/make-fixtures.mjs",
     "register": "node scripts/register-file-type.mjs",
     "unregister": "node scripts/register-file-type.mjs --unregister",
     "verify:fs": "node scripts/verify-filesystem.mjs",

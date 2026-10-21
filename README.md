@@ -1789,6 +1789,23 @@ scripts/        verification harnesses
 
 ## Verifying
 
+#### What CI checks, and what it cannot
+
+[`.github/workflows/verify.yml`](.github/workflows/verify.yml) runs on every PR and on `main`, on
+both Ubuntu and Windows: `typecheck`, `build`, and the three suites that need no app, no GPU and no
+footage — `verify:fs`, `verify:project-fs` and `verify:demux`, with the fixtures built on the
+runner.
+
+That is a third of the suites, and the gap is worth stating plainly rather than letting a green
+tick imply otherwise. Everything that needs the running app, and everything that needs NVENC and
+this archive's own footage on a drive letter, runs on a machine with both — which means **no encode
+is ever verified by CI, because no encode happens there**. A green tick means the parts that can be
+checked without a machine of your own are checked.
+
+The demuxer is the one most worth having up there. It is the module where being wrong is silent: a
+misread offset does not throw, it hands the decoder bytes from the middle of another frame, and
+that arrives later as garbage with no obvious cause.
+
 ```bash
 npm run verify:fs
 ```
@@ -1969,11 +1986,25 @@ frame while the clock has moved on, and a clock running while the video is pause
 perfectly. So it checks that the sequence's time and the element's time stay in agreement, in
 seconds, against a real decode of a real file.
 
-`verify:app`, `verify:tree`, `verify:timeline` and `verify:playback` expect fixture media in
-`~/flux-media-test`. Generate it with ffmpeg — two short H.264 mp4s, a VP9 webm, a png, a jpg, a
-nested folder, a `notes.txt` that must never be listed, and a deliberately corrupt `.mp4` that must
-resolve to "no preview" rather than hang. They clear the project's asset list and sequence so runs
-are repeatable.
+`verify:app`, `verify:tree`, `verify:timeline`, `verify:playback` and `verify:demux` expect fixture
+media in `~/flux-media-test`. One command builds the lot:
+
+```bash
+npm run fixtures
+```
+
+They clear the project's asset list and sequence so runs are repeatable.
+
+Not one of these is a nice file. Each is shaped around one thing that is hard to get right and
+silent when it is wrong, so a suite reading them is reading a trap rather than a sample —
+`scripts/make-fixtures.mjs` is where each awkwardness is argued, and the rest of this section is
+the short version. They are **built rather than committed**: a few megabytes of generated mp4s in
+the history would carry the files without the reasons, which is the wrong half of the trade.
+
+> **The numbers in there are load-bearing.** `verify:demux` asserts that `clipA.mp4` is 96 samples
+> and `shot_B.mp4` is 72 — 4s and 3s at 24fps — and those are assertions about *the index this
+> demuxer built*, checked against a count known from outside it. A fixture quietly regenerated at a
+> different length would turn a real check into one that only ever agrees with itself.
 
 One fixture is not short. `long_take.mp4` is a minute long, because everything a four-second file
 can tell you about playback it can also tell you while a completely broken server is underneath it:
