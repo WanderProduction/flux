@@ -1,0 +1,105 @@
+# What CI can honestly check, and nothing it cannot.
+#
+# FLUX is verified by harnesses that attach to the running app over the DevTools
+# protocol — 12 suites, and most of them need a real Electron, a real GPU and
+# this archive's own footage on a drive letter. None of that exists on a runner,
+# so this workflow deliberately runs the handful of suites that need none of it
+# rather than pretending to run the rest.
+#
+# What runs here:
+#
+#   verify:fs          electron/filesystem.js and the asset server, against a
+#                      real temp directory — listing, filtering, natural sort,
+#                      truncation of huge folders, the protocol allowlist.
+#   verify:project-fs  project creation: the folder layout, refusing to create
+#                      over an existing project, refusing a newer format,
+#                      copying into imports without ever overwriting.
+#   verify:demux       the mp4 index, read against the file: every sample inside
+#                      its bounds, none overlapping, timestamps counting evenly,
+#                      keyframes where ffmpeg was told to put them, and
+#                      containers it cannot read refused rather than guessed at.
+#
+# What does NOT run here, and why it is worth saying out loud: everything that
+# needs the app — verify:app, verify:tree, verify:timeline, verify:playback,
+# verify:launch, verify:batch, verify:render-queue, verify:sequence-render — and
+# everything that needs NVENC and real footage — verify:render, verify:queue,
+# verify:footage. A green tick on this workflow means the parts that can be
+# checked without a machine of your own are checked. It does not mean an encode
+# was verified, because no encode happened.
+#
+# The demuxer is the one worth having here. It is the module where being wrong
+# is silent: a misread offset does not throw, it hands the decoder bytes from
+# the middle of another frame, and that arrives later as garbage with no obvious
+# cause. It is also pure Node, so a runner can read a real file through it.
+
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to the same branch makes the first run pointless. Cancelling it
+# is not just thrift — a stale red tick on a branch someone has already fixed is
+# worse than no tick.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both results, always. A failure that only happens on one platform is the
+      # most useful thing this matrix can tell anyone, and fail-fast would hide
+      # it behind whichever runner finished first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    env:
+      # Electron is a devDependency and nothing here launches it, so the ~100MB
+      # binary download is pure waiting. The suites below import from electron/
+      # but that directory is plain Node modules with no `electron` import in
+      # it — which is the property that lets them run headless at all.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Typecheck before anything else: it is the fastest thing here and the
+      # most likely to be what broke.
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --yes --no-progress
+
+      # The fixtures are built, not committed. They are deliberately awkward
+      # files — an open GOP whose sync samples are not IDR frames, a file with
+      # no audio, one with audio in a codec FLUX refuses, an ftyp with nothing
+      # after it — and scripts/make-fixtures.mjs is where each awkwardness is
+      # explained. Committing a few MB of generated mp4s to carry that would be
+      # the wrong half of the trade.
+      - name: Build fixtures
+        run: node scripts/make-fixtures.mjs
+
+      - run: npm run verify:fs
+      - run: npm run verify:project-fs
+      - run: npm run verify:demux
