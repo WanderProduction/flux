@@ -165,21 +165,33 @@ export async function checkEncoder() {
  * @param {string} file
  */
 export async function sourceFacts(ffprobe, file) {
+  /*
+   * Every stream, not `v:0`, so one probe answers both questions — what the
+   * picture is, and whether there is any sound to carry. The second is what
+   * lets a verification tell "this output has no audio because the clip was
+   * muted" apart from "because the source never had any", which is the
+   * difference between a correct file and a silently wrong one.
+   *
+   * Unlike `probeArgs`, dropping the stream selector costs nothing here: there
+   * is no `-count_frames` in this call, so ffprobe is reading headers rather
+   * than decoding.
+   */
   const { stdout } = await run(
     ffprobe,
     [
       '-v', 'error',
-      '-select_streams', 'v:0',
       '-show_entries',
-      'stream=width,height,r_frame_rate,nb_frames,profile,pix_fmt:stream_side_data=rotation:format=duration,size',
+      'stream=codec_type,width,height,r_frame_rate,nb_frames,profile,pix_fmt:stream_side_data=rotation:format=duration,size',
       '-print_format', 'json',
       '--', file,
     ],
     { maxBuffer: 8 << 20 },
   )
   const parsed = JSON.parse(stdout)
-  const stream = parsed.streams?.[0]
+  const streams = parsed.streams ?? []
+  const stream = streams.find((one) => one.codec_type === 'video')
   if (!stream) throw new Error(`${path.basename(file)} has no video stream`)
+  const hasAudio = streams.some((one) => one.codec_type === 'audio')
 
   const rotationRaw = Number(
     (stream.side_data_list ?? []).find((d) => d.rotation !== undefined)?.rotation ?? 0,
@@ -196,9 +208,31 @@ export async function sourceFacts(ffprobe, file) {
     frameRate: rateOf(stream.r_frame_rate),
     profile: stream.profile,
     pixFmt: stream.pix_fmt,
+    hasAudio,
     duration: Number(parsed.format?.duration ?? 0),
     bytes: Number(parsed.format?.size ?? 0),
   }
+}
+
+/**
+ * Whether a file carries any sound.
+ *
+ * Its own tiny probe because the output is checked with `probeArgs`, which
+ * carries `-count_frames` and a `v:0` selector — counting every audio frame of
+ * a two-minute clip to find out whether the stream exists would be minutes of
+ * decoding for a yes or no.
+ *
+ * @param {string} ffprobe
+ * @param {string} file
+ */
+async function hasAudioStream(ffprobe, file) {
+  const { stdout } = await run(
+    ffprobe,
+    ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type',
+     '-print_format', 'json', '--', file],
+    { maxBuffer: 8 << 20 },
+  )
+  return (JSON.parse(stdout).streams ?? []).length > 0
 }
 
 /** `30000/1001` -> 29.97. A rate is a ratio in the container, not a decimal. */
@@ -233,6 +267,7 @@ export async function verify(ffprobe, job, source) {
       pixFmt: stream.pix_fmt,
       duration: Number(parsed.format?.duration ?? stream.duration ?? 0),
       bytes: Number(parsed.format?.size ?? 0),
+      hasAudio: await hasAudioStream(ffprobe, job.output),
     }
   } catch (err) {
     return { ok: false, error: `could not probe the output: ${err.message}` }
@@ -282,6 +317,28 @@ export async function verify(ffprobe, job, source) {
   }
   if (facts.pixFmt !== EXPECTED_PIX_FMT) {
     problems.push(`pixel format is ${facts.pixFmt}, expected ${EXPECTED_PIX_FMT}`)
+  }
+
+  /*
+   * Sound, against what the timeline said it should be — and this is here for
+   * **resume** as much as for correctness.
+   *
+   * Without it, muting a track and rendering again would skip every clip:
+   * `alreadyDone` asks the verifier, and a file with sound passes every check
+   * above whether or not anyone wanted the sound. The archive would keep
+   * whatever the first run happened to produce, permanently, and nothing would
+   * say so.
+   *
+   * Asymmetric on purpose. "Silent, so there must be no audio" is always a
+   * fair demand. "Not silent, so there must be audio" is only fair when the
+   * source had some — which is why `sourceFacts` reports it, and why a caller
+   * that does not know (the sequence render, which does its own audio check)
+   * simply does not trigger this branch.
+   */
+  if (job.silent && facts.hasAudio) {
+    problems.push('the output has sound, and this clip was muted on the timeline')
+  } else if (!job.silent && source.hasAudio === true && !facts.hasAudio) {
+    problems.push('the output has no sound, and its source has some')
   }
 
   return problems.length === 0

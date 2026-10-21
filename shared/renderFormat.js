@@ -196,8 +196,22 @@ export function atempoChain(speed) {
  * @param {string} job.output absolute path to write
  * @param {number} job.offset seconds into the source where the cut starts
  * @param {number} job.duration seconds of output
+ * ## Silence is a thing the timeline says, not an export option
+ *
+ * `job.silent` writes the cut with no audio stream at all, and it is set by the
+ * planner from the mute and solo state of the track the clip's sound sits on —
+ * see ExportJob in kernel/batchExport.ts. A clip you were watching with its
+ * track muted archives as a clip with no sound, because that is the file you
+ * reviewed.
+ *
+ * `-an` goes *after* `encodeArgs`, which has already said `-c:a aac`. That
+ * order is deliberate and it is how ffmpeg resolves it: the later option wins,
+ * so the codec choice is simply unused rather than contradicted. Putting `-an`
+ * first and the codec after it would produce a file with sound.
+ *
  * @param {number} [job.speed] how fast the source runs; 1 when untouched
  * @param {number} [job.frameRate] rate to force, or undefined to keep the source's
+ * @param {boolean} [job.silent] write no audio stream
  * @param {{ cq?: number, gop?: number }} [options]
  * @returns {string[]}
  */
@@ -213,12 +227,15 @@ export function cutArgs(job, options = {}) {
   args.push('-i', job.source)
   if (stretched) {
     args.push('-filter:v', `setpts=PTS/${speed}`)
-    args.push('-filter:a', atempoChain(speed))
+    // No point retiming a stream that is about to be dropped, and an audio
+    // filter on a job with `-an` is a warning on every encode for nothing.
+    if (!job.silent) args.push('-filter:a', atempoChain(speed))
   } else {
     args.push('-t', job.duration.toFixed(6))
   }
   if (job.frameRate) args.push('-r', String(job.frameRate))
   args.push(...encodeArgs(options))
+  if (job.silent) args.push('-an')
   /*
    * The container stated rather than inferred from the extension.
    *
