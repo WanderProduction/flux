@@ -15,6 +15,7 @@ import {
   type DraggedFile,
 } from '../kernel/dragAssets'
 import { importFiles } from '../kernel/importPipeline'
+import { getSelection, setSelection, subscribeSelection } from '../kernel/selection'
 import { importSequenceFile } from '../kernel/project'
 import {
   formatTimecode,
@@ -199,7 +200,7 @@ const SNAP_PX = 8
 const EPS_UI = 1e-6
 
 /** Whether two selections are the same set — not merely the same size. */
-function sameSet(a: Set<string>, b: string[]): boolean {
+function sameSet(a: ReadonlySet<string>, b: string[]): boolean {
   return a.size === b.length && b.every((id) => a.has(id))
 }
 
@@ -255,7 +256,15 @@ export function TimelinePanel() {
   // Restored from the project document, so reopening lands you at the zoom you
   // were working at rather than snapping back to the default.
   const [zoom, setZoom] = useState(() => clampZoom(getView().timeline.zoom || DEFAULT_ZOOM))
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+  /*
+   * The selection is the kernel's now, not this panel's — see
+   * kernel/selection.ts. The local name and the setter keep their old shapes so
+   * every gesture below reads the same; what changed is where the answer lives,
+   * and that Render can ask for it.
+   */
+  const [selected, setSelectedLocal] = useState<ReadonlySet<string>>(getSelection)
+  useEffect(() => subscribeSelection(() => setSelectedLocal(getSelection())), [])
+  const setSelected = setSelection
   const [preview, setPreview] = useState<DropPreview | null>(null)
   const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
@@ -413,20 +422,10 @@ export function TimelinePanel() {
       setSequence({ ...next })
 
       /*
-       * Anything selected that no longer exists is let go of.
-       *
-       * Undo is what makes this necessary — it can take away clips that are
-       * still held, and a selection pointing at them would make Delete and
-       * every other command quietly do nothing. Cheap, and it is the same
-       * pruning that a removal from anywhere else needs.
+       * Pruning a dead selection moved to kernel/selection.ts, which does it on
+       * the same subscription. It had to: this handler only ran while the
+       * Timeline was mounted, and the selection now outlives the panel.
        */
-      const alive = new Set(next.clips.map((clip) => clip.id))
-      const held = selectedRef.current
-      if ([...held].some((id) => !alive.has(id))) {
-        const pruned = new Set([...held].filter((id) => alive.has(id)))
-        selectedRef.current = pruned
-        setSelected(pruned)
-      }
 
       /*
        * And the same for the targeted track.

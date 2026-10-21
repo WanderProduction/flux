@@ -2699,3 +2699,135 @@ kbd {
      and a transition longer than the gap between updates makes the bar lag
      behind the number next to it. */
 }
+
+/* ── Render panel ─────────────────────────────────────────────────
+   Settings above, queue below. Shares the .batch-* chrome; what is
+   here is the field layout and the job rows. */
+.render-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px 16px;
+}
+.render-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.render-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--flux-text-faint);
+}
+.render-field input,
+.render-field select {
+  padding: 4px 7px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-md);
+}
+.render-field input:disabled,
+.render-field select:disabled {
+  opacity: 0.5;
+}
+.render-hint {
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--flux-text-dim);
+}
+.render-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+.render-check em {
+  color: var(--flux-text);
+  font-style: normal;
+}
+.render-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.render-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.render-row {
+  display: grid;
+  /* Name takes the slack; everything else is intrinsic, so a long filename
+     truncates rather than pushing the status off the end. */
+  grid-template-columns: 8px minmax(0, 1fr) auto auto 20px;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--flux-border);
+  font-size: var(--flux-text-sm);
+}
+.render-row:last-child {
+  border-bottom: none;
+}
+.render-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--flux-text-faint);
+}
+.render-row--running .render-dot {
+  background: var(--flux-accent);
+}
+.render-row--done .render-dot,
+.render-row--skipped .render-dot {
+  background: var(--flux-audio);
+}
+.render-row--failed .render-dot {
+  background: var(--flux-warn);
+}
+.render-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--flux-text);
+  font-family: var(--flux-font-mono);
+}
+.render-meta {
+  color: var(--flux-text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.render-status {
+  color: var(--flux-text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.render-row--failed .render-status {
+  color: var(--flux-warn);
+}
+.render-row--done .render-status {
+  color: var(--flux-audio);
+}
+.render-drop {
+  border: none;
+  background: none;
+  color: var(--flux-text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+.render-drop:hover {
+  color: var(--flux-warn);
+}

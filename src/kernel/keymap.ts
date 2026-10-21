@@ -19,6 +19,7 @@ export const defaultKeymap: Keymap = {
   'ctrl+2': 'panel.focus.timeline',
   'ctrl+3': 'panel.focus.content',
   'ctrl+4': 'panel.focus.batch',
+  'ctrl+5': 'panel.focus.render',
   /*
    * A new sequence, on the key every app uses for "a new one of the thing this
    * app makes". FLUX makes sequences; a project is made once, from the

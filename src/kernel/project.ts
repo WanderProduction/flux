@@ -28,6 +28,17 @@ import {
   type ImportMode,
 } from './importMode'
 import {
+  getRenderSettings,
+  onRenderSettingsChanged,
+  setRenderSettings,
+  type RenderSettings,
+} from './renderSettings'
+import {
+  onQueueChanged,
+  setQueue,
+  type QueuedJob,
+} from './renderQueue'
+import {
   addSequence,
   getActiveSequenceId,
   listSequences,
@@ -48,7 +59,7 @@ export interface ProjectDocument {
   name: string
   createdAt: number
   savedAt: number
-  settings?: { importMode?: ImportMode }
+  settings?: { importMode?: ImportMode; render?: Partial<RenderSettings> }
   /** Workspace, timeline zoom, where the browser was. Never marks work unsaved. */
   view?: ViewState
   assets: Asset[]
@@ -125,6 +136,8 @@ interface ProjectBridge {
     previousFile?: string,
   ) => Promise<{ ok: boolean; file?: string; error?: string }>
   deleteSequence: (root: string, file: string) => Promise<{ ok: boolean; error?: string }>
+  readQueue: (root: string) => Promise<{ jobs: QueuedJob[] }>
+  writeQueue: (root: string, jobs: QueuedJob[]) => Promise<{ ok: boolean; error?: string }>
   importSequence: (
     root: string,
     sourcePath: string,
@@ -231,7 +244,7 @@ export function buildDocument(): ProjectDocument | null {
     name: current.name,
     createdAt: current.createdAt,
     savedAt: Date.now(),
-    settings: { importMode: getImportMode() },
+    settings: { importMode: getImportMode(), render: getRenderSettings() },
     view: getView(),
     assets: getAssets(),
     // The sequences themselves are files; the document only remembers which
@@ -306,6 +319,36 @@ function markDirty() {
 subscribeAssets(markDirty)
 subscribeSequence(markDirty)
 subscribeImportMode(markDirty)
+/*
+ * Through a handler rather than a subscription, so renderSettings does not have
+ * to import this module back. A render setting is a decision about the work, so
+ * changing one is unsaved work — unlike the queue, which is bookkeeping and
+ * lives in its own file for exactly that reason.
+ */
+onRenderSettingsChanged(markDirty)
+
+/*
+ * The queue writes itself, rather than going out with the document.
+ *
+ * Deliberately not routed through markDirty: a row changing from waiting to
+ * done is not unsaved work, it is a render reporting progress, and four hundred
+ * of them would keep the dot lit for an hour over something nobody did.
+ */
+onQueueChanged((jobs) => {
+  const root = current?.root
+  if (!root || applying) return
+  void bridgeOrNull()?.writeQueue(root, jobs)
+})
+
+async function loadQueue(root: string): Promise<void> {
+  const stored = await bridgeOrNull()?.readQueue(root)
+  setQueue(stored?.jobs)
+}
+
+/** The project bridge, or null outside Electron, where there is no filesystem. */
+function bridgeOrNull(): ProjectBridge | null {
+  return (globalThis as { flux?: { project?: ProjectBridge } }).flux?.project ?? null
+}
 
 // ── recents ───────────────────────────────────────────────────
 
@@ -373,6 +416,15 @@ function adopt(project: Project, startDirty: boolean) {
   // ids on the way in, so nothing downstream ever sees an id from elsewhere.
   setSequences((project.sequences ?? []).map(resolveSequenceMedia), project.activeSequence)
   setImportMode(project.settings?.importMode ?? 'ask', { persist: false })
+  setRenderSettings(project.settings?.render)
+  /*
+   * The queue is read after the project is otherwise open, and not awaited.
+   * It is a sidecar: a project with no queue file, or an unreadable one, opens
+   * exactly the same and simply starts with an empty list. Blocking the open
+   * on it would make a nice-to-have able to delay the thing people are waiting
+   * for.
+   */
+  void loadQueue(project.root)
   setView(project.view)
 
   // setAssets/setSequence/setView notify without marking dirty, so this is the

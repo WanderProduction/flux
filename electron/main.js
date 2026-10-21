@@ -33,6 +33,8 @@ import {
   openProject,
   saveProject,
   saveSequence,
+  readQueue,
+  writeQueue,
 } from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
 
@@ -481,6 +483,12 @@ ipcMain.handle('project:saveSequence', (_e, root, document, previousFile) =>
   saveSequence(root, document, previousFile),
 )
 ipcMain.handle('project:deleteSequence', (_e, root, file) => deleteSequence(root, file))
+/*
+ * The render queue lives beside the document rather than inside it, so a job
+ * finishing does not light the unsaved dot. See electron/project.js.
+ */
+ipcMain.handle('project:readQueue', (_e, root) => readQueue(root))
+ipcMain.handle('project:writeQueue', (_e, root, jobs) => writeQueue(root, jobs))
 ipcMain.handle('project:importSequence', (_e, root, sourcePath) => importSequence(root, sourcePath))
 
 ipcMain.handle('project:create', (_e, root, name) => createProject(root, name, app.getVersion()))

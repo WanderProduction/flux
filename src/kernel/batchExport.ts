@@ -13,6 +13,7 @@
 
 import { getAsset } from './assets'
 import { getSequence, type Clip, type SequenceState } from './sequence'
+import type { FrameRatePolicy } from './renderSettings'
 
 export interface ExportJob {
   /** The clip's id. Carried through so the UI can mark the clip it belongs to. */
@@ -41,6 +42,24 @@ export interface ExportJob {
    */
   sourceBytes: number
   /**
+   * How fast the source runs, as a multiple. 1 when the clip is untouched.
+   *
+   * Carried rather than dropped, because a stretched clip used to be refused
+   * and that was wrong: adjusting time is an edit like any other, and the
+   * render is what it is for. See cutArgs in shared/renderFormat.js for how it
+   * becomes setpts and a chained atempo.
+   */
+  speed: number
+  /**
+   * The rate to force, or undefined to keep whatever the source runs at.
+   *
+   * Set for two different reasons that share one mechanism: a speed change
+   * needs it, or the output would be a valid-but-absurd 100fps file; and the
+   * sequence frame-rate policy is expressed through it. Undefined is the
+   * archive default — every clip stays at the rate it was shot.
+   */
+  frameRate?: number
+  /**
    * True when this cut is the entire source file.
    *
    * The only reason this matters is the never-write-a-bigger-file rule: where
@@ -53,7 +72,7 @@ export interface ExportJob {
 export interface SkippedClip {
   id: string
   name: string
-  reason: 'missing-asset' | 'offline' | 'stretched' | 'no-length' | 'still'
+  reason: 'missing-asset' | 'offline' | 'no-length' | 'still'
   detail: string
 }
 
@@ -163,7 +182,18 @@ function nameJobs(clips: Clip[], outDir: string): Map<string, string> {
  *     clip is named and left out rather than exported at a rate nobody chose.
  *     Undo the stretch and it exports.
  */
-export function planExport(outDir: string, sequence: SequenceState = getSequence()): ExportPlan {
+export function planExport(
+  outDir: string,
+  sequence: SequenceState = getSequence(),
+  options: { frameRate?: FrameRatePolicy } = {},
+): ExportPlan {
+  /*
+   * `sequence` conforms every clip to the sequence's rate; `source` leaves each
+   * one at the rate it was shot, which is the default and the one an archive
+   * wants. See kernel/renderSettings.ts for why that default is not a coin flip.
+   */
+  const conformTo = options.frameRate === 'sequence' ? sequence.settings.frameRate : null
+
   const videoTracks = new Set(
     sequence.tracks.filter((track) => track.kind === 'video').map((track) => track.id),
   )
@@ -223,15 +253,6 @@ export function planExport(outDir: string, sequence: SequenceState = getSequence
       })
       continue
     }
-    if (Math.abs(clip.speed - 1) > 1e-9) {
-      skipped.push({
-        id: clip.id,
-        name: asset.name,
-        reason: 'stretched',
-        detail: `plays at ${clip.speed.toFixed(2)}x — undo the stretch to export it`,
-      })
-      continue
-    }
 
     const output = names.get(clip.id)
     if (!output) continue
@@ -256,6 +277,19 @@ export function planExport(outDir: string, sequence: SequenceState = getSequence
       offset: clip.offset,
       duration: clip.duration,
       sourceBytes: Math.round((asset.size ?? 0) * share),
+      speed: clip.speed,
+      /*
+       * A rate is forced for a stretched clip, and otherwise only when the
+       * caller asks to conform. `setpts` retimes without dropping frames, so a
+       * 2x clip would otherwise come out as a valid 100fps file; and leaving it
+       * alone is what keeps this library's mixed 25/29.97/50fps footage at the
+       * rates it was shot.
+       */
+      ...(conformTo
+        ? { frameRate: conformTo }
+        : Math.abs(clip.speed - 1) > 1e-9
+          ? { frameRate: sequence.settings.frameRate }
+          : {}),
       wholeFile,
     })
   }

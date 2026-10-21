@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld('flux', {
     saveSequence: (root, document, previousFile) =>
       ipcRenderer.invoke('project:saveSequence', root, document, previousFile),
     deleteSequence: (root, file) => ipcRenderer.invoke('project:deleteSequence', root, file),
+    readQueue: (root) => ipcRenderer.invoke('project:readQueue', root),
+    writeQueue: (root, jobs) => ipcRenderer.invoke('project:writeQueue', root, jobs),
     importSequence: (root, sourcePath) =>
       ipcRenderer.invoke('project:importSequence', root, sourcePath),
     launchTarget: () => ipcRenderer.invoke('project:launchTarget'),

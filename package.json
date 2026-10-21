@@ -28,7 +28,8 @@
     "verify:footage": "node scripts/verify-footage.mjs",
     "verify:batch": "node scripts/verify-batch.mjs",
     "verify:render": "node scripts/verify-render.mjs",
-    "verify:queue": "node scripts/verify-queue.mjs"
+    "verify:queue": "node scripts/verify-queue.mjs",
+    "verify:render-queue": "node scripts/verify-render-queue.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",
