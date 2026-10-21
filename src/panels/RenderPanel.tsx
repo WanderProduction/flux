@@ -13,8 +13,10 @@ import {
   stop,
   subscribeRenderQueue,
   summary,
+  type AddScope,
   type QueuedJob,
 } from '../kernel/renderQueue'
+import { isSequenceJob } from '../kernel/sequenceExport'
 import {
   getRenderSettings,
   subscribeRenderSettings,
@@ -53,6 +55,25 @@ import { CQ, GOP_FRAMES } from '../../shared/renderFormat.js'
  * duration and speed are all resolved the moment it is added, so editing or
  * deleting the clip afterwards cannot change or break what was queued. See
  * kernel/renderQueue.ts, which is where that decision is argued.
+ *
+ * ## What one job is, chosen before anything is added
+ *
+ * `Each clip as its own file` is the archive: every clip on the timeline
+ * becomes a file of its own, which is how 2.3TB of reviewed footage becomes a
+ * folder you can delete the originals of. `The whole sequence as one file` is
+ * the deliverable: layers composited, gaps black, audio mixed down, one mp4.
+ *
+ * It is one choice at the top rather than a third Add button, because it is a
+ * decision about the work and not a thing you do once — an archive pass and a
+ * deliverable pass are different afternoons, and a project reopens rendering
+ * the way it last rendered.
+ *
+ * Switching it does not touch the queue, so a list genuinely can hold both
+ * kinds at once. That is allowed rather than prevented: throwing away a list
+ * someone built because they looked at the other mode would be worse than a
+ * mixed list, and every row says which it is — a cut names its source and its
+ * speed, a composite names how many layers went into it and the frame it was
+ * drawn in.
  *
  * ## The settings are honest about what is a choice
  *
@@ -95,7 +116,7 @@ export function RenderPanel() {
     if (dir) updateRenderSettings({ outDir: dir })
   }, [])
 
-  const doAdd = useCallback((scope: 'selection' | 'sequence') => {
+  const doAdd = useCallback((scope: AddScope) => {
     setError(null)
     const result = add(scope)
     const parts: string[] = []
@@ -125,8 +146,14 @@ export function RenderPanel() {
   const counts = summary()
   const held = getSelection()
   const sequence = getSequence()
-  const canAdd = previewAdd('selection')
-  const whole = previewAdd('sequence')
+  const oneFile = settings.mode === 'sequence'
+  /*
+   * Only the plan the mode will actually use is built. `planSequence` walks
+   * every clip on every track, and doing it on every render of this panel to
+   * fill in a button nobody can press would be work for nothing.
+   */
+  const canAdd = oneFile ? { jobs: [], skipped: [] } : previewAdd('selection')
+  const whole = oneFile ? previewAdd('one-file') : previewAdd('sequence')
   const done = jobs.filter((job) => job.status === 'done')
   const savedFrom = done.reduce((total, job) => total + job.sourceBytes, 0)
   const savedTo = done.reduce((total, job) => total + (job.bytes ?? 0), 0)
@@ -151,6 +178,31 @@ export function RenderPanel() {
         {/* ── settings ─────────────────────────────────────────── */}
         <section className="batch-step">
           <h3 className="batch-head">Settings</h3>
+
+          {/*
+            First, because it decides what everything below it applies to. The
+            hint says what each mode is *for* rather than what it does: "one
+            file per clip" is already on the label, and which one you want is a
+            question about whether you are archiving or delivering.
+          */}
+          <label className="render-field render-mode">
+            <span className="render-label">Render</span>
+            <select
+              value={settings.mode}
+              disabled={rendering}
+              onChange={(e) =>
+                updateRenderSettings({ mode: e.target.value as RenderSettings['mode'] })
+              }
+            >
+              <option value="clips">Each clip as its own file</option>
+              <option value="sequence">The whole sequence as one file</option>
+            </select>
+            <span className="render-hint">
+              {oneFile
+                ? 'Layers composited into the sequence frame, audio mixed down, gaps black and silent. One mp4.'
+                : 'Every clip on a video track becomes one file, named after its source. What an archive wants.'}
+            </span>
+          </label>
 
           <button className="batch-button" onClick={chooseOut} disabled={rendering}>
             {settings.outDir ? 'Change the output folder…' : 'Choose where to render…'}
@@ -213,24 +265,43 @@ export function RenderPanel() {
               </span>
             </label>
 
-            <label className="render-field">
-              <span className="render-label">Frame rate</span>
-              <select
-                value={settings.frameRate}
-                disabled={rendering}
-                onChange={(e) =>
-                  updateRenderSettings({ frameRate: e.target.value as RenderSettings['frameRate'] })
-                }
-              >
-                <option value="source">Keep each clip's own</option>
-                <option value="sequence">Conform to the sequence ({sequence.settings.frameRate})</option>
-              </select>
-              <span className="render-hint">
-                {settings.frameRate === 'source'
-                  ? 'Mixed 25/29.97/50fps footage stays as shot, so slow motion survives.'
-                  : 'Everything is resampled to the sequence rate. Slow motion shot at 50fps will lose frames.'}
-              </span>
-            </label>
+            {/*
+              Offered only for clips. A composite has one frame and one rate by
+              definition — the sequence's — so there is nothing left to choose,
+              and a disabled control implying otherwise would be worse than
+              none. What it is is stated instead.
+            */}
+            {oneFile ? (
+              <div className="render-field">
+                <span className="render-label">Frame</span>
+                <p className="render-value render-value--mono">
+                  {sequence.settings.width}×{sequence.settings.height} · {sequence.settings.frameRate}fps
+                </p>
+                <span className="render-hint">
+                  The sequence's own, which is what a composite is rendered into. Change it in
+                  Sequence settings. Every layer is resampled to this rate.
+                </span>
+              </div>
+            ) : (
+              <label className="render-field">
+                <span className="render-label">Frame rate</span>
+                <select
+                  value={settings.frameRate}
+                  disabled={rendering}
+                  onChange={(e) =>
+                    updateRenderSettings({ frameRate: e.target.value as RenderSettings['frameRate'] })
+                  }
+                >
+                  <option value="source">Keep each clip's own</option>
+                  <option value="sequence">Conform to the sequence ({sequence.settings.frameRate})</option>
+                </select>
+                <span className="render-hint">
+                  {settings.frameRate === 'source'
+                    ? 'Mixed 25/29.97/50fps footage stays as shot, so slow motion survives.'
+                    : 'Everything is resampled to the sequence rate. Slow motion shot at 50fps will lose frames.'}
+                </span>
+              </label>
+            )}
           </div>
 
           <label className="render-check">
@@ -265,23 +336,42 @@ export function RenderPanel() {
           <h3 className="batch-head">Queue</h3>
 
           <div className="render-actions">
-            <button
-              className="batch-button"
-              onClick={() => doAdd('selection')}
-              disabled={canAdd.jobs.length === 0}
-              title={
-                held.size === 0 ? 'Select clips on the timeline first' : `${held.size} selected`
-              }
-            >
-              Add selection ({canAdd.jobs.length})
-            </button>
-            <button
-              className="batch-button"
-              onClick={() => doAdd('sequence')}
-              disabled={whole.jobs.length === 0}
-            >
-              Add whole sequence ({whole.jobs.length})
-            </button>
+            {oneFile ? (
+              /*
+                One button, because there is one thing to add. A selection
+                cannot narrow a composite — leaving clips out of it is an edit
+                on the timeline, which is the whole idea the Batch panel is
+                built on: the timeline is the manifest.
+              */
+              <button
+                className="batch-button"
+                onClick={() => doAdd('one-file')}
+                disabled={whole.jobs.length === 0}
+                title={whole.reason ?? sequence.name}
+              >
+                Add “{sequence.name}” as one file
+              </button>
+            ) : (
+              <>
+                <button
+                  className="batch-button"
+                  onClick={() => doAdd('selection')}
+                  disabled={canAdd.jobs.length === 0}
+                  title={
+                    held.size === 0 ? 'Select clips on the timeline first' : `${held.size} selected`
+                  }
+                >
+                  Add selection ({canAdd.jobs.length})
+                </button>
+                <button
+                  className="batch-button"
+                  onClick={() => doAdd('sequence')}
+                  disabled={whole.jobs.length === 0}
+                >
+                  Add whole sequence ({whole.jobs.length})
+                </button>
+              </>
+            )}
             {counts.failed > 0 && (
               <button className="batch-button" onClick={() => retry()}>
                 Retry failed ({counts.failed})
@@ -299,14 +389,20 @@ export function RenderPanel() {
           {note && <p className="batch-note">{note}</p>}
           {error && <p className="batch-error">{error}</p>}
 
-          {canAdd.skipped.length > 0 && (
+          {oneFile && whole.reason && jobs.length === 0 && (
+            <p className="batch-note">Nothing to render: {whole.reason}.</p>
+          )}
+
+          {(oneFile ? whole : canAdd).skipped.length > 0 && (
             <details className="batch-details">
               <summary>
-                {canAdd.skipped.length} selected clip
-                {canAdd.skipped.length === 1 ? '' : 's'} cannot be rendered
+                {(oneFile ? whole : canAdd).skipped.length}{' '}
+                {oneFile ? 'clip' : 'selected clip'}
+                {(oneFile ? whole : canAdd).skipped.length === 1 ? '' : 's'}{' '}
+                {oneFile ? 'will be left out' : 'cannot be rendered'}
               </summary>
               <ul className="batch-list">
-                {canAdd.skipped.map((one) => (
+                {(oneFile ? whole : canAdd).skipped.map((one) => (
                   <li key={one.id}>
                     <strong>{one.name}</strong> — {one.detail}
                   </li>
@@ -317,8 +413,9 @@ export function RenderPanel() {
 
           {jobs.length === 0 ? (
             <p className="batch-note">
-              Nothing queued. Select clips on the timeline and press Add — every clip becomes one
-              file.
+              {oneFile
+                ? 'Nothing queued. Press Add to line up this sequence — the layers, the gaps and the mix as one file.'
+                : 'Nothing queued. Select clips on the timeline and press Add — every clip becomes one file.'}
             </p>
           ) : (
             <>
@@ -326,12 +423,25 @@ export function RenderPanel() {
                 {jobs.map((job) => (
                   <div className={`render-row render-row--${job.status}`} role="listitem" key={job.id}>
                     <span className="render-dot" aria-hidden="true" />
-                    <span className="render-name" title={job.source}>
+                    <span
+                      className="render-name"
+                      title={isSequenceJob(job) ? job.name : job.source}
+                    >
                       {job.output.split(/[\\/]/).pop()}
                     </span>
+                    {/*
+                      A row names what it will read. For a cut that is its
+                      source and its speed; for a composite it is how many
+                      layers went into it, which is the one number that says
+                      whether the right thing was queued.
+                    */}
                     <span className="render-meta">
                       {formatDuration(job.duration)}
-                      {Math.abs(job.speed - 1) > 1e-9 && ` · ${job.speed.toFixed(2)}×`}
+                      {isSequenceJob(job)
+                        ? ` · ${job.video.length} video, ${job.audio.length} audio · ${job.width}×${job.height}`
+                        : Math.abs(job.speed - 1) > 1e-9
+                          ? ` · ${job.speed.toFixed(2)}×`
+                          : ''}
                       {job.sequenceName && ` · ${job.sequenceName}`}
                     </span>
                     <span className="render-status">

@@ -31,6 +31,7 @@ import * as renderQueue from './kernel/renderQueue'
 import * as renderSettings from './kernel/renderSettings'
 import * as batchImport from './kernel/batchImport'
 import * as batchExport from './kernel/batchExport'
+import * as sequenceExport from './kernel/sequenceExport'
 import * as renderBridge from './kernel/renderBridge'
 
 // Panels register before the first render so the dock's component map is
@@ -99,6 +100,7 @@ if (import.meta.env.DEV) {
       renderSettings,
       batchImport,
       batchExport,
+      sequenceExport,
       renderBridge,
       media: { audioSource },
     },

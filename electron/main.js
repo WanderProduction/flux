@@ -97,7 +97,26 @@ let unsavedWork = false
 /** Set once the user has answered the close prompt, so the retry goes through. */
 let closing = false
 
-const DEV_URL = 'http://127.0.0.1:5273'
+/**
+ * Where the dev renderer is served from.
+ *
+ * Overridable because the port is a single-tenant resource and FLUX is
+ * developed in git worktrees. `vite.config.ts` pins 5273 with `strictPort`, so
+ * two checkouts cannot both run `npm run dev` — and the failure is not a
+ * refusal, it is a harness in worktree B attaching to :9222 and silently
+ * driving the app vite is serving from worktree A. Every check then passes or
+ * fails for reasons that have nothing to do with the code under test.
+ *
+ * `FLUX_DEV_PORT` is read by vite and by this, so one variable moves both
+ * halves. `FLUX_DEBUG_PORT` in scripts/cdp.mjs is the third, and the set of
+ * three is what lets a second worktree verify at the same time:
+ *
+ *   FLUX_DEV_PORT=5274 npx vite
+ *   FLUX_DEV_PORT=5274 npx electron . --remote-debugging-port=9223
+ *   FLUX_DEBUG_PORT=9223 node scripts/verify-timeline.mjs
+ */
+const DEV_PORT = Number(process.env.FLUX_DEV_PORT) || 5273
+const DEV_URL = `http://127.0.0.1:${DEV_PORT}`
 const isDev = !app.isPackaged
 
 /**

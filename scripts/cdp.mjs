@@ -14,7 +14,16 @@ import path from 'node:path'
 
 import { safeFolderName } from '../shared/projectNaming.js'
 
-const DEFAULT_PORT = 9222
+/**
+ * Which Electron to attach to.
+ *
+ * Overridable for the reason electron/main.js gives in full: the dev port is a
+ * single-tenant resource, so a second worktree runs its app on another one —
+ * and a harness that always attached to 9222 would verify whichever worktree
+ * happens to be serving it, which is the one failure mode that cannot be seen
+ * in the output.
+ */
+const DEFAULT_PORT = Number(process.env.FLUX_DEBUG_PORT) || 9222
 
 export async function findPageTarget(port = DEFAULT_PORT) {
   for (let attempt = 0; attempt < 30; attempt++) {

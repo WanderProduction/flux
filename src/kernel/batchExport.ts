@@ -16,6 +16,12 @@ import { getSequence, type Clip, type SequenceState } from './sequence'
 import type { FrameRatePolicy } from './renderSettings'
 
 export interface ExportJob {
+  /**
+   * What tells a clip job apart from a sequence render, wherever both can turn
+   * up — the queue holds either. Optional because a queue written before the
+   * sequence mode existed has rows without it, and those rows are clips.
+   */
+  kind?: 'clip'
   /** The clip's id. Carried through so the UI can mark the clip it belongs to. */
   id: string
   name: string
@@ -270,6 +276,7 @@ export function planExport(
       clip.sourceDuration > 0 ? Math.min(1, clip.duration / clip.sourceDuration) : 1
 
     jobs.push({
+      kind: 'clip',
       id: clip.id,
       name: asset.name,
       source: asset.path,
