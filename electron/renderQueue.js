@@ -305,7 +305,18 @@ export class RenderQueue {
         result.facts?.frames ?? '',
         result.source ? Math.round(job.duration * result.source.frameRate) : '',
         result.keptOriginal ? 'yes' : 'no',
-        result.grew ? 'encode was larger than the source' : '',
+        /*
+         * Both facts, because both are things someone reading this file later
+         * will want explained without re-opening the clip. "Why is this one
+         * bigger than its source" and "why does this one have no sound" are
+         * the two questions a row cannot otherwise answer.
+         */
+        [
+          result.grew ? 'encode was larger than the source' : '',
+          job.silent ? 'no sound — its audio track was not being heard' : '',
+        ]
+          .filter(Boolean)
+          .join('; '),
       ])
       return
     }

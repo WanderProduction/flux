@@ -1007,6 +1007,43 @@ silent conform is the exact failure the verifier exists to catch, since an Adobe
 encode tests turned an 1850-frame 50fps source into 1108 frames at 29.97 and looked perfectly
 healthy. Choosing it should be something you did on purpose.
 
+#### The timeline decides what is in the file
+
+Hiding a track and muting one are edits, not view state, and the render reads them — in **both**
+modes, which it did not used to. A hidden video track was still exported clip by clip, while the
+sequence render left it out, and two modes disagreeing about what the timeline means is worse than
+either answer on its own.
+
+| | |
+|---|---|
+| **Hidden video track** | Its clips are not exported, and each is named in the panel as refused rather than quietly absent. |
+| **Muted audio track** | The clips it belongs to are written with **no audio stream at all** — `-an`, not a fader at zero. |
+| **Solo somewhere else** | The same, through the same rule: `isTrackAudible` is the one place solo and mute become an answer. |
+| **A clip with no linked audio** | Untouched. There is no track state to obey, and silencing it would be a decision nobody could see on screen. |
+
+Hidden clips are dropped **before** the names are assigned, and that is visible in the output
+folder. Naming first and filtering second would leave `DSCF3957.mp4` and `DSCF3957_03.mp4` with no
+`_02` between them, which reads as a failed export rather than as a track you chose not to render.
+
+**The fader is deliberately not in that table.** A level is how loud you needed something while
+reviewing; baking it into an archived original would quietly alter the footage. The *sequence*
+render does apply it, because a deliverable is supposed to sound like what was heard — so the two
+modes differ here on purpose, where they used to differ by accident.
+
+> **This is also a resume problem, and that is the part worth the verifier knowing about.** A file
+> with sound passes every other check — size, rate, frame count, profile, pixel format. So without
+> the verifier knowing what the sound was *supposed* to be, muting a track and rendering again
+> would skip every clip, and the archive would keep whatever the first run produced, permanently,
+> with nothing saying so. `verify` now asserts the output's audio against the job: silent means
+> there must be none, and not-silent means there must be some *when the source had some*. That
+> asymmetry is why `sourceFacts` reports whether a source has audio at all.
+
+*Not yet: **`pcm_s24le` soundtracks**, which is what the Fujifilm bodies in this archive record.
+The demuxer reads them as `unreadable`, so those clips land on the timeline with **no audio clip
+beside them** — 127 of 128 in a real shoot folder. Their sound still reaches the export, because
+ffmpeg decodes pcm perfectly well and an unlinked clip is left alone; what does not work is muting
+it, since there is nothing on the timeline to mute. Fixing it is a demuxer job, not a render one.*
+
 #### Speed changes render
 
 A stretched clip used to be refused, which was wrong: adjusting time is an edit like any other

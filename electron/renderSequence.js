@@ -133,6 +133,14 @@ export async function verifySequence(ffprobe, job, file = job.output) {
    * the layers were turned upright on the way in, and the frame they were drawn
    * into is the one the sequence settings name.
    */
+  /*
+   * No `hasAudio` and no `silent`, deliberately. Those two drive `verify`'s
+   * sound check, which exists for the clip path — where a muted track means a
+   * file with no audio stream at all. A composite always has an audio stream,
+   * silent base and all, and whether it should be *quiet* is a question about
+   * levels that the mixdown already answered. The real check for it is below,
+   * against the sequence's length.
+   */
   const asSource = {
     display: { width: job.width, height: job.height },
     frameRate: job.frameRate,

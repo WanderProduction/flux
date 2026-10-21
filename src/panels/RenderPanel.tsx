@@ -442,6 +442,13 @@ export function RenderPanel() {
                         : Math.abs(job.speed - 1) > 1e-9
                           ? ` · ${job.speed.toFixed(2)}×`
                           : ''}
+                      {/*
+                        Said before it happens, not discovered afterwards. A
+                        row that will write a file with no sound is a row you
+                        want to notice while the mute is still something you
+                        remember pressing.
+                      */}
+                      {!isSequenceJob(job) && job.silent && ' · no sound'}
                       {job.sequenceName && ` · ${job.sequenceName}`}
                     </span>
                     <span className="render-status">

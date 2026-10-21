@@ -12,7 +12,13 @@
  */
 
 import { getAsset } from './assets'
-import { getSequence, type Clip, type SequenceState } from './sequence'
+import {
+  getSequence,
+  isTrackAudible,
+  isTrackVisible,
+  type Clip,
+  type SequenceState,
+} from './sequence'
 import type { FrameRatePolicy } from './renderSettings'
 
 export interface ExportJob {
@@ -73,12 +79,29 @@ export interface ExportJob {
    * a trim cannot — there is no original of *that range* to keep.
    */
   wholeFile: boolean
+  /**
+   * True when this clip's sound was not being heard, so the file is written
+   * without any.
+   *
+   * The track state is the statement, not a separate export option. A clip
+   * whose audio sits on a muted track — or on one that is not soloed while
+   * something else is — is a clip you were watching silently, and an archive
+   * of it with the sound back in would be a file nobody reviewed. See
+   * `isTrackAudible`, which is the one place that rule lives.
+   *
+   * Only mute and solo reach this. The **fader does not**, and that is a
+   * decision rather than an omission: a level is how loud you needed it while
+   * reviewing, and baking it into an archived original would quietly alter the
+   * footage. The sequence render does apply it, because a deliverable is
+   * supposed to sound like what was heard. See kernel/sequenceExport.ts.
+   */
+  silent: boolean
 }
 
 export interface SkippedClip {
   id: string
   name: string
-  reason: 'missing-asset' | 'offline' | 'no-length' | 'still'
+  reason: 'missing-asset' | 'offline' | 'no-length' | 'still' | 'hidden'
   detail: string
 }
 
@@ -203,17 +226,65 @@ export function planExport(
   const videoTracks = new Set(
     sequence.tracks.filter((track) => track.kind === 'video').map((track) => track.id),
   )
+  const hiddenTracks = new Set(
+    sequence.tracks
+      .filter((track) => track.kind === 'video' && !isTrackVisible(track))
+      .map((track) => track.id),
+  )
 
-  const clips = sequence.clips
+  /**
+   * Which audio tracks are being heard, and which clip carries each link.
+   *
+   * A file with sound lands as a linked pair — one clip on a video track, one
+   * on an audio track — so the question "is this clip's sound audible" is
+   * answered by the *other* half, on a track the video clip knows nothing
+   * about. The link is what joins them.
+   */
+  const audible = new Map<string, boolean>()
+  for (const track of sequence.tracks) {
+    if (track.kind === 'audio') audible.set(track.id, isTrackAudible(track, sequence.tracks))
+  }
+  const soundOf = new Map<string, Clip>()
+  for (const clip of sequence.clips) {
+    if (clip.kind === 'audio' && clip.linkId) soundOf.set(clip.linkId, clip)
+  }
+
+  const onVideo = sequence.clips
     .filter((clip) => videoTracks.has(clip.trackId))
     // Timeline order, which is review order, and what the _02 suffixes follow.
     .slice()
     .sort((a, b) => a.start - b.start || a.trackId.localeCompare(b.trackId))
 
+  /*
+   * Hidden tracks are dropped *before* naming, not after, and the difference is
+   * visible in the output folder. Naming first and filtering second would leave
+   * holes in the numbering — a `DSCF3957.mp4` and a `DSCF3957_03.mp4` with no
+   * `_02` between them, which reads as a failed export rather than as a track
+   * you chose not to render.
+   */
+  const clips = onVideo.filter((clip) => !hiddenTracks.has(clip.trackId))
+
   const names = nameJobs(clips, outDir)
 
   const jobs: ExportJob[] = []
   const skipped: SkippedClip[] = []
+
+  /*
+   * Named rather than silently absent. Hiding a track is an ordinary thing to
+   * do while reviewing and an easy thing to forget, so "14 clips, 9 files" has
+   * to have an answer on screen instead of being a discrepancy someone works
+   * out later.
+   */
+  for (const clip of onVideo) {
+    if (!hiddenTracks.has(clip.trackId)) continue
+    const track = sequence.tracks.find((one) => one.id === clip.trackId)
+    skipped.push({
+      id: clip.id,
+      name: getAsset(clip.assetId)?.name ?? clip.assetId,
+      reason: 'hidden',
+      detail: `${track?.name ?? clip.trackId} is hidden`,
+    })
+  }
 
   for (const clip of clips) {
     const asset = getAsset(clip.assetId)
@@ -275,6 +346,15 @@ export function planExport(
     const share =
       clip.sourceDuration > 0 ? Math.min(1, clip.duration / clip.sourceDuration) : 1
 
+    /*
+     * A clip with no link is left alone. Its sound, if the file has any, is not
+     * on the timeline as anything this can check — so there is no track state
+     * to honour, and guessing at one would mean silencing files for a reason
+     * nobody could see.
+     */
+    const sound = clip.linkId ? soundOf.get(clip.linkId) : undefined
+    const silent = sound ? audible.get(sound.trackId) === false : false
+
     jobs.push({
       kind: 'clip',
       id: clip.id,
@@ -298,6 +378,7 @@ export function planExport(
           ? { frameRate: sequence.settings.frameRate }
           : {}),
       wholeFile,
+      silent,
     })
   }
 
