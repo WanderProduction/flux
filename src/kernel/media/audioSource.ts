@@ -1,6 +1,6 @@
 import { assetUrl } from '../fsBridge'
 import { sampleAt } from '../../../shared/mp4.js'
-import { trackFor, type VideoTrack } from './indexCache'
+import { trackFor, type PcmFormat, type VideoTrack } from './indexCache'
 
 /**
  * One audio file, read forward as decoded sound.
@@ -77,6 +77,81 @@ export function hasAudioDecoder(): boolean {
   return typeof AudioDecoder !== 'undefined' && typeof EncodedAudioChunk !== 'undefined'
 }
 
+/**
+ * Interleaved PCM bytes to one plane per channel of -1..1 floats.
+ *
+ * This is the whole of "decoding" uncompressed audio, and it is arithmetic
+ * rather than a codec — which is why it needs no WebCodecs and cannot fail.
+ *
+ * ## The three ways to get this wrong, and they all sound like noise
+ *
+ * **The divisor.** A signed 24-bit sample runs -8388608..8388607, so dividing
+ * by 8388608 maps it to -1..<1. Dividing by 8388607 would let the most
+ * negative sample reach -1.0000001 and clip; dividing by 16777216 would halve
+ * the volume of every file in the archive, quietly.
+ *
+ * **The sign.** The top byte carries it, so a 24-bit value is assembled and
+ * then sign-extended by shifting it up into the top of a 32-bit word and back
+ * down again — `<< 8 >> 8` — which is what makes the arithmetic shift do the
+ * extension for us. Skipping that turns every negative sample into a large
+ * positive one, which is full-scale noise.
+ *
+ * **The order.** Little-endian is least-significant byte first, and the camera
+ * in this archive writes little-endian 24-bit. Reading it the other way round
+ * is also noise, and is the failure mode a `wave`/`enda` box exists to prevent.
+ *
+ * None of these is visible as a shape on a waveform — a wrong divisor looks
+ * like quiet audio and a wrong sign looks like loud audio. They are checked by
+ * decoding a known tone and measuring it; see scripts/verify-demux.mjs.
+ */
+export function readPcm(
+  bytes: Uint8Array,
+  pcm: PcmFormat,
+  time: number,
+): AudioFrame {
+  const { bits, channels, sampleRate, float, bigEndian, signed } = pcm
+  const width = bits >> 3
+  const stride = width * channels
+  const frames = Math.floor(bytes.length / stride)
+
+  const planes: Float32Array<ArrayBuffer>[] = []
+  for (let c = 0; c < channels; c++) planes.push(new Float32Array(frames))
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const little = !bigEndian
+  // -1..1 for a signed integer of this width. Never 2^(n-1) - 1; see above.
+  const scale = 1 / 2 ** (bits - 1)
+
+  for (let f = 0; f < frames; f++) {
+    const row = f * stride
+    for (let c = 0; c < channels; c++) {
+      const at = row + c * width
+      let value: number
+      if (float) {
+        value = bits === 64 ? view.getFloat64(at, little) : view.getFloat32(at, little)
+      } else if (bits === 8) {
+        // 8-bit PCM is unsigned by convention, centred on 128.
+        const raw = view.getUint8(at)
+        value = signed ? (view.getInt8(at) + 0.5) / 127.5 : (raw - 128) / 128
+      } else if (bits === 16) {
+        value = (little ? view.getInt16(at, true) : view.getInt16(at, false)) * scale
+      } else if (bits === 24) {
+        const a = view.getUint8(at)
+        const b = view.getUint8(at + 1)
+        const c3 = view.getUint8(at + 2)
+        const raw = little ? a | (b << 8) | (c3 << 16) : c3 | (b << 8) | (a << 16)
+        // Sign-extend 24 bits into 32 by shifting up and arithmetically back.
+        value = ((raw << 8) >> 8) * scale
+      } else {
+        value = (little ? view.getInt32(at, true) : view.getInt32(at, false)) * scale
+      }
+      planes[c][f] = value
+    }
+  }
+
+  return { time, duration: frames / sampleRate, sampleRate, planes }
+}
+
 export class AudioSource {
   private constructor(
     private readonly url: string,
@@ -110,15 +185,23 @@ export class AudioSource {
   static async open(
     path: string,
   ): Promise<{ ok: true; source: AudioSource } | { ok: false; reason: OpenFailure }> {
-    if (!hasAudioDecoder()) return { ok: false, reason: 'no-webcodecs' }
-
     const index = await trackFor(path, 'audio')
     if (!index.ok) return { ok: false, reason: index.reason }
 
     const track = index.track
+    /*
+     * Uncompressed audio opens without a decoder, and without asking whether
+     * WebCodecs is there at all. There is nothing to configure: the bytes in
+     * the file are the samples, and turning them into floats is arithmetic.
+     * Gating this on `hasAudioDecoder` would refuse a Fujifilm clip on a build
+     * that has no AudioDecoder, for the sake of a decoder it never uses.
+     */
+    if (track.pcm) return { ok: true, source: new AudioSource(assetUrl(path), track) }
+
+    if (!hasAudioDecoder()) return { ok: false, reason: 'no-webcodecs' }
     const config: AudioDecoderConfig = {
-      codec: track.codec,
-      description: track.description,
+      codec: track.codec as string,
+      description: track.description as Uint8Array,
       sampleRate: track.sampleRate,
       numberOfChannels: track.channels,
     }
@@ -241,8 +324,9 @@ export class AudioSource {
       },
     })
     decoder.configure({
-      codec: this.track.codec,
-      description: this.track.description,
+      /* PCM never reaches a decoder — open() hands it back before this. */
+      codec: (this.track.codec as string),
+      description: (this.track.description as Uint8Array),
       sampleRate: this.track.sampleRate,
       numberOfChannels: this.track.channels,
     })
@@ -288,6 +372,20 @@ export class AudioSource {
 
     // The await above is where a seek gets in.
     if (this.closed || this.failed || this.generation !== mine) return
+
+    if (track.pcm) {
+      for (let i = from; i <= to; i++) {
+        const at = track.offset[i] - start
+        if (at + track.bytes[i] > bytes.length) break
+        this.ready.push(
+          readPcm(bytes.subarray(at, at + track.bytes[i]), track.pcm, track.pts[i]),
+        )
+        this.decoded += 1
+      }
+      this.nextSample = to + 1 >= track.count ? -1 : to + 1
+      this.wake()
+      return
+    }
 
     const decoder = this.ensureDecoder()
     let submitted = from - 1

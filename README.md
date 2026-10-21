@@ -1038,11 +1038,10 @@ modes differ here on purpose, where they used to differ by accident.
 > there must be none, and not-silent means there must be some *when the source had some*. That
 > asymmetry is why `sourceFacts` reports whether a source has audio at all.
 
-*Not yet: **`pcm_s24le` soundtracks**, which is what the Fujifilm bodies in this archive record.
-The demuxer reads them as `unreadable`, so those clips land on the timeline with **no audio clip
-beside them** — 127 of 128 in a real shoot folder. Their sound still reaches the export, because
-ffmpeg decodes pcm perfectly well and an unlinked clip is left alone; what does not work is muting
-it, since there is nothing on the timeline to mute. Fixing it is a demuxer job, not a render one.*
+When this landed, it barely moved on this archive: the Fujifilm bodies record `pcm_s24le`, the
+demuxer could not read it, and **127 of 128 clips** in a real shoot folder had no audio clip on the
+timeline to mute. That is fixed — see *Uncompressed audio* below. The same check now reports
+**128 linked clips silenced, 0 untouched**.
 
 #### Speed changes render
 
@@ -1378,12 +1377,55 @@ The displayed shape is also what a sequence takes from its first clip, which was
 rotation was read: a folder of vertical footage produced a landscape sequence with the whole review
 letterboxed inside it.
 
-**Audio FLUX still cannot read:** 38% of this archive is `pcm_s24le`, and the demuxer handles only
-AAC. Those files land as picture with no sound — and the card says *"FLUX cannot read this file's
-audio yet"* rather than *"no soundtrack"*, which is the distinction
-[`media/peaks.ts`](src/kernel/media/peaks.ts) exists to keep. Telling someone the second when it is
-the first is a lie they could act on, by going to look for a fault in their footage. PCM needs no
-decoder — it is raw samples — so this is a demuxer gap rather than a platform one.
+#### Uncompressed audio
+
+38% of this archive is `pcm_s24le`, and for a long time the demuxer handled only AAC — so those
+files landed as picture with no sound at all. The card said *"FLUX cannot read this file's audio
+yet"* rather than *"no soundtrack"*, which is the distinction
+[`media/peaks.ts`](src/kernel/media/peaks.ts) exists to keep: telling someone the second when it is
+the first is a lie they could act on, by going to look for a fault in their footage.
+
+PCM needs no decoder — the samples *are* the audio — so it was a demuxer gap rather than a platform
+one, and three things had to be true before it closed.
+
+**One box, three layouts.** A sound sample entry comes in versions, and they are not cosmetic
+variations. v0 is the plain 28-byte preamble. v1 adds `bytesPerPacket`, which is the only honest
+depth on an `in24` track — ffmpeg writes `samplesize` 16 on 24-bit audio, and believing it costs a
+third of every sample. **v2 is a different structure entirely**, with the rate as a float64 and an
+explicit flags word, and it is what QuickTime and these cameras write for `lpcm`. Reading a v2
+entry at v0 offsets yields *3 channels at 1Hz* — which is what FLUX was doing, and why it reported
+`unsupported-codec` rather than crashing.
+
+The four-letter type sets the defaults — `twos` big-endian, `sowt` little, `in24`/`fl32`
+big-endian — and a `wave`/`enda` box overrides the endianness, which is how ffmpeg writes
+little-endian samples into a box whose name means the opposite.
+
+**An index of packets, not of frames.** At 48kHz a PCM frame *is* a sample, so indexing one the way
+a compressed track is indexed means 336,336 entries for a seven-second clip — 11MB of index for
+seven seconds, and over a gigabyte for one shoot folder. That is the real reason this was not just
+"accept `lpcm`". Frames are grouped into packets of 4096 instead, which is 85ms at 48kHz: 84
+entries for that same clip. Packets never straddle a chunk, because frames are contiguous *within*
+a chunk and chunks are not contiguous with each other — a packet that crossed one would read
+whatever the muxer put in between, most often a lump of video, as audio. Every packet is a key
+frame, because every PCM frame is, which is what makes seeking in it exact.
+
+**Converting it is arithmetic, and all three ways to get it wrong sound like noise.** The divisor
+is 2^(n-1), not 2^n and not 2^(n-1)-1 — the first halves the volume of the whole archive and the
+second lets the most negative sample clip. The sign lives in the top byte, so a 24-bit value is
+assembled and then sign-extended with `<< 8 >> 8`; without that every negative sample becomes a
+large positive one. And the byte order is what `enda` is for. None of these throws, and none of
+them looks wrong on a waveform — a bad divisor is quiet audio, a bad sign is loud audio.
+
+So they are **measured**. `verify:demux` decodes one 440Hz tone from four fixtures — `sowt`,
+`twos`, `in24` and `fl32` — and requires all four to come back as the same tone at the same level,
+so whichever path is wrong is the one that disagrees. Measured: 0.125 peak at 440Hz, identical
+across all four. The `lpcm` v2 layout has no fixture, because ffmpeg will not write one; it is
+checked against real camera footage instead, and cross-checked against ffmpeg's own decode of the
+same file — FLUX reads −8.45 dB peak where ffmpeg reports −8.1 dB across both channels.
+
+The result on a real shoot folder: four clips imported, **four linked with sound** where it used to
+be one, waveforms drawn from the same arithmetic the mixer plays, and the mixer scheduling 46
+buffers with none late.
 
 ### Playback
 
@@ -1903,6 +1945,13 @@ npm run verify:playback
 npm run verify:demux
 ```
 
+A second argument points it at a real camera file, for the one sample layout no fixture can carry —
+ffmpeg will not write an `lpcm` version 2 entry, and that is what the cameras here record:
+
+```bash
+npm run verify:demux -- ~/flux-media-test "E:\FOOTAGE\AG GROUPS\REELS\DSCF1906.MOV"
+```
+
 `verify:demux` needs no app either — the demuxer reads through a `ByteReader`, so a file handle
 stands in for ranged fetches. It checks the index *against the file*: every sample inside its
 bounds, no two overlapping, timestamps counting evenly, keyframes where ffmpeg was told to put them,
@@ -2138,8 +2187,8 @@ move behind the kernel seam to native later without touching the UI.
 
 Everything below the shell: the signal graph, the compute scheduler (GPU/CPU/RAM split), caching and
 proxies, the audio graph, plugins, skinning UI. Audio files are not importable yet — the Content
-Browser is image and video only, and `pcm_s24le` soundtracks are read as *unreadable* rather than
-decoded.
+Browser is image and video only. A *soundtrack* inside a video file is read either way: AAC through
+WebCodecs, and uncompressed PCM without a decoder at all.
 
 **Rendering covers two shapes and no more.** [Render](#render-add-then-start) writes one file per
 clip, or the whole sequence as one composited file — and that is the end of it. There are no
