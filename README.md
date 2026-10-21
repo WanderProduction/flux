@@ -62,7 +62,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
-| **Panel focus** | `Ctrl 1`–`Ctrl 4`, opening the panel if the workspace doesn't have it. |
+| **Panel focus** | `Ctrl 1`–`Ctrl 5`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
@@ -89,8 +89,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
 | **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
 
-Five built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools** and **Batch** — and
-all five do real work.
+Six built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools**, **Batch** and
+**Render** — and all six do real work.
 The Node Map, Inspector and Mixer were removed: they were empty rooms named after systems that do
 not exist yet, and a tour of empty rooms says less about where this is going than three that are
 furnished. They come back when there is something to put in them.
@@ -945,41 +945,112 @@ once noticed. Whole frames make one clip's end exactly the next one's start.
 
 The panel says so and then gets out of the way. This step is the editor.
 
-#### 3 · Export
+#### 3 · Render what survived
 
-Choose an output folder and FLUX reads the sequence: how many clips, how much footage, how much
-it will read and roughly how much it will write. The plan is rebuilt whenever the sequence
-changes, so the numbers next to the button belong to the edit on screen rather than to the one
-from twenty minutes ago.
+Select the clips you want and add them to the queue in **Render**. That panel is where the
+settings and the queue live; Batch's job ends once the footage is on the timeline.
 
-**Flat output, original names kept.** Two kinds of collision follow, and they mean different
-things. Several cuts of one source — a clip razored in three — get `DSCF3957.mp4`,
-`DSCF3957_02.mp4`, `DSCF3957_03.mp4`, numbered in timeline order. A *different* source with the
-same name, because camera filenames restart in every shoot folder, gets `DSCF3957_1.mp4`. Both
-suffixes are necessary and they are only one character apart, which is the real cost of flat
-output: which shoot a clip came from is not recoverable from its name. The export log carries
-the full source path for every row, which is where that question gets answered.
+### Render: add, then start
 
-**Three clips are refused rather than guessed at**, and each is listed by name: a missing or
-offline source, a clip with no length, and a clip that has been **stretched**. The last one is
-the interesting refusal — a speed change needs a frame-rate decision, and the format refuses to
-conform frame rates at all for the reason below. Undo the stretch and it exports.
+`Ctrl 5`. Two windows in one panel, which is both what was asked for and the shape the work
+has: settings are a decision you make once for a project, and the queue is a list you build over
+an afternoon.
 
-Two at a time by default. NVENC allows eight concurrent sessions and encoding runs about six
-times realtime, so the GPU is not what saturates first — the disk is, and four parallel reads of
-large files off one spindle is slower in total than two.
+Modelled on Adobe Media Encoder rather than a Premiere export dialog. Select clips, press
+**Add selection**, keep editing, add more — from another sequence if you like — and press
+**Start** when the list is right. The queue is saved beside the project document, so a list
+built today is still there tomorrow.
 
-**The queue lives in the main process.** An export of a shoot folder is tens of minutes and of a
-drive is hours; owned by a React component it would be at the mercy of a re-render or a panel
-being closed, and "I closed the panel and my nine-hour render stopped" is not a thing an
-archiver may do.
+#### A queued job is a snapshot, not a reference
 
-**Resumable.** A run skips every output that already exists *and* verifies. The `and` is the
-point: skipping on existence alone would permanently adopt whatever a killed process left
-behind, which is a hole in the archive that nothing would ever look for again.
+This is the one decision everything else follows from, and it is what makes add-then-start safe.
 
-**Nothing is ever moved or deleted.** Outputs are written alongside, a human deletes the
-originals after spot-checking, and the log is what makes that safe.
+A job could have been "clip `c17` of sequence `s3`", resolved to a source and a range at render
+time. It is not, and must not be: the whole point of a queue you add to over time is that you
+carry on editing afterwards. By the time Start is pressed, `c17` may have been razored into
+three, trimmed, moved, or deleted outright — and a queue that silently rendered whatever that id
+means *now* would produce files matching nothing anyone reviewed.
+
+So adding resolves everything immediately: source path, in point, duration, speed, output name.
+The clip id is kept only so the timeline can say which clips are queued; nothing reads back
+through it. `scripts/verify-render-queue.mjs` asserts exactly this — it deletes a queued clip and
+razors another, and requires both jobs to come through unchanged and still renderable.
+
+The honest cost: edit a clip after queueing it and the queue still holds the old range. That is
+why re-adding a clip **replaces** its row rather than making a second one. Pressing Add twice is
+something people do when they are not sure it worked, and the result should be the same queue,
+not the same clip rendered twice to the same filename.
+
+#### What is a choice, and what is a finding
+
+Most of the encode is not a choice. The codec, the rate control, the pixel format and the `hvc1`
+tag were arrived at by encoding this library's own footage and scoring it, and presenting them as
+fields would imply otherwise — so they are shown under *What the encode is* rather than offered.
+
+Four things are genuinely yours:
+
+| | |
+|---|---|
+| **Quality (CQ)** | Lower is bigger and better. 26 measured a 1% low of 95.64 VMAF. |
+| **Keyframes every** | 30 frames is about a second, which is what lets the result be re-cut later with no re-encode. Costs 4.9% size. |
+| **At once** | The disk saturates before the GPU does — NVENC allows eight sessions, but four parallel reads of large files on one spindle is slower than two. |
+| **Frame rate** | Keep each clip's own, or conform to the sequence. |
+
+That last one has a trap in it, which is why it defaults to *keep*. This library mixes 25, 29.97
+and 50fps, and the 50fps material is kept for slow motion. Conforming resamples all of it — and a
+silent conform is the exact failure the verifier exists to catch, since an Adobe export in the
+encode tests turned an 1850-frame 50fps source into 1108 frames at 29.97 and looked perfectly
+healthy. Choosing it should be something you did on purpose.
+
+#### Speed changes render
+
+A stretched clip used to be refused, which was wrong: adjusting time is an edit like any other
+and the render is what it is for. A clip at speed `s` covers `duration × s` seconds of its source,
+so the read limit goes on the input and `setpts=PTS/s` compresses it back down; audio follows
+through `atempo`, chained because one instance only accepts 0.5 to 2.0, so 4× is `atempo=2,atempo=2`.
+
+The rate is then **forced**, and that part is not optional. `setpts` retimes frames without
+removing any, so a clip played at 2× keeps every frame in half the time: a 50fps source comes out
+a perfectly valid 100fps file, which is not what anyone meant by "twice as fast". Forcing the rate
+makes ffmpeg drop or duplicate to hit it, which is what every NLE does with a speed change — and
+it is the same mechanism the conform policy uses, rather than each having its own.
+
+Measured on real footage: 3s out at 1×, 2× and 0.5× gave 150, 152 and 149 frames, all at 50fps,
+covering 3s, 6s and 1.5s of source respectively.
+
+#### Where the queue lives, and why it is in two places
+
+The **list** is project state. It belongs to the project, is saved beside the document, and has to
+survive a restart. The **running** is in the main process, because an hours-long encode must not
+be at the mercy of a panel closing — "I closed the panel and my nine-hour render stopped" is not a
+thing an archiver may do.
+
+The list is written to `project_files/render-queue.json` rather than into the `.flux` document,
+and that placement is deliberate. Its rows change constantly while a render runs — waiting,
+running, done, several a minute — and folding that into the document would light the unsaved dot
+on every finished encode. A dot that appears for something you did not do is a dot people learn to
+ignore. `project_files` is already described as the part FLUX owns, "the document, and whatever
+bookkeeping comes later"; this is that bookkeeping.
+
+A row that was mid-flight when the app closed comes back as **waiting**. A row saying "running"
+with nothing running is a lie the UI would have to explain, and the work genuinely was not
+finished — the partial file is already gone, because an encode writes to a temporary and renames.
+
+#### Selection had to move first
+
+None of this could read the selection, because there was no selection to read: it was
+`useState<Set<string>>` inside the Timeline panel, and a panel cannot see another panel's state.
+
+It now lives in [`kernel/selection.ts`](src/kernel/selection.ts), for the same reason
+`kernel/tools.ts` owns the tool in hand — a mode a panel owned would be a mode every other panel
+had to reach into, and closing that panel would leave the app holding nothing. The Timeline still
+*drives* it and no longer owns it, so closing the Timeline no longer throws away what you had
+selected.
+
+It also prunes itself. A selection outlives the clips in it: undo takes them away, so does
+deleting, and a selection still pointing at a clip that is gone makes `Delete` and every other
+command quietly do nothing. The Timeline used to prune in its own handler, which only worked while
+the Timeline was open — fine when it was the only owner, not fine now.
 
 #### The encode, and why every flag is what it is
 
@@ -1082,6 +1153,11 @@ encoding because a CSV was open in Excel would be absurd.
 ffmpeg and ffprobe on `PATH` — `winget install Gyan.FFmpeg` — plus an NVIDIA card for
 `hevc_nvenc`. Both are checked once, up front, and said plainly: the difference between "no
 NVIDIA card" and "your first 400 encodes failed" is worth one probe.
+
+*Not yet: a render of a **sequence as one file**. Everything here writes one file per clip,
+which is what an archive wants and is not what a deliverable wants — and the missing pieces are
+real ones: compositing stacked layers through the Viewer’s canvas, and a mixdown of the audio
+graph. The queue, the settings, the encoder and the verifier would all be reused as they are.*
 
 *Not yet: the unattended whole-tree mode that compresses an archive with no review at all. The
 pieces are all here — the scan, the format, the queue, the verifier and the log — and what is
@@ -1710,6 +1786,15 @@ job, a second run skipping what already verified, a damaged output being **re-en
 skipped**, and cancel stopping it promptly. Each source is cut twice so the `_02` naming is
 exercised.
 
+```bash
+npm run verify:render-queue -- "E:\FOOTAGE\AG GROUPS\REELS"
+```
+
+The queue, in the running app, and mostly one property: that a queued job is a snapshot. It
+imports, selects, adds, then **deletes one queued clip and razors another**, and requires both
+jobs to survive unchanged and still render. It also checks that re-adding replaces a row rather
+than doubling it, that a stretched clip queues with a forced rate and renders at it, that Start
+writes the files, and that the queue survives a round trip through its file on disk.
 ```bash
 npm run verify:batch -- "E:\FOOTAGE\AG GROUPS\REELS"
 ```

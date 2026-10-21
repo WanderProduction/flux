@@ -251,14 +251,24 @@ export async function verify(ffprobe, job, source) {
     )
   }
 
-  // The failure this whole function exists for.
-  if (Math.abs(facts.frameRate - source.frameRate) > 0.01) {
+  /*
+   * The rate asked for, which is the source's unless the job forced one.
+   *
+   * It has to be the request rather than the source, now that a job can
+   * legitimately change the rate — a speed change forces one so the output is
+   * not a 100fps file, and the sequence-rate policy forces one on purpose.
+   * What this still catches is the failure it was built for: a rate that
+   * nobody asked for, which is how an 1850-frame 50fps source became 1108
+   * frames at 29.97 and looked perfectly healthy.
+   */
+  const wantedRate = job.frameRate || source.frameRate
+  if (Math.abs(facts.frameRate - wantedRate) > 0.01) {
     problems.push(
-      `frame rate is ${facts.frameRate.toFixed(3)}, expected ${source.frameRate.toFixed(3)}`,
+      `frame rate is ${facts.frameRate.toFixed(3)}, expected ${wantedRate.toFixed(3)}`,
     )
   }
 
-  const wantedFrames = Math.round(job.duration * source.frameRate)
+  const wantedFrames = Math.round(job.duration * wantedRate)
   if (Math.abs(facts.frames - wantedFrames) > FRAME_TOLERANCE) {
     problems.push(`${facts.frames} frames, expected about ${wantedFrames}`)
   }

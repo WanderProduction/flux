@@ -129,6 +129,36 @@ export function encodeArgs(options = {}) {
 }
 
 /**
+ * The audio filter chain for a speed change.
+ *
+ * `atempo` only accepts 0.5 to 2.0 in one instance, so anything outside that
+ * is reached by chaining: 4x is `atempo=2,atempo=2`. The timeline allows ten
+ * times either way, so the chain can be three deep.
+ *
+ * Pitch moves with the speed, which is what a stretch means before anyone asks
+ * for pitch to be held — and it is what the mixer already does on playback, so
+ * the render matches what was heard while reviewing.
+ *
+ * @param {number} speed
+ * @returns {string}
+ */
+export function atempoChain(speed) {
+  const steps = []
+  let left = speed
+  while (left > 2) {
+    steps.push('atempo=2')
+    left /= 2
+  }
+  while (left < 0.5) {
+    steps.push('atempo=0.5')
+    left *= 2
+  }
+  // Floating point can leave this a hair off 1 for a clip nobody stretched.
+  if (Math.abs(left - 1) > 1e-6) steps.push(`atempo=${left.toFixed(6)}`)
+  return steps.join(',')
+}
+
+/**
  * The whole command for one cut, as an argument list.
  *
  * `-ss` goes **before** `-i`, which is both the fast seek and — when
@@ -146,19 +176,48 @@ export function encodeArgs(options = {}) {
  * consequence belongs to the verifier, which must compare against the
  * *displayed* dimensions — comparing coded ones fails on every rotated file.
  *
+ * ## Speed, and why the rate is forced when there is one
+ *
+ * A stretched clip covers `duration * speed` seconds of its source in
+ * `duration` seconds of output, so the read limit goes on the *input* — `-t`
+ * before `-i` — and `setpts=PTS/speed` compresses it back down.
+ *
+ * `-r` then matters. `setpts` retimes frames without removing any, so a clip
+ * played at 2x keeps every frame in half the time: a 50fps source comes out a
+ * perfectly valid 100fps file, which is not what anyone meant by "twice as
+ * fast". Forcing the rate makes ffmpeg drop or duplicate to hit it, which is
+ * what every NLE does with a speed change.
+ *
+ * `-r` is also how the sequence-rate policy is expressed, so the two share one
+ * mechanism rather than each having their own.
+ *
  * @param {object} job
  * @param {string} job.source absolute path to the original
  * @param {string} job.output absolute path to write
  * @param {number} job.offset seconds into the source where the cut starts
  * @param {number} job.duration seconds of output
+ * @param {number} [job.speed] how fast the source runs; 1 when untouched
+ * @param {number} [job.frameRate] rate to force, or undefined to keep the source's
  * @param {{ cq?: number, gop?: number }} [options]
  * @returns {string[]}
  */
 export function cutArgs(job, options = {}) {
+  const speed = job.speed && job.speed > 0 ? job.speed : 1
+  const stretched = Math.abs(speed - 1) > 1e-9
+
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-stats']
   if (job.offset > 0) args.push('-ss', job.offset.toFixed(6))
+  // The read limit is an input option so the filter below sees exactly the
+  // span the clip covers, rather than the whole rest of the file.
+  if (stretched) args.push('-t', (job.duration * speed).toFixed(6))
   args.push('-i', job.source)
-  args.push('-t', job.duration.toFixed(6))
+  if (stretched) {
+    args.push('-filter:v', `setpts=PTS/${speed}`)
+    args.push('-filter:a', atempoChain(speed))
+  } else {
+    args.push('-t', job.duration.toFixed(6))
+  }
+  if (job.frameRate) args.push('-r', String(job.frameRate))
   args.push(...encodeArgs(options))
   /*
    * The container stated rather than inferred from the extension.

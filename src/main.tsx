@@ -26,6 +26,9 @@ import * as indexCache from './kernel/media/indexCache'
 import * as peaks from './kernel/media/peaks'
 import * as mixer from './kernel/media/mixer'
 import * as audioSource from './kernel/media/audioSource'
+import * as selection from './kernel/selection'
+import * as renderQueue from './kernel/renderQueue'
+import * as renderSettings from './kernel/renderSettings'
 import * as batchImport from './kernel/batchImport'
 import * as batchExport from './kernel/batchExport'
 import * as renderBridge from './kernel/renderBridge'
@@ -91,6 +94,9 @@ if (import.meta.env.DEV) {
        * and the checks would read an empty timeline and fail for a reason that
        * has nothing to do with the code under test.
        */
+      selection,
+      renderQueue,
+      renderSettings,
       batchImport,
       batchExport,
       renderBridge,

@@ -16,6 +16,7 @@ import { TimelinePanel } from './TimelinePanel'
 import { ContentBrowserPanel } from './ContentBrowserPanel'
 import { ToolsPanel } from './ToolsPanel'
 import { BatchPanel } from './BatchPanel'
+import { RenderPanel } from './RenderPanel'
 
 export function registerBuiltinPanels() {
   panels.registerAll([
@@ -48,6 +49,12 @@ export function registerBuiltinPanels() {
       title: 'Batch',
       description: 'Import a folder of footage, and export what survives review',
       component: BatchPanel,
+    },
+    {
+      id: 'render',
+      title: 'Render',
+      description: 'Encode settings, and the queue of clips waiting to be written',
+      component: RenderPanel,
     },
   ])
 }

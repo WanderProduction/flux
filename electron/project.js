@@ -551,3 +551,59 @@ export async function copyIntoImports(root, sourcePath) {
 }
 
 export { DOCUMENT_FORMAT }
+
+// ── the render queue ──────────────────────────────────────────
+//
+// A file of its own under project_files, beside the document rather than
+// inside it, and that placement is the whole decision.
+//
+// The queue is project state: the jobs you lined up belong to this project and
+// should still be there tomorrow. But its rows change constantly while a render
+// runs — waiting, running, done, one per clip, several a minute — and folding
+// that into the .flux document would light the unsaved dot on every finished
+// encode. The README is explicit that a dot which appears for something you did
+// not do is a dot people learn to ignore. So the queue is written here, on its
+// own, and the document stays about the edit.
+//
+// project_files is already described as "the part FLUX owns — the document, and
+// whatever bookkeeping comes later". This is that bookkeeping.
+
+const QUEUE_FILE = 'render-queue.json'
+
+/** @param {string} root */
+export function queuePath(root) {
+  return path.join(projectFilesPath(root), QUEUE_FILE)
+}
+
+/**
+ * The queue stored for a project, or an empty one.
+ *
+ * A damaged or missing file is an empty queue rather than an error. Losing a
+ * list of pending renders is a nuisance; refusing to open a project because of
+ * it would be a disaster, and the footage it pointed at is all still there.
+ *
+ * @param {string} root
+ * @returns {Promise<{ jobs: Array<object> }>}
+ */
+export async function readQueue(root) {
+  try {
+    const stored = await readJson(queuePath(root))
+    return { jobs: Array.isArray(stored?.jobs) ? stored.jobs : [] }
+  } catch {
+    return { jobs: [] }
+  }
+}
+
+/**
+ * @param {string} root
+ * @param {Array<object>} jobs
+ */
+export async function writeQueue(root, jobs) {
+  try {
+    await fs.mkdir(projectFilesPath(root), { recursive: true })
+    await writeJsonAtomic(queuePath(root), { jobs, savedAt: Date.now() })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+}
