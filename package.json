@@ -29,7 +29,8 @@
     "verify:batch": "node scripts/verify-batch.mjs",
     "verify:render": "node scripts/verify-render.mjs",
     "verify:queue": "node scripts/verify-queue.mjs",
-    "verify:render-queue": "node scripts/verify-render-queue.mjs"
+    "verify:render-queue": "node scripts/verify-render-queue.mjs",
+    "verify:sequence-render": "node scripts/verify-sequence-render.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",

@@ -40,11 +40,21 @@ import { getSequence, type Clip, type SequenceState } from './sequence'
 import { getSelection } from './selection'
 import { getRenderSettings } from './renderSettings'
 import { planExport, type ExportJob, type SkippedClip } from './batchExport'
+import { isSequenceJob, planSequence, type SequenceJob } from './sequenceExport'
 import { onRenderEvent, startRender, cancelRender, type QueueEvent } from './renderBridge'
 
 export type JobStatus = 'waiting' | 'running' | 'done' | 'skipped' | 'failed' | 'cancelled'
 
-export interface QueuedJob extends ExportJob {
+/**
+ * What the list adds to whichever kind of job a row holds.
+ *
+ * The queue takes either — one cut of one clip, or a whole sequence composited
+ * into one file — because they are the same thing to a list you add to and then
+ * start: a resolved snapshot with an output path and a length. What differs is
+ * only what the encoder is handed, and that difference lives in the main
+ * process, where electron/renderQueue.js dispatches on `kind`.
+ */
+interface QueueRow {
   status: JobStatus
   /** Which sequence it came from, for the row to say so. */
   sequenceName: string
@@ -56,6 +66,17 @@ export interface QueuedJob extends ExportJob {
   /** 0..1 while running. */
   progress?: number
 }
+
+export type QueuedJob = (ExportJob | SequenceJob) & QueueRow
+
+/**
+ * What an Add button adds.
+ *
+ * `selection` and `sequence` both make one file per clip; `one-file` makes the
+ * whole active sequence into a single composited file. Which of them the panel
+ * offers follows the mode in kernel/renderSettings.ts.
+ */
+export type AddScope = 'selection' | 'sequence' | 'one-file'
 
 export interface QueueSummary {
   total: number
@@ -134,12 +155,24 @@ export function summary(): QueueSummary {
  * Separate from `add` so the panel can say "12 clips, 4m 20s" on the button and
  * name what it would refuse, which is the same courtesy the import plan gives.
  */
-export function previewAdd(scope: 'selection' | 'sequence'): {
-  jobs: ExportJob[]
+export function previewAdd(scope: AddScope): {
+  jobs: (ExportJob | SequenceJob)[]
   skipped: SkippedClip[]
+  /** Why there is nothing to add, when a sequence render cannot be planned. */
+  reason?: string
 } {
   const settings = getRenderSettings()
   const sequence = getSequence()
+
+  if (scope === 'one-file') {
+    const plan = planSequence(settings.outDir ?? '', sequence)
+    return {
+      jobs: plan.job ? [plan.job] : [],
+      skipped: plan.skipped,
+      ...(plan.reason ? { reason: plan.reason } : {}),
+    }
+  }
+
   const plan = planExport(settings.outDir ?? '', sequence, { frameRate: settings.frameRate })
   if (scope === 'sequence') return { jobs: plan.jobs, skipped: plan.skipped }
 
@@ -158,7 +191,7 @@ export function previewAdd(scope: 'selection' | 'sequence'): {
  * and the result should be the same queue, not the same clip rendered twice to
  * the same filename.
  */
-export function add(scope: 'selection' | 'sequence'): { added: number; replaced: number; skipped: SkippedClip[] } {
+export function add(scope: AddScope): { added: number; replaced: number; skipped: SkippedClip[] } {
   const { jobs: wanted, skipped } = previewAdd(scope)
   if (wanted.length === 0) return { added: 0, replaced: 0, skipped }
 
@@ -292,13 +325,28 @@ function applyEvent(event: QueueEvent): void {
   emit()
 }
 
-/** Clips on the active sequence that already have a row. For the timeline. */
+/**
+ * Clips on the active sequence that already have a row. For the timeline.
+ *
+ * A sequence render covers every clip it composited, so all of them count as
+ * queued — the marks on the timeline answer "is this going to be rendered",
+ * and for a one-file job the answer is yes for the whole thing.
+ */
 export function queuedClipIds(sequence: SequenceState = getSequence()): Set<string> {
-  const ids = new Set(jobs.map((job) => job.id))
+  const ids = new Set<string>()
+  for (const job of jobs) {
+    if (isSequenceJob(job)) {
+      for (const cut of job.video) ids.add(cut.id)
+      for (const cut of job.audio) ids.add(cut.id)
+    } else {
+      ids.add(job.id)
+    }
+  }
   return new Set(sequence.clips.filter((clip: Clip) => ids.has(clip.id)).map((clip) => clip.id))
 }
 
 /** A row's source file name, for display when the asset is long gone. */
 export function sourceNameOf(job: QueuedJob): string {
+  if (isSequenceJob(job)) return job.name
   return getAsset(job.id)?.name ?? job.name
 }

@@ -25,12 +25,27 @@
  * The second is that it is how the one clip that went wrong gets found. A batch
  * of four hundred encodes will have a failure in it somewhere, and finding it by
  * watching a progress bar is not possible.
+ *
+ * ## Two kinds of job, one queue
+ *
+ * A row is either one cut of one clip or a whole sequence composited into one
+ * file, and `runOne` dispatches on `job.kind`. They are the same thing to a
+ * queue — a resolved snapshot with an output path and a length, which it runs,
+ * verifies and logs — and the only place the difference shows is which module
+ * is asked to encode it: electron/render.js or electron/renderSequence.js.
+ *
+ * Concurrency is per row, which means it does nothing for a sequence render:
+ * one sequence is one job however many clips it composites. That is right
+ * rather than a limitation — `At once` exists because four parallel reads of
+ * large files on one spindle is slower than two, and a composite is already
+ * reading several of them at once through one ffmpeg process.
  */
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { alreadyDone, checkEncoder, encodeCut, findTools } from './render.js'
+import { encodeSequence, sequenceAlreadyDone } from './renderSequence.js'
 
 /**
  * Encodes running at once, by default.
@@ -244,6 +259,8 @@ export class RenderQueue {
   }
 
   async runOne(job) {
+    if (job.kind === 'sequence') return this.runSequence(job)
+
     if (this.resume && (await alreadyDone(job))) {
       this.status.set(job.id, 'skipped')
       this.emit({ type: 'job', id: job.id, status: 'skipped' })
@@ -309,6 +326,91 @@ export class RenderQueue {
       result.facts?.duration?.toFixed(3) ?? '',
       '', result.facts?.frameRate?.toFixed(3) ?? '',
       result.facts?.frames ?? '', '', 'no',
+      result.error ?? '',
+    ])
+  }
+
+  /**
+   * One sequence, composited into one file.
+   *
+   * The same shape as `runOne` above and deliberately so: resume by
+   * verification, the status transitions, the progress ticks and a log row at
+   * the end. What is different is only what it calls to do the encode.
+   *
+   * The `source` column holds the sequence's name and what went into it rather
+   * than a path, because there is no one file this came from — that is what a
+   * composite means. The full list of clips is not written there: it would be a
+   * CSV cell with four hundred paths in it, and the sequence document is where
+   * that question is answered properly.
+   */
+  async runSequence(job) {
+    const layers = `${job.video.length} video, ${job.audio.length} audio`
+
+    if (this.resume && (await sequenceAlreadyDone(job))) {
+      this.status.set(job.id, 'skipped')
+      this.emit({ type: 'job', id: job.id, status: 'skipped' })
+      await this.appendLog([
+        new Date().toISOString(), 'skipped', `${job.name} (${layers})`, job.sourceBytes,
+        job.output, '', '', '0.000', job.duration.toFixed(3),
+        '', job.frameRate.toFixed(3), '', '', '', '', 'already rendered and verified',
+      ])
+      return
+    }
+
+    this.status.set(job.id, 'running')
+    this.progress.set(job.id, 0)
+    this.emit({ type: 'job', id: job.id, status: 'running' })
+
+    const result = await encodeSequence({
+      job,
+      signal: this.controller.signal,
+      options: this.options,
+      onWarning: (message) => this.emit({ type: 'warning', message }),
+      onProgress: ({ seconds }) => {
+        this.progress.set(job.id, Math.min(seconds, job.duration))
+        this.emit({ type: 'progress', id: job.id })
+      },
+    })
+
+    this.results.set(job.id, result)
+    this.progress.delete(job.id)
+
+    if (result.ok) {
+      this.status.set(job.id, 'done')
+      this.emit({ type: 'job', id: job.id, status: 'done', result })
+      await this.appendLog([
+        new Date().toISOString(), 'composited',
+        `${job.name} (${layers})`, job.sourceBytes,
+        result.output, result.bytes,
+        result.ratio ? result.ratio.toFixed(2) : '',
+        '0.000', job.duration.toFixed(3),
+        result.facts?.duration?.toFixed(3) ?? '',
+        job.frameRate.toFixed(3),
+        result.facts?.frameRate?.toFixed(3) ?? '',
+        result.facts?.frames ?? '',
+        Math.round(job.duration * job.frameRate),
+        'no',
+        (result.warnings ?? []).join('; '),
+      ])
+      return
+    }
+
+    if (result.cancelled) {
+      this.status.set(job.id, 'cancelled')
+      this.emit({ type: 'job', id: job.id, status: 'cancelled' })
+      return
+    }
+
+    this.status.set(job.id, 'failed')
+    this.emit({ type: 'job', id: job.id, status: 'failed', result })
+    await this.appendLog([
+      new Date().toISOString(), `failed-${result.stage}`,
+      `${job.name} (${layers})`, job.sourceBytes,
+      result.kept ?? job.output, result.facts?.bytes ?? '',
+      '', '0.000', job.duration.toFixed(3),
+      result.facts?.duration?.toFixed(3) ?? '',
+      job.frameRate.toFixed(3), result.facts?.frameRate?.toFixed(3) ?? '',
+      result.facts?.frames ?? '', Math.round(job.duration * job.frameRate), 'no',
       result.error ?? '',
     ])
   }

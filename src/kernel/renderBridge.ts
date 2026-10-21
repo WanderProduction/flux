@@ -12,6 +12,17 @@
  */
 
 import type { ExportJob } from './batchExport'
+import type { SequenceJob } from './sequenceExport'
+
+/**
+ * Either kind of job the queue in main will run.
+ *
+ * It dispatches on `kind`: a clip job goes to electron/render.js and a sequence
+ * job to electron/renderSequence.js. Both are plain data by the time they cross
+ * the bridge, which they have to be — IPC carries structured clones, not
+ * objects with methods.
+ */
+export type RenderJob = ExportJob | SequenceJob
 
 export interface QueueCounts {
   waiting: number
@@ -71,7 +82,7 @@ export interface RenderConfig {
 
 interface RenderBridge {
   tools: () => Promise<{ ok: boolean; error?: string; version?: string }>
-  start: (jobs: ExportJob[], config: RenderConfig) => Promise<{ ok: boolean; error?: string; summary?: RenderSummary }>
+  start: (jobs: RenderJob[], config: RenderConfig) => Promise<{ ok: boolean; error?: string; summary?: RenderSummary }>
   cancel: () => Promise<boolean>
   state: () => Promise<QueueState | null>
   reveal: (dirPath: string) => Promise<string>
@@ -94,7 +105,7 @@ function requireRender(): RenderBridge {
 
 /** Whether ffmpeg and a usable NVENC encoder are present, and which build. */
 export const checkTools = () => requireRender().tools()
-export const startRender = (jobs: ExportJob[], config: RenderConfig) =>
+export const startRender = (jobs: RenderJob[], config: RenderConfig) =>
   requireRender().start(jobs, config)
 export const cancelRender = () => requireRender().cancel()
 export const renderState = () => requireRender().state()

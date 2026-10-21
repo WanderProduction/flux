@@ -88,6 +88,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Rotation** | Footage shot with the body turned lands and renders upright, not on its side. |
 | **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
 | **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
+| **Sequence render** | Or the whole sequence as *one* file: layers composited, audio mixed down, gaps black. |
 
 Six built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools**, **Batch** and
 **Render** — and all six do real work.
@@ -961,6 +962,10 @@ Modelled on Adobe Media Encoder rather than a Premiere export dialog. Select cli
 **Start** when the list is right. The queue is saved beside the project document, so a list
 built today is still there tomorrow.
 
+The first setting decides what one job *is*: **each clip as its own file**, which is what an
+archive wants, or **the whole sequence as one file**, which is what a deliverable wants. Both go
+through the same queue, the same encode and the same verifier.
+
 #### A queued job is a snapshot, not a reference
 
 This is the one decision everything else follows from, and it is what makes add-then-start safe.
@@ -1017,6 +1022,119 @@ it is the same mechanism the conform policy uses, rather than each having its ow
 
 Measured on real footage: 3s out at 1×, 2× and 0.5× gave 150, 152 and 149 frames, all at 50fps,
 covering 3s, 6s and 1.5s of source respectively.
+
+#### The whole sequence as one file
+
+Pick it in **Render**, press **Add**, press **Start**, and one mp4 comes out: every visible video
+track composited into the sequence's frame, every audible audio track mixed down, gaps black and
+silent, and the file exactly as long as the sequence says it is.
+
+The queue, the settings, the encoder, the log and the verifier are the same ones. What is new is a
+planner ([`kernel/sequenceExport.ts`](src/kernel/sequenceExport.ts)), a filter graph
+([`shared/sequenceGraph.js`](shared/sequenceGraph.js)) and a runner
+([`electron/renderSequence.js`](electron/renderSequence.js)) — because compositing, mixing and
+gaps genuinely did not exist anywhere.
+
+**Two planners, not a flag.** `planExport` names its outputs so several cuts of `DSCF3957.MOV` do
+not collide, decides whether a cut is a whole file so the never-write-a-bigger-file rule has
+something to fall back on, and offers a frame-rate policy. A sequence render needs none of the
+three: there is one output, a composite has no original to keep instead, and a sequence has a rate
+of its own. A flag would have left four branches inside one function, each of them the whole
+difference.
+
+#### Composited by ffmpeg, not by the Viewer's canvas
+
+The Viewer already composites — it decodes through WebCodecs and draws each layer into the
+sequence's frame with `drawUpright` — and piping its canvas into ffmpeg would have reused that.
+
+It would also have meant a decode, a rasterise, a read-back and a copy through IPC *per frame*,
+with an hours-long render at the mercy of a panel being closed — the exact thing the queue lives in
+the main process to avoid. ffmpeg can composite natively, on frames it is already decoding. The
+price of going native is that gaps, differing source sizes, rotation and per-clip speed each have
+to be handled on purpose rather than falling out of a canvas.
+
+The graph is one opaque black base the length of the sequence, and one `overlay` per clip on top of
+it, bottom track first:
+
+```
+color=black:s=WxH:r=R:d=D ──────────────────────────────────────[b]
+clip ─ setpts to its place ─ fps ─ fit ─ pad transparent ───────[v0]
+[b][v0]  overlay ──────────────────────────────────────────────►[x0]
+[x0][v1] overlay ──────────────────────────────────────────────►[x1] …
+```
+
+| | |
+|---|---|
+| **Gaps** | The base is `d=D` and the output is `-t D`, so the length comes from the sequence and not from where the footage stops. Time with nothing over it shows the base, which is black. The mix has a full-length silent input under it for the same reason. |
+| **Layers** | Overlays are applied bottom track upward, so the last one written is in front — the order `layersAt` walks, for the same reason. A hidden track is left out: hiding one is a statement about what the sequence looks like. |
+| **Different shapes** | Every clip is scaled to *fit* the frame keeping its aspect, then padded out with **transparent**, not black. That is what makes it a composite — a portrait clip over a landscape one has to let the layer beneath show down each side. |
+| **Rotation** | Nothing transposes. ffmpeg applies the display matrix on decode, so `scale` already sees the *displayed* size — which is the point, since two files in five here are coded 1920×1080 with `rotation: 90`. Scaling first and turning after fits a vertical clip to a landscape box and then rotates it. |
+| **Ten bits** | The base, every layer and every overlay are 10-bit. Compositing at eight and encoding to `p010le` would throw away exactly the bits that flag exists to keep. |
+
+**Placement is absolute, and that is what keeps it in step.** Each clip's frames are stamped with
+where they belong — `setpts=…+start/TB` — and `overlay` pairs frames by timestamp. The obvious
+alternative was one full-length stream per track, built by `concat`-ing clips and generated gaps;
+it was rejected because `concat` renumbers timestamps from the start of the lane, so every
+segment's rounding adds to the one before it and a lane of fifty clips can drift a second from the
+base by its end. An upper layer appearing a frame early, deep into a long sequence, is not
+something anyone finds by watching. Absolute placement cannot accumulate.
+
+Clips need no padding to reach the sequence's length either: `eof_action=pass` passes the base
+through once a clip's frames run out, and `overlay` already passes it through before a clip's first
+frame arrives. Measured: a 2s clip placed at 110s of a 120s sequence produced exactly 3000 frames
+at 25fps, black at 50s and 115s, content at 111s, and streamed at 7.8× realtime without buffering
+the 110 seconds it waited through.
+
+**The graph is written to a file**, not passed as an argument. Windows caps a command line at about
+32,000 characters and one clip is roughly 200 of them, so a 150-clip sequence would refuse to start
+— and refuse with an error about the command line rather than about the render.
+`-filter_complex_script` has no such limit. It is kept beside a failed `.flux-part`, because a
+composite that came out wrong is diagnosed by reading the graph that produced it.
+
+#### The mixdown agrees with what was heard
+
+Sound comes from audio tracks through `trackLevel` — the mixer's own function, the one place mute,
+solo and the fader become a number. It is imported rather than reimplemented, because "the render
+agrees with playback" is only true if both ask the same question. A track at zero is dropped from
+the plan entirely rather than mixed in at silence, which saves decoding a file nobody will hear.
+
+Each clip is `asetpts`, then the `atempo` chain if it is stretched, then `volume`, then `adelay` to
+put it where it belongs — the audio form of the `setpts` offset above, applied after the speed
+change for the same reason: a stretched clip is longer or shorter than its source, and where it
+starts is not.
+
+`amix` then sums them, with **`normalize=0`**, and that is mandatory rather than tidy: amix divides
+by its input count by default, so adding a second audio track would halve the first. A mixdown that
+gets quieter the more you put in it is not what any mixer does and not what was heard.
+`dropout_transition=0` stops it ramping the remaining inputs when one ends, which would move a
+level nobody touched.
+
+Measured from the rendered file: unity came out at −15.4 dB mean, and the same sequence with the
+fader at −6 came out 5.90 dB down.
+
+#### "The source" is now the sequence
+
+The verification rules do not change — same displayed size, same frame rate, the frame count asked
+for, `Main 10`, `yuv420p10le`, duration within a second, frames *counted* rather than read. What
+changes is what they are measured against, because there is no single source file to compare a
+composite with. What a sequence render has to come out as is what the **sequence** says: its frame,
+its rate, and its length including the gap at the end. So `verify` is handed the sequence in the
+shape it expects a source file in, which is why it takes a facts object rather than opening a file
+itself.
+
+One assertion is added, because the picture checks cannot see it: the output must have an audio
+stream, of the sequence's length. A mixdown that stopped where the last clip did is out by the
+length of the trailing gap, and nothing about the video would say so.
+
+The never-write-a-bigger-file rule is deliberately **not** applied. It answers "the encode cost
+more than the footage it came from, so keep the original" — and a composite has no original. There
+is no file on disk that is this sequence; that is the whole reason for rendering it.
+
+*Not yet in a sequence render: **stills**. Every layer is a decoded video stream placed by
+timestamp, and a held frame would need `-loop 1` and a rate of its own. A still on the timeline is
+named in the panel as left out rather than silently dropped. The per-clip mode refuses stills too,
+but for a different reason — there the length would be a number nobody chose, while here the
+timeline chose it, so this one is a gap in the graph rather than a decision about archives.*
 
 #### Where the queue lives, and why it is in two places
 
@@ -1153,11 +1271,6 @@ encoding because a CSV was open in Excel would be absurd.
 ffmpeg and ffprobe on `PATH` — `winget install Gyan.FFmpeg` — plus an NVIDIA card for
 `hevc_nvenc`. Both are checked once, up front, and said plainly: the difference between "no
 NVIDIA card" and "your first 400 encodes failed" is worth one probe.
-
-*Not yet: a render of a **sequence as one file**. Everything here writes one file per clip,
-which is what an archive wants and is not what a deliverable wants — and the missing pieces are
-real ones: compositing stacked layers through the Viewer’s canvas, and a mixdown of the audio
-graph. The queue, the settings, the encoder and the verifier would all be reused as they are.*
 
 *Not yet: the unattended whole-tree mode that compresses an archive with no review at all. The
 pieces are all here — the scan, the format, the queue, the verifier and the log — and what is
@@ -1795,6 +1908,41 @@ imports, selects, adds, then **deletes one queued clip and razors another**, and
 jobs to survive unchanged and still render. It also checks that re-adding replaces a row rather
 than doubling it, that a stretched clip queues with a forced rate and renders at it, that Start
 writes the files, and that the queue survives a round trip through its file on disk.
+
+```bash
+npm run verify:sequence-render -- "E:\FOOTAGE\AG GROUPS\REELS"
+```
+
+The composite, and the one suite that cannot take ffmpeg's word for anything. Everything that goes
+wrong with a composite produces a file that opens, plays and looks plausible — a gap that shortened
+the file, a layer drawn behind the one it should be in front of, a rotated source composited on its
+side, a mix halved by `amix` normalising it, a mute honoured on playback and ignored by the render.
+So it **reads the output back**: luma at chosen moments, measured loudness, counted frames.
+
+It lays its sequences out clip by clip rather than importing a folder and editing it down, because
+every check is about a *shape* — a gap of a known length, a clip on the track above another, a
+track at a known gain — and reaching those by razoring an imported batch would make the shape a
+side effect rather than the request. Measured on this archive's own footage:
+
+| | |
+|---|---|
+| **Gaps** | A two-second hole in the middle and two seconds of nothing at the end came out 8.00s and 200 frames, black at 3s and 7s, with the mix at −20.6 dB and the gap at −91 dB peak. |
+| **Rotation** | A `rotation: 90` source composited into a deliberately **landscape** frame read 64 — 10-bit black — down both side strips, with picture in the middle. Ignore the rotation and the coded 1920×1080 frame fills the frame edge to edge and the strips are not black. |
+| **Layers** | At a moment covered by both tracks the frame read 490 against the top clip's own 497 and the bottom's 388; a moment covered only by the bottom read 445 against its 442. |
+| **The mix** | −6 on the fader moved the rendered file by 5.90 dB. A muted track rendered at −91 dB peak and still verified as a full picture. |
+| **Speed** | A 2× clip placed one second in came out 100 frames with the second before it and the tail after it both still black — which is what catches the `setpts` precedence error that would divide the *placement* by the speed. |
+
+> **`signalstats` reports in the pixel format's own range.** The same picture reads 110 out of an
+> 8-bit h264 source and 442 out of the 10-bit composite made from it — four times the number, for
+> the two extra bits. Comparing a source reading with an output reading without normalising first
+> says the layers were drawn in the wrong order, convincingly, when they were not. Every reading
+> here is forced to 10-bit, on which black is 64.
+
+Three of its checks are the canary, and without them none of the others proves anything, because
+all of them end in the verifier saying yes. A good render is required to pass; then the same
+verifier is handed the same render **truncated to a third**, **scaled to half size**, and **stripped
+of its audio**, and is required to reject all three with a complaint naming the right thing.
+
 ```bash
 npm run verify:batch -- "E:\FOOTAGE\AG GROUPS\REELS"
 ```
@@ -1885,6 +2033,22 @@ dispatched at the actual DOM nodes, so the app's own handlers run as they do und
 > picks a row on the wrong one. And let every check build the state it needs from scratch, so none
 > of them depends on what another happened to leave behind.
 
+> **Two worktrees cannot both run `npm run dev` without being told to.** The dev port is pinned
+> with `strictPort`, so the second checkout does not get a port of its own — and the failure is not
+> a refusal, it is a harness in worktree B attaching to `:9222` and silently driving the app vite
+> is serving from worktree A. Every check then passes or fails for reasons that have nothing to do
+> with the code under test. Three variables move the three halves of it:
+>
+> ```bash
+> FLUX_DEV_PORT=5274 npx vite
+> FLUX_DEV_PORT=5274 npx electron . --remote-debugging-port=9223 --user-data-dir=/tmp/flux-wt
+> FLUX_DEBUG_PORT=9223 npm run verify:timeline
+> ```
+>
+> `--user-data-dir` is the one that is easy to miss: `app.requestSingleInstanceLock` keys off the
+> user-data directory, so without it the second app quits the moment it starts — after printing
+> *DevTools listening*, which makes it look like it is up.
+
 > **Harnesses must reach kernel state through `window.__fluxDev`** (defined in `src/main.tsx`,
 > stripped from production builds), never by dynamic import. Importing `/src/kernel/x.ts` from
 > outside does *not* get the instance the app is running once Vite has appended an HMR
@@ -1909,11 +2073,12 @@ proxies, the audio graph, plugins, skinning UI. Audio files are not importable y
 Browser is image and video only, and `pcm_s24le` soundtracks are read as *unreadable* rather than
 decoded.
 
-**Rendering is batch-only.** [Batch](#batch-a-folder-in-a-folder-out) exports one file per clip
-through ffmpeg, which is a long way from an exporter: there is no render of a *sequence* as a single
-piece, no composite of stacked layers, no mixdown of the audio graph, and no preview render files.
-What exists is the path an archive needs — cut, encode, verify, log — and it deliberately bypasses
-the compositor rather than going through it.
+**Rendering covers two shapes and no more.** [Render](#render-add-then-start) writes one file per
+clip, or the whole sequence as one composited file — and that is the end of it. There are no
+**preview render files**, so nothing is ever cached for playback; no **per-clip transform or
+effect** to render, because none exists to apply; no **stills** in a composite; and no unattended
+whole-tree mode. What exists is the path this archive needs — cut or composite, encode, verify,
+log.
 
 ## License
 

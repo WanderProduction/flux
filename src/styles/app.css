@@ -2738,6 +2738,26 @@ kbd {
   line-height: 1.45;
   color: var(--flux-text-dim);
 }
+/* A setting that is a fact rather than a choice — the sequence's frame, which
+   a composite is rendered into. Stated where the control it replaces would be,
+   so nothing below it moves when the mode changes, and visibly not a field. */
+.render-value {
+  margin: 0;
+  padding: 4px 7px;
+  border: 1px dashed var(--flux-border);
+  border-radius: var(--flux-radius);
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-md);
+}
+.render-value--mono {
+  font-family: var(--flux-font-mono);
+}
+/* The mode decides what every row in the queue means, so it sits above the
+   grid of things it governs rather than as one more cell in it. */
+.render-mode {
+  margin-bottom: 12px;
+  max-width: 340px;
+}
 .render-check {
   display: flex;
   align-items: center;

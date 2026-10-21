@@ -36,7 +36,13 @@ export default defineConfig({
     // ::1 on Windows while Electron resolves 127.0.0.1, and the app window
     // opens to ERR_CONNECTION_REFUSED against a dev server that is clearly up.
     host: '127.0.0.1',
-    port: 5273,
+    /*
+     * Overridable, because only one checkout can hold this port and FLUX is
+     * developed in worktrees. electron/main.js reads the same variable and
+     * explains at length what goes wrong without it — the short version is that
+     * a harness in one worktree will happily verify another worktree's code.
+     */
+    port: Number(process.env.FLUX_DEV_PORT) || 5273,
     strictPort: true,
   },
   build: {

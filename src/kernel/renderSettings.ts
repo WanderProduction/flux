@@ -23,6 +23,18 @@
  * exact failure the verifier was built to catch — an Adobe export in the
  * encode tests turned an 1850-frame 50fps source into 1108 frames at 29.97 and
  * looked perfectly healthy. Choosing it should be a thing you did on purpose.
+ *
+ * ## Mode is what a job *is*, which is why it lives here
+ *
+ * `clips` makes one file per clip on the timeline; `sequence` makes one file
+ * that is the whole sequence, layers composited and audio mixed down. It is a
+ * setting rather than two Add buttons because it changes what every row in the
+ * queue means, and a queue holding both kinds of answer to "what is one job"
+ * would be a queue you have to read twice.
+ *
+ * It defaults to `clips`, which is the archive workflow this app was built for.
+ * The frame-rate policy above only applies in that mode: a sequence has a rate
+ * of its own, so there is nothing to choose.
  */
 
 const MIN_CQ = 1
@@ -30,7 +42,12 @@ const MAX_CQ = 51
 
 export type FrameRatePolicy = 'source' | 'sequence'
 
+/** One file per clip, or one file that is the sequence. */
+export type RenderMode = 'clips' | 'sequence'
+
 export interface RenderSettings {
+  /** What one job is. See the note above. */
+  mode: RenderMode
   /** Absolute path, or null until one is chosen. */
   outDir: string | null
   /** Constant-quality target. Lower is bigger and better. */
@@ -45,6 +62,7 @@ export interface RenderSettings {
 }
 
 export const DEFAULTS: RenderSettings = {
+  mode: 'clips',
   outDir: null,
   cq: 26,
   gop: 30,
