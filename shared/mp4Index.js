@@ -63,7 +63,7 @@ const MAGIC = 0x464c5849
  *       nothing anywhere saying why. They are rejected and rebuilt instead,
  *       which costs milliseconds.
  */
-export const FORMAT = 3
+export const FORMAT = 4
 
 /**
  * Fixed part of the header; the codec string and avcC record follow it.
@@ -83,9 +83,47 @@ export const FORMAT = 3
  *   30  u16  display rotation, degrees clockwise (0, 90, 180, 270)
  *   32  f64  duration, seconds
  *   40  u32  sample rate (0 on a video track)
- *   44  u32  reserved
+ *   44  u32  uncompressed audio: bit depth, then the flags, or 0 for 'decoded'
  */
 const HEADER_BYTES = 48
+
+/**
+ * The uncompressed-audio descriptor, as one word.
+ *
+ * Four small facts — depth, and whether the samples are float, big-endian and
+ * signed — which together are everything needed to turn bytes into audio. They
+ * go in the header's spare word rather than in a new section, so an index of
+ * PCM is the same shape and the same size as any other.
+ *
+ * Zero means "not PCM", which is why a depth of zero can never be valid here.
+ */
+function packPcmWord(pcm) {
+  if (!pcm || !pcm.bits) return 0
+  return (
+    (pcm.bits & 0xff) |
+    (pcm.float ? 1 << 8 : 0) |
+    (pcm.bigEndian ? 1 << 9 : 0) |
+    (pcm.signed ? 1 << 10 : 0)
+  )
+}
+
+function unpackPcmWord(word, channels, sampleRate) {
+  const bits = word & 0xff
+  if (!bits) return null
+  /*
+   * Channels and rate are not stored twice — they are read back out of the
+   * header fields every track already has. Two copies of one number is two
+   * numbers that can disagree.
+   */
+  return {
+    bits,
+    float: (word & (1 << 8)) !== 0,
+    bigEndian: (word & (1 << 9)) !== 0,
+    signed: (word & (1 << 10)) !== 0,
+    channels,
+    sampleRate,
+  }
+}
 
 /** 1 on a little-endian machine, which is what the array bytes below are in. */
 function nativeEndian() {
@@ -142,8 +180,13 @@ function checksum(bytes, from, to) {
  *   discover later. Callers treat an empty result as "nothing to store".
  */
 export function encodeTrack(track) {
-  const codec = new TextEncoder().encode(track.codec)
-  const description = track.description
+  /*
+   * PCM has neither, by design: there is no codec to name and nothing to
+   * configure a decoder with, because the samples are the audio. Both come
+   * back from decodeTrack as null, and the descriptor below is what says so.
+   */
+  const codec = new TextEncoder().encode(track.codec ?? '')
+  const description = track.description ?? new Uint8Array(0)
   const count = track.count
 
   const out = new Uint8Array(sizeOf(count, codec.length, description.length))
@@ -166,6 +209,7 @@ export function encodeTrack(track) {
   head.setUint16(30, track.rotation ?? 0, true)
   head.setFloat64(32, track.duration, true)
   head.setUint32(40, track.sampleRate ?? 0, true)
+  head.setUint32(44, packPcmWord(track.pcm), true)
 
   let at = HEADER_BYTES
   out.set(codec, at)
@@ -212,7 +256,19 @@ export function decodeTrack(bytes) {
   const count = head.getUint32(8, true)
   const codecLength = head.getUint16(20, true)
   const descriptionLength = head.getUint16(22, true)
-  if (count === 0 || codecLength === 0 || descriptionLength === 0) return null
+  const pcm = unpackPcmWord(
+    head.getUint32(44, true),
+    head.getUint16(28, true),
+    head.getUint32(40, true),
+  )
+  /*
+   * A compressed track with no codec string is a corrupt entry; an
+   * uncompressed one legitimately has neither, which the descriptor is what
+   * distinguishes. Without that distinction a cached PCM index reads back as
+   * damage and is rebuilt on every open.
+   */
+  if (count === 0) return null
+  if (!pcm && (codecLength === 0 || descriptionLength === 0)) return null
 
   if (bytes.length !== sizeOf(count, codecLength, descriptionLength)) return null
   if (checksum(bytes, HEADER_BYTES, bytes.length) !== head.getUint32(24, true)) return null
@@ -224,8 +280,9 @@ export function decodeTrack(bytes) {
   at += descriptionLength
 
   const track = {
-    codec,
-    description,
+    codec: pcm ? null : codec,
+    description: pcm ? null : description,
+    ...(pcm ? { pcm } : {}),
     width: head.getUint16(12, true),
     height: head.getUint16(14, true),
     channels: head.getUint16(28, true),

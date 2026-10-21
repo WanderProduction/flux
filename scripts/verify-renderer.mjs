@@ -169,8 +169,11 @@ try {
       'pathForFile',
       'pickDirectory',
       'pickFiles',
+      // Where a render writes, and the footage scan behind batch import.
+      'pickOutputDirectory',
       'pickProjectFile',
       'places',
+      'scan',
       'subfolders',
     ])
   })
@@ -191,9 +194,12 @@ try {
       'onOpenTarget',
       'onSaveAndClose',
       'open',
+      // The render queue lives beside the document rather than inside it.
+      'readQueue',
       'save',
       'saveSequence',
       'setUnsaved',
+      'writeQueue',
     ])
   })
 
@@ -219,6 +225,11 @@ try {
       'layer_red.mp4',
       'long_take.mp4',
       'open_gop.mp4',
+      // One per uncompressed sample layout the demuxer has to read.
+      'pcm_fl32.mov',
+      'pcm_in24.mov',
+      'pcm_sowt.mov',
+      'pcm_twos.mov',
       'photo.png',
       'render.webm',
       'shot_B.mp4',

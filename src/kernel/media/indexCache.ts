@@ -39,9 +39,29 @@ import { BYTES_PER_SAMPLE, decodeTrack, encodeTrack } from '../../../shared/mp4I
  * because it is checked against the file; a refusal has nothing to check.
  */
 
+/**
+ * What uncompressed samples are, for a track that needs no decoder.
+ *
+ * Present only on PCM audio, and when it is present `codec` and `description`
+ * are null — there is nothing to name and nothing to configure, because the
+ * samples *are* the audio. See parsePcmEntry in shared/mp4.js.
+ */
+export interface PcmFormat {
+  /** Bits per channel per frame: 8, 16, 24, 32 or 64. */
+  bits: number
+  float: boolean
+  bigEndian: boolean
+  signed: boolean
+  channels: number
+  sampleRate: number
+}
+
 export interface VideoTrack {
-  codec: string
-  description: Uint8Array
+  /** Null on PCM audio, which has no codec to name. */
+  codec: string | null
+  /** Null on PCM audio, which has nothing to configure a decoder with. */
+  description: Uint8Array | null
+  pcm?: PcmFormat
   width: number
   height: number
   /** 0 on a video track. */

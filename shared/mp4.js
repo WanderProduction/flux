@@ -45,9 +45,22 @@
  */
 
 /**
+ * @typedef {object} PcmFormat
+ * @property {number} bits per channel per frame
+ * @property {boolean} float
+ * @property {boolean} bigEndian
+ * @property {boolean} signed
+ * @property {number} channels
+ * @property {number} sampleRate
+ */
+
+/**
  * @typedef {object} VideoTrack
- * @property {string} codec WebCodecs codec string, e.g. `avc1.64001f`
- * @property {Uint8Array} description the avcC record VideoDecoder needs
+ * @property {string | null} codec WebCodecs codec string, e.g. `avc1.64001f`;
+ *   null on uncompressed audio, which has no codec to name
+ * @property {Uint8Array | null} description the avcC record VideoDecoder needs;
+ *   null on uncompressed audio, which has nothing to configure
+ * @property {PcmFormat} [pcm] set only on uncompressed audio
  * @property {number} width 0 on an audio track
  * @property {number} height 0 on an audio track
  * @property {number} channels 0 on a video track
@@ -344,6 +357,115 @@ function sampleOffsets(view, stsc, chunkOffsets, sizes, count) {
   return offsets
 }
 
+/**
+ * Frames in one PCM packet.
+ *
+ * PCM has no packets of its own — every frame stands alone — so the demuxer
+ * chooses, and the choice is between two costs.
+ *
+ * Indexing a PCM track the way a compressed one is indexed means one entry per
+ * *frame*: a seven-second Fujifilm clip is 336,336 of them at 48kHz, and the
+ * index arrays cost 33 bytes each. That is 11MB for seven seconds, and over a
+ * gigabyte for one shoot folder — which is why FLUX refused this audio rather
+ * than reading it badly.
+ *
+ * Grouping frames into packets removes that completely. 4096 frames is 85ms at
+ * 48kHz, which keeps the index at a few hundred entries a minute while staying
+ * well under the mixer's scheduling horizon, so a seek still lands promptly.
+ * It is a round number because the only thing it has to divide evenly is a
+ * buffer.
+ */
+const PCM_FRAMES_PER_PACKET = 4096
+
+/**
+ * An index of PCM packets rather than of individual frames.
+ *
+ * Packets never straddle a chunk, and that is the one rule here: frames within
+ * a chunk are contiguous in the file, and chunks are not contiguous with each
+ * other. A packet that ran over a chunk boundary would read whatever the muxer
+ * happened to put in between — most often a lump of video — as audio.
+ *
+ * Every packet is a key frame, because every PCM frame is. That is also what
+ * makes seeking in this exact rather than approximate.
+ */
+function packPcm({ view, stscBox, chunkOffsets, count, pcm, timescale, duration, rotation }) {
+  const bytesPerFrame = (pcm.bits >> 3) * pcm.channels
+  if (!(bytesPerFrame > 0)) return null
+
+  const offsets = []
+  const lengths = []
+  const starts = []
+
+  const runs = view.getUint32(stscBox.body + 4)
+  let frame = 0
+  for (let run = 0; run < runs && frame < count; run++) {
+    const at = stscBox.body + 8 + run * 12
+    const firstChunk = view.getUint32(at)
+    const perChunk = view.getUint32(at + 4)
+    const nextFirstChunk =
+      run + 1 < runs ? view.getUint32(stscBox.body + 8 + (run + 1) * 12) : chunkOffsets.length + 1
+
+    for (let chunk = firstChunk; chunk < nextFirstChunk && frame < count; chunk++) {
+      if (chunk - 1 >= chunkOffsets.length) break
+      const chunkStart = chunkOffsets[chunk - 1]
+      const inChunk = Math.min(perChunk, count - frame)
+      for (let done = 0; done < inChunk; ) {
+        const take = Math.min(PCM_FRAMES_PER_PACKET, inChunk - done)
+        offsets.push(chunkStart + done * bytesPerFrame)
+        lengths.push(take * bytesPerFrame)
+        starts.push(frame + done)
+        done += take
+      }
+      frame += inChunk
+    }
+  }
+
+  const packets = offsets.length
+  if (packets === 0) return null
+
+  const dts = new Float64Array(packets)
+  const pts = new Float64Array(packets)
+  const order = new Int32Array(packets)
+  const key = new Uint8Array(packets)
+  const offset = new Float64Array(packets)
+  const bytes = new Uint32Array(packets)
+  for (let i = 0; i < packets; i++) {
+    /*
+     * Against the sample rate, not the media timescale. They agree in every
+     * file an encoder writes — and when they do not, the rate is the one the
+     * samples are actually in, because it is the number that says how long a
+     * frame lasts.
+     */
+    const seconds = starts[i] / pcm.sampleRate
+    dts[i] = seconds
+    pts[i] = seconds
+    order[i] = i
+    key[i] = 1
+    offset[i] = offsets[i]
+    bytes[i] = lengths[i]
+  }
+
+  return {
+    codec: null,
+    description: null,
+    pcm,
+    width: 0,
+    height: 0,
+    channels: pcm.channels,
+    sampleRate: pcm.sampleRate,
+    timescale,
+    duration: duration / timescale,
+    count: packets,
+    offset,
+    bytes,
+    dts,
+    pts,
+    key,
+    order,
+    rotation,
+  }
+}
+
 function parseChunkOffsets(view, stbl, stblEnd) {
   const stco = findChild(view, stbl, stblEnd, 'stco')
   if (stco) {
@@ -500,9 +622,132 @@ function parseEsds(view, body, end) {
   return { objectType, description }
 }
 
+/**
+ * Uncompressed sound, by sample entry type — the default reading of each.
+ *
+ * `bits` of 0 means "the entry says", which is the usual case; the four-letter
+ * type only fixes the *interpretation*. A `wave`/`enda` box overrides the
+ * endianness for the types that carry one, which is how ffmpeg writes
+ * little-endian 24-bit into a box whose name means big-endian.
+ */
+const PCM_TYPES = {
+  twos: { bits: 0, signed: true, float: false, bigEndian: true },
+  sowt: { bits: 0, signed: true, float: false, bigEndian: false },
+  in24: { bits: 24, signed: true, float: false, bigEndian: true },
+  in32: { bits: 32, signed: true, float: false, bigEndian: true },
+  fl32: { bits: 32, signed: true, float: true, bigEndian: true },
+  fl64: { bits: 64, signed: true, float: true, bigEndian: true },
+  'raw ': { bits: 8, signed: false, float: false, bigEndian: false },
+  lpcm: { bits: 0, signed: true, float: false, bigEndian: false },
+}
+
+/** `enda`, wherever it is: inside the entry, or inside its `wave`. 1 is little. */
+function findEnda(view, from, to) {
+  for (const box of children(view, from, to)) {
+    if (box.type === 'enda') return view.getUint16(box.body) === 1
+    if (box.type === 'wave') {
+      const inner = findEnda(view, box.body, box.end)
+      if (inner !== null) return inner
+    }
+  }
+  return null
+}
+
+/**
+ * Uncompressed audio, which needs no decoder and therefore no codec string.
+ *
+ * Three layouts share one box, and the differences are not cosmetic — reading
+ * a version 2 entry as a version 0 one yields 3 channels at 1Hz, which is what
+ * FLUX did to every Fujifilm clip before this existed.
+ *
+ *   **v0** — the plain 28-byte preamble. Depth is `samplesize`.
+ *   **v1** — adds samplesPerPacket, bytesPerPacket, bytesPerFrame,
+ *     bytesPerSample. `bytesPerPacket` is the depth that counts: ffmpeg writes
+ *     `samplesize` 16 on a 24-bit `in24` track, and believing it costs a third
+ *     of every sample.
+ *   **v2** — a different structure entirely, with the rate as a float64 and an
+ *     explicit `formatSpecificFlags`. This is what QuickTime and the cameras in
+ *     this archive write for `lpcm`.
+ *
+ * @returns {{ bits: number, float: boolean, bigEndian: boolean, signed: boolean,
+ *   channels: number, sampleRate: number } | null}
+ */
+function parsePcmEntry(view, first, end) {
+  const base = PCM_TYPES[first.type]
+  if (!base) return null
+
+  const version = view.getUint16(first.body + 8)
+  const limit = Math.min(first.end, end)
+
+  if (version === 2) {
+    /*
+     * Offsets are from the entry, which starts 8 bytes before `first.body`:
+     * rate f64 at 40, channels at 48, bits at 56, flags at 60.
+     */
+    const sampleRate = Math.round(view.getFloat64(first.body + 32))
+    const channels = view.getUint32(first.body + 40)
+    const bits = view.getUint32(first.body + 48)
+    const flags = view.getUint32(first.body + 52)
+    if (!bits || !channels || !sampleRate) return null
+    /*
+     * The CoreAudio format flags, which say exactly what the samples are
+     * rather than leaving it to the four-letter type:
+     *   1 float · 2 big-endian · 4 signed integer · 8 packed
+     * A Fujifilm clip reports 12 — signed and packed, so 24-bit little-endian.
+     */
+    return {
+      bits,
+      float: (flags & 1) !== 0,
+      bigEndian: (flags & 2) !== 0,
+      signed: (flags & 4) !== 0 || (flags & 1) !== 0,
+      channels,
+      sampleRate,
+    }
+  }
+
+  const channels = view.getUint16(first.body + 16)
+  const sampleRate = view.getUint16(first.body + 24)
+  let bits = base.bits || view.getUint16(first.body + 18)
+  // The v1 extension sits immediately after the preamble, and its
+  // bytesPerPacket is the only honest depth on an `in24` track.
+  if (version === 1) {
+    const bytesPerPacket = view.getUint32(first.body + 32)
+    if (bytesPerPacket > 0 && bytesPerPacket <= 8) bits = bytesPerPacket * 8
+  }
+  if (!bits || !channels || !sampleRate) return null
+
+  const extensions = first.body + 28 + (version === 1 ? 16 : 0)
+  const little = extensions < limit ? findEnda(view, extensions, limit) : null
+  return {
+    bits,
+    float: base.float,
+    bigEndian: little === null ? base.bigEndian : !little,
+    signed: base.signed,
+    channels,
+    sampleRate,
+  }
+}
+
 function parseAudioEntry(view, body, end) {
   const first = firstSampleEntry(view, body)
   if (!first) return null
+
+  /*
+   * Uncompressed first, because it is decided by the sample entry's type and
+   * needs no `esds` — there is no codec to configure, the samples *are* the
+   * audio. Everything else falls through to the AAC path below.
+   */
+  const pcm = parsePcmEntry(view, first, end)
+  if (pcm) {
+    return {
+      format: first.type,
+      channels: pcm.channels,
+      sampleRate: pcm.sampleRate,
+      description: null,
+      codec: null,
+      pcm,
+    }
+  }
   /*
    * An audio sample entry is a fixed 28-byte preamble and then child boxes.
    *
@@ -650,7 +895,8 @@ async function readTrack(reader, handlerWanted) {
         ? parseAudioEntry(view, stsdBox.body, stsdBox.end)
         : parseVisualEntry(view, stsdBox.body, stsdBox.end)
     if (!stsd) return { ok: false, reason: 'malformed' }
-    if (!stsd.description || !stsd.codec) {
+    // PCM has no codec string and no description by design — see parsePcmEntry.
+    if (!stsd.pcm && (!stsd.description || !stsd.codec)) {
       return { ok: false, reason: `unsupported-codec:${stsd.format}` }
     }
 
@@ -659,6 +905,13 @@ async function readTrack(reader, handlerWanted) {
 
     const chunkOffsets = parseChunkOffsets(view, stblBox.body, stblBox.end)
     if (!chunkOffsets) return { ok: false, reason: 'malformed' }
+
+    if (stsd.pcm) {
+      const packed = packPcm({
+        view, stscBox, chunkOffsets, count, pcm: stsd.pcm, timescale, duration, rotation,
+      })
+      return packed ? { ok: true, track: packed } : { ok: false, reason: 'malformed' }
+    }
 
     const deltas = parseStts(view, sttsBox.body, count)
     const cttsBox = findChild(view, stblBox.body, stblBox.end, 'ctts')

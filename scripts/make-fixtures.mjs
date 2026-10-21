@@ -40,6 +40,32 @@
  * outside it. Changing a duration or a rate below means changing them there
  * too — and a fixture quietly regenerated at a different length would turn a
  * real check into one that only ever agrees with itself.
+ *
+ * ## Why almost everything here is `-bf 0`
+ *
+ * FLUX derives a clip's frame rate by **counting**: samples divided by the
+ * track's duration, because a container's declared rate is a hint an encoder
+ * may have got wrong. That makes the track duration load-bearing — and with
+ * B-frames, ffmpeg writes an `mdhd` duration one frame longer than the samples
+ * account for, to leave room for the last composition time.
+ *
+ * So a 4-second, 96-sample clip encoded with B-frames reports 96 / 4.0417 =
+ * **23.753fps**. A sequence built on it snaps to a grid of 23.753, `4.0`
+ * becomes `3.9994948`, and clips dropped end to end overlap by half a
+ * millisecond. Six checks in verify-timeline fail, none of them about frame
+ * rates, and the fixtures look perfectly ordinary.
+ *
+ * `-bf 0` makes the track duration exactly the samples' duration, and it is on
+ * **`clipA.mp4` and `shot_B.mp4` only** — the two that get dropped onto a
+ * timeline, where the sequence takes its rate from the first clip and every
+ * placement is snapped to that grid.
+ *
+ * Everywhere else B-frames stay, because two checks depend on them:
+ * `long_take.mp4` is what verify-demux uses to prove frames are *reordered* at
+ * all (without it the whole presentation-order index is untested and every
+ * lookup passes by accident), and `open_gop.mp4` exists to have sync samples
+ * that are not IDR frames. Those files are never the first clip in a sequence,
+ * so their rate costs nothing.
  */
 
 import { execFile } from 'node:child_process'
@@ -69,7 +95,7 @@ const CLIPS = [
     // on purpose: it is the "this file has no soundtrack" case.
     args: [
       '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=24:duration=4',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+      '-c:v', 'libx264', '-bf', '0', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
       '-b:v', '300k', '-g', '24', '-an',
     ],
   },
@@ -79,7 +105,7 @@ const CLIPS = [
     args: [
       '-f', 'lavfi', '-i', 'testsrc2=size=480x270:rate=24:duration=3',
       '-f', 'lavfi', '-i', 'sine=frequency=600:duration=3',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+      '-c:v', 'libx264', '-bf', '0', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
       '-b:v', '300k', '-g', '24', '-c:a', 'aac', '-b:a', '96k', '-shortest',
     ],
   },
@@ -162,13 +188,72 @@ const CLIPS = [
       '-b:v', '200k', '-g', '25', '-c:a', 'aac', '-b:a', '96k', '-shortest',
     ],
   },
+  /*
+   * Four uncompressed soundtracks, one per byte layout FLUX has to read.
+   *
+   * They exist because uncompressed audio is the one kind where being wrong is
+   * *silent in the wrong direction*: a mistaken divisor is quiet audio, a
+   * mistaken sign is loud audio, a mistaken byte order is noise, and none of
+   * the three throws or looks odd on a waveform. Four files encoding the same
+   * 440Hz tone four different ways turn that into a comparison — they must all
+   * decode to the same tone at the same level, and any one path getting it
+   * wrong shows up as that one disagreeing.
+   *
+   * ffmpeg writes `sowt`, `twos`, `in24` and `fl32`, the last two carrying a
+   * `wave`/`enda` box that says little-endian despite the big-endian name.
+   * **It does not write `lpcm` version 2**, which is what the cameras in this
+   * archive use — that layout is checked against real footage instead, because
+   * nothing here can produce one.
+   */
+  {
+    name: 'pcm_sowt.mov',
+    args: [
+      '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=25:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'pcm_s16le', '-shortest',
+    ],
+  },
+  {
+    name: 'pcm_twos.mov',
+    args: [
+      '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=25:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'pcm_s16be', '-shortest',
+    ],
+  },
+  {
+    name: 'pcm_in24.mov',
+    args: [
+      '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=25:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'pcm_s24le', '-shortest',
+    ],
+  },
+  {
+    name: 'pcm_fl32.mov',
+    args: [
+      '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=25:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'pcm_f32le', '-shortest',
+    ],
+  },
   {
     name: 'photo.png',
     args: ['-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=1:duration=1', '-frames:v', '1'],
   },
   {
     name: 'still.jpg',
-    args: ['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=1:duration=1', '-frames:v', '1'],
+    /*
+     * 1024 wide, and that number is asserted by scripts/verify-timeline.mjs —
+     * a still has no duration of its own, so what the probe reads off it is
+     * its *size*, and the check that a still lands with the default duration
+     * proves nothing unless the probe is known to have read the real file.
+     */
+    args: ['-f', 'lavfi', '-i', 'testsrc2=size=1024x576:rate=1:duration=1', '-frames:v', '1'],
   },
 ]
 

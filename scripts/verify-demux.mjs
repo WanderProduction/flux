@@ -40,6 +40,8 @@ import {
 } from '../electron/mediaCache.js'
 
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
+/** A real camera file, for the one sample layout no fixture here can carry. */
+const REAL_PCM = process.argv[3] ?? null
 
 let passed = 0
 async function check(name, fn) {
@@ -778,6 +780,248 @@ try {
       removed: 0,
       bytes: 0,
     })
+  })
+
+  // ── uncompressed audio ────────────────────────────────────────
+
+  /**
+   * The same conversion kernel/media/audioSource.ts does, which is the point:
+   * if the two ever disagree this check is measuring the wrong thing, and the
+   * numbers below are chosen so that it would say so — a divisor, sign or
+   * byte-order mistake all move the peak or the tone.
+   */
+  function pcmFloats(bytes, pcm) {
+    const { bits, channels, float, bigEndian, signed } = pcm
+    const width = bits >> 3
+    const stride = width * channels
+    const frames = Math.floor(bytes.length / stride)
+    const planes = Array.from({ length: channels }, () => new Float32Array(frames))
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const little = !bigEndian
+    const scale = 1 / 2 ** (bits - 1)
+    for (let f = 0; f < frames; f++) {
+      const row = f * stride
+      for (let c = 0; c < channels; c++) {
+        const at = row + c * width
+        let v
+        if (float) v = bits === 64 ? view.getFloat64(at, little) : view.getFloat32(at, little)
+        else if (bits === 8) v = signed ? (view.getInt8(at) + 0.5) / 127.5 : (view.getUint8(at) - 128) / 128
+        else if (bits === 16) v = view.getInt16(at, little) * scale
+        else if (bits === 24) {
+          const a = view.getUint8(at), b = view.getUint8(at + 1), d = view.getUint8(at + 2)
+          const raw = little ? a | (b << 8) | (d << 16) : d | (b << 8) | (a << 16)
+          v = ((raw << 8) >> 8) * scale
+        } else v = view.getInt32(at, little) * scale
+        planes[c][f] = v
+      }
+    }
+    return planes
+  }
+
+  /** Peak, RMS and the tone's frequency from zero crossings, over ~1s. */
+  async function soundOf(name, limitSeconds = 1) {
+    const { reader, handle } = await openReader(path.join(MEDIA_DIR, name))
+    try {
+      const index = await readAudioTrack(reader)
+      if (!index.ok) return { ok: false, reason: index.reason }
+      const track = index.track
+      if (!track.pcm) return { ok: false, reason: 'not-pcm' }
+
+      const blocks = []
+      let frames = 0
+      for (let i = 0; i < track.count && frames < track.sampleRate * limitSeconds; i++) {
+        const bytes = await reader.read(track.offset[i], track.offset[i] + track.bytes[i] - 1)
+        const planes = pcmFloats(bytes, track.pcm)
+        blocks.push(planes[0])
+        frames += planes[0].length
+      }
+      const all = new Float32Array(frames)
+      let at = 0
+      for (const b of blocks) {
+        all.set(b.subarray(0, Math.min(b.length, frames - at)), at)
+        at += b.length
+      }
+      let peak = 0
+      let sum = 0
+      for (const v of all) {
+        peak = Math.max(peak, Math.abs(v))
+        sum += v * v
+      }
+      let crossings = 0
+      for (let i = 1; i < all.length; i++) if (all[i - 1] < 0 !== all[i] < 0) crossings++
+      return {
+        ok: true,
+        track,
+        peak,
+        rms: Math.sqrt(sum / all.length),
+        hz: (crossings / 2) * (track.sampleRate / all.length),
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+
+  const PCM_FIXTURES = [
+    ['pcm_sowt.mov', { bits: 16, float: false, bigEndian: false }],
+    ['pcm_twos.mov', { bits: 16, float: false, bigEndian: true }],
+    ['pcm_in24.mov', { bits: 24, float: false, bigEndian: false }],
+    ['pcm_fl32.mov', { bits: 32, float: true, bigEndian: false }],
+  ]
+
+  for (const [name, want] of PCM_FIXTURES) {
+    await check(`${name} is read as ${want.bits}-bit ${want.float ? 'float' : 'integer'}`, async () => {
+      const got = await soundOf(name)
+      assert.equal(got.ok, true, `refused: ${got.reason}`)
+      assert.equal(got.track.pcm.bits, want.bits)
+      assert.equal(got.track.pcm.float, want.float)
+      assert.equal(
+        got.track.pcm.bigEndian,
+        want.bigEndian,
+        'the endianness is wrong — `in24` and `fl32` carry a wave/enda box that overrides their name',
+      )
+      // The codec string and description are null on purpose: nothing to
+      // configure, because the samples are the audio.
+      assert.equal(got.track.codec, null)
+      assert.equal(got.track.description, null)
+    })
+  }
+
+  await check('every uncompressed layout decodes to the same tone at the same level', async () => {
+    /*
+     * The check that makes the four above worth having. One 440Hz tone encoded
+     * four ways must come back as one 440Hz tone — so a wrong divisor (quiet),
+     * a wrong sign (loud) or a wrong byte order (noise) shows up as whichever
+     * layout disagrees with the other three. None of those throws, and none of
+     * them looks wrong on a waveform.
+     */
+    const results = []
+    for (const [name] of PCM_FIXTURES) {
+      const got = await soundOf(name)
+      assert.equal(got.ok, true, `${name} refused: ${got.reason}`)
+      results.push({ name, ...got })
+    }
+    for (const r of results) {
+      assert.ok(
+        Math.abs(r.hz - 440) < 22,
+        `${r.name} decoded a ${r.hz.toFixed(0)}Hz tone, expected 440Hz`,
+      )
+      assert.ok(r.peak > 0.01, `${r.name} decoded silence`)
+      assert.ok(r.peak <= 1.0001, `${r.name} decoded ${r.peak.toFixed(3)}, which is past full scale`)
+    }
+    const peaks = results.map((r) => r.peak)
+    const spread = Math.max(...peaks) - Math.min(...peaks)
+    assert.ok(
+      spread < 0.02,
+      `the four layouts decoded to different levels (${peaks.map((p) => p.toFixed(3)).join(', ')})`,
+    )
+    console.log(
+      `       ${results.map((r) => `${r.name.slice(4, 8)} ${r.peak.toFixed(3)}`).join('  ')} ` +
+        `@ ${results[0].hz.toFixed(0)}Hz`,
+    )
+  })
+
+  await check('an uncompressed track is indexed by packet, not by frame', async () => {
+    /*
+     * The reason this feature is not simply "accept lpcm". At 48kHz a frame is
+     * a sample, so a per-frame index of a seven-second clip is 336,336 entries
+     * at 33 bytes each — 11MB for seven seconds, and over a gigabyte for one
+     * shoot folder. Packets of 4096 frames make it a few hundred entries.
+     */
+    const got = await soundOf('pcm_sowt.mov')
+    assert.equal(got.ok, true)
+    const { track } = got
+    const framesTotal = Math.round(track.duration * track.sampleRate)
+    assert.ok(
+      track.count < framesTotal / 100,
+      `${track.count} index entries for ${framesTotal} frames — this is indexed per frame`,
+    )
+    // Every packet stands alone, which is what makes a seek exact.
+    assert.ok([...track.key].every((k) => k === 1), 'a PCM packet was marked as a delta frame')
+    // Contiguous and in order: packet n ends where packet n+1 begins, within a
+    // chunk, and timestamps count evenly.
+    for (let i = 1; i < track.count; i++) {
+      assert.ok(track.pts[i] > track.pts[i - 1], 'packet timestamps do not increase')
+    }
+    const last = track.count - 1
+    assert.ok(
+      track.pts[last] + track.bytes[last] / (((track.pcm.bits >> 3) * track.channels) * track.sampleRate)
+        <= track.duration + 0.05,
+      'the packets run past the end of the track',
+    )
+  })
+
+  await check('a camera lpcm track reads as what the camera recorded', async () => {
+    /*
+     * The one layout no fixture here can carry. ffmpeg writes `sowt`, `twos`,
+     * `in24` and `fl32`; QuickTime and the Fujifilm bodies in this archive
+     * write **`lpcm` with a version 2 sample description**, which is a
+     * different structure entirely — rate as a float64, channels and depth as
+     * their own fields, and an explicit flags word instead of the type name
+     * implying the format.
+     *
+     * Reading a v2 entry with the v0 offsets, which is what FLUX did before
+     * this existed, yields 3 channels at 1Hz. It did not crash; it reported
+     * `unsupported-codec` and every clip landed on the timeline silent.
+     *
+     *   node scripts/verify-demux.mjs <mediaDir> <a real .MOV>
+     */
+    if (!REAL_PCM) {
+      console.log('       (no real file given — pass one as the second argument)')
+      return
+    }
+    const { reader, handle } = await openReader(REAL_PCM)
+    try {
+      const index = await readAudioTrack(reader)
+      assert.equal(index.ok, true, `refused: ${index.reason}`)
+      const { track } = index
+      assert.ok(track.pcm, 'the track was read, but not as uncompressed audio')
+      assert.ok(track.channels >= 1 && track.channels <= 8, `${track.channels} channels`)
+      assert.ok(
+        track.sampleRate >= 8000 && track.sampleRate <= 192000,
+        `${track.sampleRate}Hz is not a rate a camera records at — v2 fields read at v0 offsets`,
+      )
+      assert.ok([8, 16, 24, 32, 64].includes(track.pcm.bits), `${track.pcm.bits} bits`)
+
+      // And it decodes to something that is audio rather than noise. A wrong
+      // sign or byte order here reads as near-full-scale on every sample.
+      const blocks = []
+      let frames = 0
+      for (let i = 0; i < track.count && frames < track.sampleRate; i++) {
+        const bytes = await reader.read(track.offset[i], track.offset[i] + track.bytes[i] - 1)
+        const planes = pcmFloats(bytes, track.pcm)
+        blocks.push(planes[0])
+        frames += planes[0].length
+      }
+      let peak = 0
+      let loud = 0
+      let total = 0
+      for (const b of blocks) {
+        for (const v of b) {
+          const m = Math.abs(v)
+          if (m > peak) peak = m
+          if (m > 0.9) loud += 1
+          total += 1
+        }
+      }
+      assert.ok(peak > 0.0005, `the first second decoded as silence (peak ${peak})`)
+      assert.ok(peak <= 1.0001, `decoded past full scale (peak ${peak})`)
+      /*
+       * Noise is the shape a sign or endianness mistake makes: samples spread
+       * across the whole range rather than clustered near zero. Real room
+       * audio spends almost none of its time above 0.9.
+       */
+      assert.ok(
+        loud / total < 0.02,
+        `${((loud / total) * 100).toFixed(1)}% of samples are near full scale — this is noise, not audio`,
+      )
+      console.log(
+        `       ${path.basename(REAL_PCM)}: ${track.pcm.bits}-bit ` +
+          `${track.pcm.bigEndian ? 'BE' : 'LE'} ${track.channels}ch ${track.sampleRate}Hz, ` +
+          `${track.count} packets, peak ${peak.toFixed(3)}`,
+      )
+    } finally {
+      await handle.close()
+    }
   })
 
   // ── things it must refuse rather than guess at ────────────────

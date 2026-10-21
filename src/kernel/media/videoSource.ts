@@ -169,8 +169,9 @@ export class VideoSource {
 
     const track = result.track
     const config: VideoDecoderConfig = {
-      codec: track.codec,
-      description: track.description,
+      /* Never null on video: only uncompressed audio has no codec string. */
+      codec: (track.codec as string),
+      description: (track.description as Uint8Array),
       codedWidth: track.width,
       codedHeight: track.height,
       // Hardware where it exists, software where it does not, rather than
@@ -191,7 +192,7 @@ export class VideoSource {
 
   get info(): SourceInfo {
     return {
-      codec: this.track.codec,
+      codec: (this.track.codec as string),
       width: this.track.width,
       height: this.track.height,
       duration: this.track.duration,
@@ -247,8 +248,8 @@ export class VideoSource {
       },
     })
     decoder.configure({
-      codec: this.track.codec,
-      description: this.track.description,
+      codec: (this.track.codec as string),
+      description: (this.track.description as Uint8Array),
       codedWidth: this.track.width,
       codedHeight: this.track.height,
       hardwareAcceleration: 'no-preference',

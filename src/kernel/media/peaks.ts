@@ -1,3 +1,4 @@
+import { readPcm } from './audioSource'
 import { assetUrl } from '../fsBridge'
 import { trackFor, type VideoTrack } from './indexCache'
 import {
@@ -286,6 +287,82 @@ async function build(path: string, track: VideoTrack): Promise<Peaks> {
     for (const resolve of waiting) resolve()
   }
 
+  /**
+   * Folds one block of samples into the buckets.
+   *
+   * Shared by the decoder and the uncompressed path, because the *fold* is the
+   * part that has to agree between them: which bucket a sample lands in, and
+   * that a bucket keeps the extremes rather than an average. Two copies of
+   * that would be two waveforms, drawn differently, for the same file.
+   */
+  const fold = (
+    blocks: Float32Array[],
+    channels: number,
+    frames: number,
+    start: number,
+    sampleRate: number,
+  ) => {
+    const step = 1 / (sampleRate || track.sampleRate || 48000)
+    for (let i = 0; i < frames; i++) {
+      const bucket = Math.floor((start + i * step) * PEAKS_PER_SECOND)
+      if (bucket < 0 || bucket >= count) continue
+      let low = 0
+      let high = 0
+      for (let c = 0; c < channels; c++) {
+        const value = blocks[c][i]
+        if (value < low) low = value
+        if (value > high) high = value
+      }
+      const lowByte = Math.max(-127, Math.round(low * 127))
+      const highByte = Math.min(127, Math.round(high * 127))
+      if (lowByte < min[bucket]) min[bucket] = lowByte
+      if (highByte > max[bucket]) max[bucket] = highByte
+    }
+  }
+
+  /*
+   * Uncompressed audio draws its waveform without a decoder at all — the same
+   * arithmetic the mixer uses to play it. Done here as a straight read of the
+   * file rather than through the decoder machinery below, because none of that
+   * machinery has anything to do: no queue to drain, no flush, no error path.
+   */
+  if (track.pcm) {
+    const url = assetUrl(path)
+    const deadline = performance.now() + BUILD_TIMEOUT_MS
+    let next = 0
+    while (next < track.count) {
+      if (performance.now() > deadline) throw new Error('timed-out')
+      let to = next
+      while (
+        to + 1 < track.count &&
+        track.offset[to + 1] + track.bytes[to + 1] - track.offset[next] <= MAX_FETCH_BYTES
+      ) {
+        to += 1
+      }
+      const from = track.offset[next]
+      const span = track.offset[to] + track.bytes[to] - from
+      const res = await fetch(url, { headers: { Range: `bytes=${from}-${from + span - 1}` } })
+      if (!res.ok && res.status !== 206) throw new Error('unreadable')
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      for (let i = next; i <= to; i++) {
+        const at = track.offset[i] - from
+        if (at + track.bytes[i] > bytes.length) break
+        const frame = readPcm(bytes.subarray(at, at + track.bytes[i]), track.pcm, track.pts[i])
+        fold(frame.planes, frame.planes.length, frame.planes[0].length, frame.time, frame.sampleRate)
+      }
+      next = to + 1
+    }
+    return {
+      perSecond: PEAKS_PER_SECOND,
+      count,
+      duration: track.duration,
+      channels: track.channels,
+      sampleRate: track.sampleRate,
+      min,
+      max,
+    }
+  }
+
   const decoder = new AudioDecoder({
     output: (data) => {
       try {
@@ -300,22 +377,7 @@ async function build(path: string, track: VideoTrack): Promise<Peaks> {
         }
 
         const start = (data.timestamp ?? 0) / 1e6
-        const step = 1 / (data.sampleRate || track.sampleRate || 48000)
-        for (let i = 0; i < frames; i++) {
-          const bucket = Math.floor((start + i * step) * PEAKS_PER_SECOND)
-          if (bucket < 0 || bucket >= count) continue
-          let low = 0
-          let high = 0
-          for (let c = 0; c < channels; c++) {
-            const value = planes[c][i]
-            if (value < low) low = value
-            if (value > high) high = value
-          }
-          const lowByte = Math.max(-127, Math.round(low * 127))
-          const highByte = Math.min(127, Math.round(high * 127))
-          if (lowByte < min[bucket]) min[bucket] = lowByte
-          if (highByte > max[bucket]) max[bucket] = highByte
-        }
+        fold(planes, channels, frames, start, data.sampleRate)
       } finally {
         // In the same breath as reading it. Held AudioData stops the decoder,
         // exactly as held VideoFrames do.
@@ -330,8 +392,9 @@ async function build(path: string, track: VideoTrack): Promise<Peaks> {
   })
 
   decoder.configure({
-    codec: track.codec,
-    description: track.description,
+    /* PCM returned above, so anything reaching a decoder has a codec. */
+    codec: (track.codec as string),
+    description: (track.description as Uint8Array),
     sampleRate: track.sampleRate,
     numberOfChannels: track.channels,
   })
