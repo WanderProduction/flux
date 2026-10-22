@@ -5641,6 +5641,65 @@ try {
     assert.equal(after.clips, before.clips)
   })
 
+  await check('a folder lands as every clip under it, end to end', async () => {
+    /*
+     * What a dropped folder does, driven through the command that shares its
+     * code — because a native drag cannot be synthesised here. `webkitGetAsEntry`
+     * has to report a real directory and Electron's `pathForFile` only answers
+     * for a real dragged File, so the three lines that *detect* a folder stay
+     * out of reach. Everything behind them is this.
+     *
+     * The fixture folder is the media directory, which has a known set of
+     * video files in it and a notes.txt that must not become a clip.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { commands, sequence, assets } = window.__fluxDev;
+       // Everything this check adds is taken back out at the end: it imports a
+       // whole folder, and the checks after it count what is in the project.
+       const assetsBefore = new Set(assets.getAssets().map(a => a.id));
+       sequence.removeClips(sequence.getSequence().clips.map(c => c.id));
+       await new Promise(r => setTimeout(r, 150));
+       const before = sequence.getSequence().clips.length;
+
+       await commands.run('timeline.placeFolder', ${dir});
+       // The placement probes every file, so give it room.
+       for (let i = 0; i < 120 && sequence.getSequence().clips.length === before; i++) {
+         await new Promise(r => setTimeout(r, 250));
+       }
+       await new Promise(r => setTimeout(r, 1200));
+
+       const s = sequence.getSequence();
+       const video = s.clips.filter(c => c.kind === 'video').slice().sort((a, b) => a.start - b.start);
+       const names = video.map(c => assets.getAssets().find(a => a.id === c.assetId)?.name ?? '?');
+       const result = {
+         video: video.length,
+         names,
+         // Abutting, which is what "end to end" means and the thing most
+         // likely to be quietly wrong.
+         gaps: video.slice(1).filter((c, i) =>
+           Math.abs(c.start - (video[i].start + video[i].duration)) > 0.001).length,
+       };
+
+       // Put the project back exactly as it was found.
+       sequence.removeClips(sequence.getSequence().clips.map(c => c.id));
+       assets.removeAssets(assets.getAssets().map(a => a.id).filter(id => !assetsBefore.has(id)));
+       await new Promise(r => setTimeout(r, 250));
+       return result;`,
+    )
+    assert.ok(state.video > 1, `only ${state.video} clips landed`)
+    assert.equal(state.gaps, 0, 'the clips did not land end to end')
+    assert.ok(
+      !state.names.some((name) => name.endsWith('.txt')),
+      `something that is not media became a clip: ${state.names.join(', ')}`,
+    )
+    assert.ok(
+      state.names.some((name) => name === 'clipA.mp4'),
+      `the folder's own files are not the ones that landed: ${state.names.join(', ')}`,
+    )
+    console.log(`       ${state.video} clips, abutting: ${state.names.slice(0, 3).join(', ')}…`)
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })

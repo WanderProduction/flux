@@ -91,7 +91,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Sequence render** | Or the whole sequence as *one* file: layers composited, audio mixed down, gaps black. |
 | **Export page** | `Ctrl M` queues what is selected and opens a whole page showing it, with the pictures. |
 | **In and out** | Mark a span — `/` fits it to the selection — and the render is about that span only. |
-| **Drop a folder** | A shoot folder dropped on the timeline lands as its footage, in scan order. |
+| **Drop a folder** | A shoot folder dropped on the timeline lands as its footage, in scan order — or from the palette. |
 
 Six built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools**, **Batch** and
 **Render** — and all six do real work.
@@ -577,6 +577,34 @@ point of zero and a source length equal to its duration — which is not a defau
 unknown, it is what that clip actually was.
 
 Not yet: rolling and slip edits, ripple trimming, and trimming with the keyboard.
+
+#### A folder, by drag or by palette
+
+Drop a shoot folder on a track and it lands as every clip under it, end to end, in scan order — the
+same copy-or-link question and the same placement as dropping the files themselves. Dropping a
+folder and dropping its contents should not be two different features, so they are not: both go
+through `footageUnder` (the Batch panel's own scan) and then `idsForFiles` and `placeAssets`.
+
+**Place a Folder on the Timeline…** in the palette does exactly the same thing, and it exists for
+two reasons. It is useful — "put this whole folder on the timeline" without going to Explorer — and
+it is the only way any of this can be *checked*.
+
+> **A native drag cannot be synthesised.** `webkitGetAsEntry()` has to report a real directory, and
+> Electron's `pathForFile` only answers for a `File` that came off a real drag — so the three lines
+> that *detect* a dropped folder are out of reach of any harness, and will stay that way. Putting
+> the rest behind a command that takes a path moves the untested surface from "the whole feature"
+> to "three lines", and `verify:timeline` drives it against the fixture folder: fourteen clips,
+> abutting, with `notes.txt` correctly not among them.
+
+Commands can take a target now — `run(id, target)` — for exactly this. Almost none do: the palette
+calls `run()` and a command reads what it needs off the kernel. But "place *this* folder" has an
+argument that cannot come from the selection or the playhead, and a command that could only ever
+ask a file picker for it would be a command nothing but a human could run.
+
+**Reading the folder has to happen before the first `await`.** `dataTransfer.items` is reclaimed
+the moment the drop handler yields, so a folder read after an await is always empty — and the
+symptom is "dropping folders does nothing", which looks like a missing feature rather than a timing
+bug. The whole drop is captured up front for that reason.
 
 #### In and out, and rendering only that
 

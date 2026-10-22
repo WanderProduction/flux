@@ -18,7 +18,19 @@ export interface Command {
   category: string
   /** Optional longer explanation for the palette's second line. */
   detail?: string
-  run: () => void | Promise<void>
+  /**
+   * Does the thing. `target` is for the commands that act *on* something.
+   *
+   * Almost every command here takes nothing: the palette calls `run()` and the
+   * command reads whatever it needs off the kernel. A few are different —
+   * "place this folder on the timeline" has an argument that cannot come from
+   * the selection or the playhead, and a command that could only ever ask a
+   * file picker for it would be a command nothing but a human could run.
+   *
+   * Optional on both sides, so a command that ignores it and a caller that
+   * does not pass one both stay exactly as they were.
+   */
+  run: (target?: unknown) => void | Promise<void>
   /** When false the command is listed but not runnable. */
   enabled?: () => boolean
 }
@@ -67,14 +79,14 @@ class CommandRegistry {
     return command.enabled ? command.enabled() : true
   }
 
-  async run(id: string): Promise<boolean> {
+  async run(id: string, target?: unknown): Promise<boolean> {
     const command = this.commands.get(id)
     if (!command) {
       console.warn(`[flux] no such command: ${id}`)
       return false
     }
     if (!this.isEnabled(command)) return false
-    await command.run()
+    await command.run(target)
     return true
   }
 
