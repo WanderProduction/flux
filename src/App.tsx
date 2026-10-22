@@ -62,6 +62,21 @@ function Workspace({ project }: { project: Project }) {
 
   const [ready, setReady] = useState(false)
   const [activeId, setActiveId] = useState(openInRef.current)
+  /**
+   * The same id, readable synchronously.
+   *
+   * The debounced layout save fires half a second after a change, and `state`
+   * is only new on the next render — so a save that read `activeId` from the
+   * closure would attribute a layout to **whichever workspace was open
+   * before**. With one workspace that is invisible; with two it means
+   * switching writes each layout under the other's name, and the second time
+   * you switch you get the wrong panels. See `markActive`.
+   */
+  const activeRef = useRef(openInRef.current)
+  const markActive = useCallback((id: string) => {
+    activeRef.current = id
+    setActiveId(id)
+  }, [])
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [openSequence, setOpenSequence] = useState(() => getSequence().name)
@@ -110,7 +125,7 @@ function Workspace({ project }: { project: Project }) {
     if (saved) {
       try {
         api.fromJSON(saved as never)
-        setActiveId(id)
+        markActive(id)
         rearranging.current = false
         return
       } catch (err) {
@@ -122,9 +137,9 @@ function Workspace({ project }: { project: Project }) {
       }
     }
     workspace.build(api)
-    setActiveId(id)
+    markActive(id)
     rearranging.current = false
-  }, [])
+  }, [markActive])
 
   /** Writes the arrangement down, without saying anything about it. */
   const rememberLayout = useCallback((id: string) => {
@@ -136,7 +151,7 @@ function Workspace({ project }: { project: Project }) {
 
   const saveWorkspace = useCallback(() => {
     if (!apiRef.current) return
-    rememberLayout(activeId)
+    rememberLayout(activeRef.current)
     say(`Saved "${getWorkspace(activeId)?.name}" layout`)
   }, [activeId, rememberLayout, say])
 
@@ -210,7 +225,7 @@ function Workspace({ project }: { project: Project }) {
     const disposable = api.onDidLayoutChange(() => {
       if (rearranging.current) return
       window.clearTimeout(pending)
-      pending = window.setTimeout(() => rememberLayout(activeId), 500)
+      pending = window.setTimeout(() => rememberLayout(activeRef.current), 500)
     })
 
     return () => {
@@ -218,7 +233,7 @@ function Workspace({ project }: { project: Project }) {
       disposable.dispose()
       // On the way out, keep whatever the last change was rather than dropping
       // it because the debounce had not fired yet.
-      if (!rearranging.current) rememberLayout(activeId)
+      if (!rearranging.current) rememberLayout(activeRef.current)
     }
   }, [ready, activeId, rememberLayout])
 

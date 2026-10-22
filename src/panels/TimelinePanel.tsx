@@ -10,10 +10,12 @@ import {
   isNativeFileDrag,
   readAssetDragPayload,
   readFileDragPayload,
+  readDroppedFolders,
   readNativeFileDrag,
   sequenceFilesIn,
   type DraggedFile,
 } from '../kernel/dragAssets'
+import { planBatch } from '../kernel/batchImport'
 import { importFiles } from '../kernel/importPipeline'
 import { getSelection, setSelection, subscribeSelection } from '../kernel/selection'
 import { importSequenceFile } from '../kernel/project'
@@ -82,6 +84,10 @@ import {
   getSequence,
   removeClips,
   sequenceDuration,
+  setRangeEnd,
+  rangeToFit,
+  clearRange,
+  renderRange,
   snapToFrame,
   subscribeSequence,
   type Clip,
@@ -485,6 +491,8 @@ export function TimelinePanel() {
 
   const duration = sequenceDuration()
   const contentWidth = Math.max((duration + 4) * zoom, 600)
+  // Recomputed from `sequence` so a mark set anywhere redraws the band here.
+  const span = renderRange(sequence)
 
   /** Pointer x -> seconds, accounting for the lane's scroll offset. */
   const timeAt = useCallback(
@@ -971,12 +979,47 @@ export function TimelinePanel() {
     return true
   }, [])
 
-  const idsFromDrop = useCallback(async (event: React.DragEvent): Promise<string[]> => {
-    if (isAssetDrag(event)) return readAssetDragPayload(event)
+  /**
+   * Everything a drop carries, read while it is still readable.
+   *
+   * `dataTransfer.items` is gone the instant the handler yields, so this runs
+   * before the first `await` and the rest of the drop works from what it
+   * returned. See readDroppedFolders.
+   */
+  const captureDrop = useCallback((event: React.DragEvent) => {
+    if (isAssetDrag(event)) return { assets: readAssetDragPayload(event), files: [], folders: [] }
+    const files = isFileDrag(event)
+      ? readFileDragPayload(event)
+      : isNativeFileDrag(event)
+        ? readNativeFileDrag(event)
+        : []
+    return { assets: [], files, folders: readDroppedFolders(event) }
+  }, [])
 
-    let files: DraggedFile[] = []
-    if (isFileDrag(event)) files = readFileDragPayload(event)
-    else if (isNativeFileDrag(event)) files = readNativeFileDrag(event)
+  const idsFromDrop = useCallback(async (dropped: ReturnType<typeof captureDrop>): Promise<string[]> => {
+    if (dropped.assets.length > 0) return dropped.assets
+
+    let files: DraggedFile[] = dropped.files
+
+    /*
+     * A dropped folder becomes the footage under it, in scan order, and then
+     * takes exactly the same route as a handful of dropped files — the same
+     * copy-or-link question, the same placement end to end. Dropping a shoot
+     * folder and dropping its contents should not be two different features.
+     *
+     * The scan is the Batch panel's own, so "every clip under this folder" has
+     * one meaning in the app: the same proxy-folder skipping, the same cap,
+     * the same ordering.
+     */
+    for (const folder of dropped.folders) {
+      const planned = await planBatch(folder)
+      if (!planned.ok) continue
+      for (const entry of planned.plan.files) {
+        if (files.some((file) => file.path === entry.path)) continue
+        files.push({ path: entry.path, kind: entry.kind, size: entry.size })
+      }
+    }
+
     if (files.length === 0) return []
 
     const added = await importFiles(files)
@@ -998,13 +1041,17 @@ export function TimelinePanel() {
       event.preventDefault()
       setPreview(null)
 
+      // Read before anything is awaited: the drag's `items` do not survive
+      // the handler yielding, and a folder read afterwards is always empty.
+      const dropped = captureDrop(event)
+      const dropTime = timeAt(event.clientX)
+
       // A sequence dropped in from outside is a sequence, not footage: it goes
       // into the project's sequences folder and opens, rather than being
       // laid on a track.
       if (await importDroppedSequences(event)) return
 
-      const dropTime = timeAt(event.clientX)
-      const ids = await idsFromDrop(event)
+      const ids = await idsFromDrop(dropped)
       if (ids.length === 0) return
 
       // What the drop could not do, in the words of whoever is watching it.
@@ -1223,6 +1270,60 @@ export function TimelinePanel() {
       window.addEventListener('pointerup', onUp)
     },
     [timeAt],
+  )
+
+  /**
+   * How close a dragged mark has to come before it snaps, in pixels.
+   *
+   * Pixels rather than seconds, so the feel does not change with the zoom —
+   * at a hundred pixels a second a tenth-of-a-second threshold is a tenth of
+   * the screen, and zoomed out it is unreachable.
+   */
+  const SNAP_PIXELS = 7
+
+  /**
+   * Drags one end of the marked span, snapping to the edges that matter.
+   *
+   * The snap targets are every clip edge and the playhead, which is what
+   * makes this worth having: an out point a frame short of a clip's end
+   * renders a file a frame short, and nothing on screen would show it. The
+   * same reason the clips themselves snap.
+   */
+  const beginRangeDrag = useCallback(
+    (event: React.PointerEvent, which: 'in' | 'out') => {
+      event.preventDefault()
+      event.stopPropagation()
+
+      const targets: number[] = [getTime()]
+      for (const clip of getSequence().clips) {
+        targets.push(clip.start, clip.start + clip.duration)
+      }
+
+      const move = (clientX: number) => {
+        const raw = Math.max(0, timeAt(clientX))
+        const reach = SNAP_PIXELS / zoom
+        let best = raw
+        let bestGap = reach
+        for (const target of targets) {
+          const gap = Math.abs(target - raw)
+          if (gap < bestGap) {
+            bestGap = gap
+            best = target
+          }
+        }
+        setRangeEnd(which, best)
+      }
+
+      move(event.clientX)
+      const onMove = (e: PointerEvent) => move(e.clientX)
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [timeAt, zoom],
   )
 
   // ── commands ──────────────────────────────────────────────────
@@ -1924,6 +2025,51 @@ export function TimelinePanel() {
         enabled: () => selected.size > 0 || gap !== null,
         run: deleteSelected,
       },
+      /*
+       * The marked span. `I` and `O` land one end each at the playhead, which
+       * is what every NLE binds them to; `/` marks exactly what is selected,
+       * which is the one someone reaches for most — the span you want to
+       * render is almost always the span of the clips you just picked.
+       */
+      {
+        id: 'timeline.markIn',
+        title: 'Mark In',
+        category: 'Timeline',
+        detail: 'I — the render starts here',
+        run: () => setRangeEnd('in', getTime()),
+      },
+      {
+        id: 'timeline.markOut',
+        title: 'Mark Out',
+        category: 'Timeline',
+        detail: 'O — the render stops here',
+        run: () => setRangeEnd('out', getTime()),
+      },
+      {
+        id: 'timeline.markSelection',
+        title: 'Mark In and Out Around the Selection',
+        category: 'Timeline',
+        detail: '/ — marks exactly the span the selected clips occupy',
+        /*
+         * Read from the kernel rather than from this component's copy.
+         *
+         * `selected` is a render-time mirror, so a command closing over it
+         * sees whatever the selection was when the panel last drew — which is
+         * the *old* selection for anything that selects and then immediately
+         * marks. kernel/selection.ts is the source of truth, and asking it is
+         * the only way to be sure the answer is current.
+         */
+        enabled: () => getSelection().size > 0,
+        run: () => rangeToFit(getSelection()),
+      },
+      {
+        id: 'timeline.clearMarks',
+        title: 'Clear In and Out',
+        category: 'Timeline',
+        detail: 'Ctrl Shift X — back to rendering the whole sequence',
+        enabled: () => renderRange().marked,
+        run: () => clearRange(),
+      },
     ])
     return () => handle.dispose()
   }, [
@@ -2085,6 +2231,35 @@ export function TimelinePanel() {
                   </div>
                 )
               })}
+              {/*
+                The marked span, drawn over the ticks. The band is what makes
+                "this is the part that renders" readable at a glance; the two
+                handles are what make it adjustable without going near a menu.
+
+                `onPointerDown` stops here rather than bubbling, because the
+                ruler below it scrubs — a drag meant for a handle that also
+                moved the playhead would be two things happening at once.
+              */}
+              {span.marked && (
+                <>
+                  <div
+                    className="tl-range"
+                    style={{ left: span.start * zoom, width: Math.max(0, (span.end - span.start) * zoom) }}
+                  />
+                  <span
+                    className="tl-range-handle tl-range-handle--in"
+                    style={{ left: span.start * zoom }}
+                    title="In point — drag to move"
+                    onPointerDown={(e) => beginRangeDrag(e, 'in')}
+                  />
+                  <span
+                    className="tl-range-handle tl-range-handle--out"
+                    style={{ left: span.end * zoom }}
+                    title="Out point — drag to move"
+                    onPointerDown={(e) => beginRangeDrag(e, 'out')}
+                  />
+                </>
+              )}
               {/* The grip lives in the ruler, not on the playhead line: the
                   ruler stays put while the tracks scroll under it, and a grip
                   that slid away from its own ruler would read as broken. */}

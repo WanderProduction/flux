@@ -151,6 +151,19 @@ try {
   // panel. ensureProject also forces import mode to 'link' so the copy-or-link
   // dialog cannot appear mid-suite; the copy path is checked in verify-project.
   await ensureProject(cdp, VERIFY_PROJECT)
+  /*
+   * And in the Edit workspace, which everything below assumes. There is more
+   * than one workspace now, so a project can be saved sitting in Export —
+   * where there is no Content Browser — and `ensureProject` alone no longer
+   * guarantees one is on screen.
+   */
+  await evaluate(
+    cdp,
+    `const { commands } = window.__fluxDev;
+     await commands.run('workspace.switch.edit');
+     await new Promise(r => setTimeout(r, 500));
+     return true;`,
+  )
 
   // Start from an empty project so the run is repeatable. This clears the
   // real asset store — fine for a dev fixture app, and the header says so.
@@ -820,6 +833,54 @@ try {
        return await window.flux.store.get('order-probe');`,
     )
     assert.equal(result.tag, 'last', `the later write should win, got tag=${result.tag}`)
+  })
+
+  await check('each workspace keeps its own panels, switch after switch', async () => {
+    /*
+     * The bug this exists for only appears once there are two workspaces, and
+     * it appears on the *second* switch.
+     *
+     * Layout changes are saved on a debounce, and the save used to read the
+     * active id from a render closure — so a change arriving just after a
+     * switch was filed under whichever workspace was open *before*. Each
+     * layout therefore got written under the other's name, and going back to
+     * one you had already visited produced the other one's panels. With a
+     * single workspace it is invisible, which is exactly why it survived.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { commands, view } = window.__fluxDev;
+       const tabs = () => [...document.querySelectorAll('.dv-tab')].map(e => e.textContent.trim()).sort();
+       const go = async (id) => {
+         await commands.run('workspace.switch.' + id);
+         // Past the debounce, so a late save lands before the next switch.
+         await new Promise(r => setTimeout(r, 900));
+         return { workspace: view.getView().workspace, tabs: tabs() };
+       };
+       const edit = await go('edit');
+       const exported = await go('export');
+       const backToEdit = await go('edit');
+       const backToExport = await go('export');
+       // Put it back: every check after this one wants the Edit panels, and a
+       // check that leaves another workspace open breaks all of them.
+       await go('edit');
+       return { edit, exported, backToEdit, backToExport };`,
+    )
+    assert.equal(state.exported.workspace, 'export')
+    assert.ok(
+      state.exported.tabs.includes('To render'),
+      `Export showed ${state.exported.tabs.join(', ')}`,
+    )
+    assert.deepEqual(
+      state.backToEdit.tabs,
+      state.edit.tabs,
+      'going back to Edit did not bring Edit’s panels back',
+    )
+    assert.deepEqual(
+      state.backToExport.tabs,
+      state.exported.tabs,
+      'the second visit to Export showed another workspace’s panels',
+    )
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

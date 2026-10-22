@@ -64,7 +64,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
 | **Panel focus** | `Ctrl 1`–`Ctrl 5`, opening the panel if the workspace doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
-| **Timeline** | Drop media on a track from anywhere — the browser, or Explorer. Drag clips to move and reorder them. |
+| **Timeline** | Drop media — or a whole folder — on a track from anywhere: the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
 | **Link / unlink** | `Ctrl Tab` cuts a pair apart, or ties clips together. Apart, each half moves alone. |
 | **Copy, paste, duplicate** | `Ctrl C` / `Ctrl V` at the playhead, or `Alt` drag to leave a copy behind. |
@@ -90,6 +90,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
 | **Sequence render** | Or the whole sequence as *one* file: layers composited, audio mixed down, gaps black. |
 | **Export page** | `Ctrl M` queues what is selected and opens a whole page showing it, with the pictures. |
+| **In and out** | Mark a span — `/` fits it to the selection — and the render is about that span only. |
+| **Drop a folder** | A shoot folder dropped on the timeline lands as its footage, in scan order. |
 
 Six built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools**, **Batch** and
 **Render** — and all six do real work.
@@ -575,6 +577,35 @@ point of zero and a source length equal to its duration — which is not a defau
 unknown, it is what that clip actually was.
 
 Not yet: rolling and slip edits, ripple trimming, and trimming with the keyboard.
+
+#### In and out, and rendering only that
+
+Mark a span on the ruler and the render is about that span and nothing else. The band is drawn over
+the ticks with a handle at each end; drag either one and it **snaps to every clip edge and to the
+playhead**, because an out point a frame short of a clip's end renders a file a frame short and
+nothing on screen would show it.
+
+`/` marks exactly the span the selected clips occupy, which is the one worth a key: the span you
+want to render is almost always the span of the clips you just picked, and dragging two handles
+onto the same frames is work the app can simply do. `Ctrl Shift X` clears both marks. Mark In and
+Mark Out are in the palette but **not** on `I` and `O`, where every NLE puts them — `I` is already
+the eyedropper and single letters belong to the tool strip. That is a trade worth making
+deliberately rather than by rebinding a tool out from under someone.
+
+The marks belong to the **sequence**, not to the render settings, and are written into the
+`.fluxseq`. Marking a span is an edit: it is a statement about this cut, and losing it on reopen
+would mean marking it again every session.
+
+What the two render modes do with it differs, and both are what you would want:
+
+| | |
+|---|---|
+| **Each clip as its own file** | Clips outside the span are dropped — and *named*, so a queue with two rows instead of four has an answer on screen. A clip straddling a mark is trimmed to it, which moves its **source in point** by the same amount: the frames before the mark are not wanted. |
+| **The whole sequence as one file** | The composite is exactly as long as the span and starts at the in point, so every clip's placement moves back by it. The gap rule still holds inside: an in point landing in the middle of a gap gives you black, not a shorter file. |
+
+A stretched clip multiplies the trim by its speed, because it covers `speed` seconds of file per
+second of timeline. Measured: a span cutting a 7s clip in half produced a 3.5s job reading from
+3.5s into the source.
 
 #### Selecting
 

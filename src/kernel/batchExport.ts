@@ -16,6 +16,7 @@ import {
   getSequence,
   isTrackAudible,
   isTrackVisible,
+  renderRange,
   type Clip,
   type SequenceState,
 } from './sequence'
@@ -111,7 +112,7 @@ export interface ExportJob {
 export interface SkippedClip {
   id: string
   name: string
-  reason: 'missing-asset' | 'offline' | 'no-length' | 'still' | 'hidden'
+  reason: 'missing-asset' | 'offline' | 'no-length' | 'still' | 'hidden' | 'outside'
   detail: string
 }
 
@@ -236,6 +237,12 @@ export function planExport(
   const wantsVideo = options.video !== false
   const wantsAudio = options.audio !== false
   const scale = options.output?.scale
+  /*
+   * The marked span, or the whole sequence when nothing is marked — the same
+   * answer either way, which is what lets everything below just intersect
+   * against it rather than ask whether there are marks at all.
+   */
+  const span = renderRange(sequence)
   /*
    * `sequence` conforms every clip to the sequence's rate; `source` leaves each
    * one at the rate it was shot, which is the default and the one an archive
@@ -370,8 +377,31 @@ export function planExport(
     const wholeFile =
       clip.offset <= SAME_S && Math.abs(clip.duration - clip.sourceDuration) <= SAME_S
 
+    /*
+     * Trimmed to the marked span, and only the overlap is rendered.
+     *
+     * A clip that straddles the in point renders from the in point, which
+     * means moving its *source* in point by the same amount — the frames
+     * before the mark are not wanted, and `offset` is where the cut starts in
+     * the file. A stretched clip covers `speed` seconds of source per second
+     * of timeline, so the shift multiplies by it.
+     */
+    const headCut = Math.max(0, span.start - clip.start)
+    const tailCut = Math.max(0, clip.start + clip.duration - span.end)
+    const duration = clip.duration - headCut - tailCut
+    if (!(duration > SAME_S)) {
+      skipped.push({
+        id: clip.id,
+        name: asset.name,
+        reason: 'outside',
+        detail: 'outside the marked in and out points',
+      })
+      continue
+    }
+    const offset = clip.offset + headCut * clip.speed
+
     const share =
-      clip.sourceDuration > 0 ? Math.min(1, clip.duration / clip.sourceDuration) : 1
+      clip.sourceDuration > 0 ? Math.min(1, duration / clip.sourceDuration) : 1
 
     /*
      * A clip with no link is left alone. Its sound, if the file has any, is not
@@ -393,8 +423,8 @@ export function planExport(
       name: asset.name,
       source: asset.path,
       output,
-      offset: clip.offset,
-      duration: clip.duration,
+      offset,
+      duration,
       sourceBytes: Math.round((asset.size ?? 0) * share),
       speed: clip.speed,
       /*
