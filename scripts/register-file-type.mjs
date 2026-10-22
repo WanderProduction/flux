@@ -139,4 +139,7 @@ console.log(`  command ${command}`)
 if (!exePath) {
   console.log('\nThis points at the dev build, so `npm run dev` must be running')
   console.log('for a double-clicked project to open. Undo with: npm run unregister')
+  console.log('\nFor a build that opens on its own: npm run dist installs one and registers')
+  console.log('.flux itself, or point this at a build you already have:')
+  console.log('  npm run register -- --exe "release\\win-unpacked\\FLUX.exe"')
 }

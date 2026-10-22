@@ -39,6 +39,44 @@ npm run dev:renderer
 The renderer runs fine in a plain browser — layouts fall back to `localStorage` instead of the
 Electron store, so the whole shell stays testable without booting the desktop app.
 
+### Or just `flux`
+
+To run it like an installed program rather than through Vite:
+
+```bash
+npm run dist
+```
+
+That writes `release/FLUX Setup 0.0.1.exe` — a per-user installer that puts FLUX in the Start
+Menu and registers `.flux` properly. `npm run pack` is the faster half: no installer, just
+`release/win-unpacked/FLUX.exe`, which runs exactly the same.
+
+```bash
+npm run cli
+```
+
+Now `flux` opens the launcher from any terminal, and `flux some-project.flux` opens that project —
+the shim passes its arguments through, and `electron/main.js` already reads a project path out of
+argv. `npm run uncli` removes it.
+
+> **The one step here that can break something other than FLUX is PATH**, so by default it does not
+> touch it. `setx` — the obvious tool — **truncates the value at 1024 characters**, and a
+> developer's PATH is routinely longer than that, so using it would quietly delete the tail of
+> someone's environment. Instead the shim goes in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which is
+> already on the user PATH on every Windows 10 and 11 install. Only if that folder is missing does
+> it make its own and append — and then it writes the old value to a file first and goes through
+> the registry rather than through `setx`.
+
+A packaged build is a different program from the dev one in three ways that all fail *silently* —
+the renderer comes off `file://` inside an asar rather than `http://`, a
+`script-src 'self'` CSP is in force that Vite's dev server could never run under, and
+`window.__fluxDev` is stripped. A build that white-screens looks identical from outside: process
+up, window open, title right. So there is a check that asks the page what is in it:
+
+```bash
+npm run verify:packaged
+```
+
 **[Batch](#batch-a-folder-in-a-folder-out) needs ffmpeg**, and only Batch does. Everything else —
 browsing, importing, editing, playback — runs without it.
 

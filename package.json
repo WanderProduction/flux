@@ -12,6 +12,10 @@
     "dev:electron": "wait-on tcp:127.0.0.1:5273 && electron .",
     "dev:debug": "wait-on tcp:127.0.0.1:5273 && electron . --remote-debugging-port=9222",
     "build": "tsc --noEmit && vite build",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "cli": "node scripts/install-cli.mjs",
+    "uncli": "node scripts/install-cli.mjs --uninstall",
     "typecheck": "tsc --noEmit",
     "icons": "node scripts/make-icons.mjs",
     "fixtures": "node scripts/make-fixtures.mjs",
@@ -31,7 +35,8 @@
     "verify:render": "node scripts/verify-render.mjs",
     "verify:queue": "node scripts/verify-queue.mjs",
     "verify:render-queue": "node scripts/verify-render-queue.mjs",
-    "verify:sequence-render": "node scripts/verify-sequence-render.mjs"
+    "verify:sequence-render": "node scripts/verify-sequence-render.mjs",
+    "verify:packaged": "node scripts/verify-packaged.mjs"
   },
   "dependencies": {
     "dockview": "^4.9.0",
@@ -44,6 +49,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "concurrently": "^9.2.0",
     "electron": "^38.0.0",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.9.0",
     "vite": "^7.1.0",
     "wait-on": "^9.0.0"
@@ -51,6 +57,9 @@
   "build": {
     "appId": "dev.flux.app",
     "productName": "FLUX",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**",
       "electron/**",
@@ -79,5 +88,6 @@
         "role": "Editor"
       }
     ]
-  }
+  },
+  "author": "WanderProduction"
 }
