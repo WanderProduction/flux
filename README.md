@@ -1017,8 +1017,49 @@ be sound and there must be **no** picture — and the second half matters as muc
 because without it, flicking Video off and rendering again would be skipped by resume: the old file
 with its picture passes every check that remains.
 
-*Not yet: the audio **fields**. Format, bitrate, sample rate and channels are shown as what they
-are and are not yet editable; they become fields that follow the sequence until you change one.*
+#### Inherit unless touched
+
+Every field in Video and Audio is empty until someone moves it, and empty does not mean *unset* —
+it means **follow whatever is being rendered**. The inherited value is the placeholder, so the box
+is never blank: "what will this be?" is answered whether or not anyone has typed in it. Type a
+number and the field says it is yours, and offers `follow` to hand it back.
+
+That way back matters more than it looks. Without it the only route from `1920` to "follow the
+sequence" is selecting the text and deleting it, which nobody discovers — so every field anyone
+ever touched would stay touched forever.
+
+| | following | typed |
+|---|---|---|
+| **Width / Height** | each source's own size — 4K stays 4K | fitted and padded to the box, never stretched |
+| **Force a rate** | the frame-rate policy above | wins over it |
+| **Bitrate** | 192 kbps | yours |
+| **Sample rate / Channels** | each source, untouched | resamples or downmixes every clip |
+
+**Inheriting is not the same as defaulting, and that is the whole of why this is one function
+rather than a `??` in two planners.** `null` on sample rate in clips mode emits **no flag at all**,
+so a 44.1kHz source stays 44.1 and a 48kHz one stays 48. Resolving it to "the sequence's 48kHz"
+and emitting `-ar 48000` would quietly resample half an archive — every file still playing, every
+file subtly altered. For a *composite* the opposite is true: the mixdown has already resampled to
+the sequence's rate, so stating it is simply true. `resolveOutput` in
+[`kernel/renderSettings.ts`](src/kernel/renderSettings.ts) is the one place that difference is
+decided, and `verify:render-queue` checks it by rendering with nothing touched and asserting the
+written file is byte-for-byte the shape its source was.
+
+A typed size is checked against **itself**, not against the source. The verifier compares output
+dimensions to the source's *displayed* size by default — the rotation rule — so a job told to
+scale would fail every check unless it is also told what it asked for.
+
+Two consequences worth naming:
+
+- **A scaled cut is never "the whole file"** for the never-write-a-bigger-file rule. That rule
+  falls back to keeping the original, and the original is the size someone just asked it not to be.
+- **Dimensions round to even numbers.** `yuv420p` chroma is subsampled two-to-one on both axes, so
+  an odd width is not a slightly wrong size, it is a frame the encoder refuses outright.
+
+The audio *format* is a list with one entry. AAC in mp4 plays everywhere this archive has to be
+readable, which is the whole requirement — and unlike the video settings above it, the bitrate was
+chosen rather than measured, because the encode tests scored pictures and nobody ran a VMAF on a
+soundtrack. The panel says so where the field is.
 
 #### A queued job is a snapshot, not a reference
 

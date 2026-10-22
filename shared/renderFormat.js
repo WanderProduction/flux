@@ -95,10 +95,25 @@ export const EXPECTED_PIX_FMT = 'yuv420p10le'
  *     50fps material is kept for slow motion, and conforming it is the exact
  *     failure described above.
  *
- * @param {{ cq?: number, gop?: number }} [options]
+ * ## The audio half is settings, the video half is a finding
+ *
+ * Everything above `-c:a` was measured and is not offered as a choice. The
+ * sound is the other way round: AAC at 192k is a sensible default rather than
+ * a result, because the thing being optimised for was the *picture* — nobody
+ * scored a VMAF on a soundtrack. So codec, bitrate, rate and channels are
+ * parameters here, and the panel offers them.
+ *
+ * `sampleRate` and `channels` are absent unless asked for, and that absence is
+ * load-bearing: emitting `-ar 48000` on a 44.1kHz source resamples it, so a
+ * field nobody touched has to produce *no flag*, not a flag carrying the
+ * number the source already had. See `resolveOutput` in kernel/renderSettings.
+ *
+ * @param {{ cq?: number, gop?: number, audio?: { codec?: string,
+ *   bitrate?: number, sampleRate?: number, channels?: number } }} [options]
  * @returns {string[]}
  */
 export function encodeArgs(options = {}) {
+  const audio = options.audio ?? {}
   return [
     '-c:v', 'hevc_nvenc',
     // Quality-leaning preset. p7 measured no better on this material.
@@ -115,8 +130,10 @@ export function encodeArgs(options = {}) {
      */
     '-pix_fmt', 'p010le',
     '-tag:v', 'hvc1',
-    '-c:a', 'aac',
-    '-b:a', AUDIO_BITRATE,
+    '-c:a', audio.codec ?? 'aac',
+    '-b:a', audio.bitrate ? `${audio.bitrate}k` : AUDIO_BITRATE,
+    ...(audio.sampleRate ? ['-ar', String(audio.sampleRate)] : []),
+    ...(audio.channels ? ['-ac', String(audio.channels)] : []),
     /*
      * Data streams dropped. Fujifilm files carry a timecode track that survives
      * into the mp4 as a stream of codec `unknown`, which some players stumble
@@ -212,6 +229,7 @@ export function atempoChain(speed) {
  * @param {number} [job.speed] how fast the source runs; 1 when untouched
  * @param {number} [job.frameRate] rate to force, or undefined to keep the source's
  * @param {boolean} [job.silent] write no audio stream
+ * @param {{width:number,height:number}} [job.scale] fit and pad the picture to this
  * @param {boolean} [job.video] false to write no video stream
  * @param {{ cq?: number, gop?: number }} [options]
  * @returns {string[]}
@@ -226,8 +244,31 @@ export function cutArgs(job, options = {}) {
   // span the clip covers, rather than the whole rest of the file.
   if (stretched) args.push('-t', (job.duration * speed).toFixed(6))
   args.push('-i', job.source)
+  /*
+   * The video filter chain, which has two possible reasons to exist.
+   *
+   * `scale` is absent unless someone typed a size — the archive encode has
+   * none on purpose, because 4K staying 4K is most of what 4K b-roll is for.
+   * When it is present it fits *inside* the box and pads out to it rather than
+   * stretching, for the same reason the compositor does: a clip is not
+   * deformed to match a number someone typed.
+   *
+   * It also goes **after** the decode, which is where rotation has already
+   * been applied — so `scale` sees the displayed shape. This is the flag the
+   * note at the top of this file warns about: an explicit scale that used
+   * coded dimensions would squash two files in five in this library.
+   */
+  const chain = []
+  if (stretched) chain.push(`setpts=PTS/${speed}`)
+  if (job.scale) {
+    const { width, height } = job.scale
+    chain.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease`)
+    chain.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`)
+    chain.push('setsar=1')
+  }
+  if (chain.length > 0) args.push('-filter:v', chain.join(','))
+
   if (stretched) {
-    args.push('-filter:v', `setpts=PTS/${speed}`)
     // No point retiming a stream that is about to be dropped, and an audio
     // filter on a job with `-an` is a warning on every encode for nothing.
     if (!job.silent) args.push('-filter:a', atempoChain(speed))

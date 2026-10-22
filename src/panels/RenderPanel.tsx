@@ -149,6 +149,73 @@ function Section({
   )
 }
 
+/**
+ * A field that follows the sequence until someone takes it over.
+ *
+ * Empty means **inherit**, and the inherited value is shown as the
+ * placeholder, so the box is never blank — "what will this be?" is answered
+ * whether or not anyone has typed in it. Type a number and it is yours; the
+ * field says so, and offers the way back.
+ *
+ * The way back matters more than it looks. Without it the only route from
+ * "1920" to "follow the sequence" is selecting the text and deleting it, which
+ * nobody discovers, so every field anyone ever touches stays touched forever.
+ */
+function Inherited({
+  label,
+  value,
+  follows,
+  unit,
+  hint,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: number | null
+  /** What it is when nobody has typed in it. */
+  follows: number | string
+  unit?: string
+  hint?: string
+  disabled?: boolean
+  onChange: (next: number | null) => void
+}) {
+  const taken = value !== null
+  return (
+    <label className={`render-field${taken ? ' render-field--taken' : ''}`}>
+      <span className="render-label">
+        {label}
+        {taken && (
+          <button
+            className="render-revert"
+            title="Follow the sequence again"
+            disabled={disabled}
+            onClick={(e) => {
+              e.preventDefault()
+              onChange(null)
+            }}
+          >
+            follow
+          </button>
+        )}
+      </span>
+      <input
+        type="number"
+        value={value ?? ''}
+        placeholder={String(follows)}
+        disabled={disabled}
+        onChange={(e) => {
+          const next = e.target.value.trim()
+          onChange(next === '' ? null : Number(next))
+        }}
+      />
+      <span className="render-hint">
+        {taken ? `${value}${unit ?? ''} — yours.` : `Following: ${follows}${unit ?? ''}.`}
+        {hint ? ` ${hint}` : ''}
+      </span>
+    </label>
+  )
+}
+
 export function RenderPanel() {
   const [settings, setSettings] = useState<RenderSettings>(getRenderSettings)
   const [jobs, setJobs] = useState<readonly QueuedJob[]>(getQueue)
@@ -332,17 +399,37 @@ export function RenderPanel() {
               and a disabled control implying otherwise would be worse than
               none. What it is is stated instead.
             */}
+            <Inherited
+              label="Width"
+              value={settings.width}
+              follows={oneFile ? sequence.settings.width : 'each source'}
+              disabled={rendering}
+              hint="Fitted and padded, never stretched."
+              onChange={(width) => updateRenderSettings({ width })}
+            />
+            <Inherited
+              label="Height"
+              value={settings.height}
+              follows={oneFile ? sequence.settings.height : 'each source'}
+              disabled={rendering}
+              hint={
+                settings.width || settings.height
+                  ? 'Both are needed before anything is scaled.'
+                  : '4K stays 4K while these are left alone.'
+              }
+              onChange={(height) => updateRenderSettings({ height })}
+            />
+
             {oneFile ? (
-              <div className="render-field">
-                <span className="render-label">Frame</span>
-                <p className="render-value render-value--mono">
-                  {sequence.settings.width}×{sequence.settings.height} · {sequence.settings.frameRate}fps
-                </p>
-                <span className="render-hint">
-                  The sequence's own, which is what a composite is rendered into. Change it in
-                  Sequence settings. Every layer is resampled to this rate.
-                </span>
-              </div>
+              <Inherited
+                label="Frame rate"
+                value={settings.fps}
+                follows={sequence.settings.frameRate}
+                unit=" fps"
+                disabled={rendering}
+                hint="Every layer is resampled to this."
+                onChange={(fps) => updateRenderSettings({ fps })}
+              />
             ) : (
               <label className="render-field">
                 <span className="render-label">Frame rate</span>
@@ -357,11 +444,29 @@ export function RenderPanel() {
                   <option value="sequence">Conform to the sequence ({sequence.settings.frameRate})</option>
                 </select>
                 <span className="render-hint">
-                  {settings.frameRate === 'source'
-                    ? 'Mixed 25/29.97/50fps footage stays as shot, so slow motion survives.'
-                    : 'Everything is resampled to the sequence rate. Slow motion shot at 50fps will lose frames.'}
+                  {settings.fps
+                    ? `Overridden by the ${settings.fps}fps below.`
+                    : settings.frameRate === 'source'
+                      ? 'Mixed 25/29.97/50fps footage stays as shot, so slow motion survives.'
+                      : 'Everything is resampled to the sequence rate. Slow motion shot at 50fps will lose frames.'}
                 </span>
               </label>
+            )}
+
+            {/*
+              Offered in both modes, because a number that silently beats the
+              policy above is a trap if there is nowhere to see or clear it.
+            */}
+            {!oneFile && (
+              <Inherited
+                label="Force a rate"
+                value={settings.fps}
+                follows="the policy"
+                unit={settings.fps ? ' fps' : ''}
+                disabled={rendering}
+                hint="Wins over the choice above. A silent conform is what the verifier exists to catch, so this one is yours to mean."
+                onChange={(fps) => updateRenderSettings({ fps })}
+              />
             )}
           </div>
 
@@ -386,27 +491,60 @@ export function RenderPanel() {
             hint="Silent — every output will be written with no audio stream."
           >
             <div className="render-fields">
-              <div className="render-field">
+              <label className="render-field">
                 <span className="render-label">Format</span>
-                <p className="render-value render-value--mono">AAC · 192 kbps</p>
+                <select
+                  value={settings.audioCodec ?? 'aac'}
+                  disabled={rendering}
+                  onChange={(e) => updateRenderSettings({ audioCodec: e.target.value })}
+                >
+                  <option value="aac">AAC</option>
+                </select>
                 <span className="render-hint">
-                  Not yet a choice. Format, bitrate, sample rate and channels become fields that
-                  follow the sequence until you change one.
+                  The only one wired up. AAC in mp4 plays everywhere this archive has to be
+                  readable, which is the whole requirement.
                 </span>
-              </div>
-              <div className="render-field">
-                <span className="render-label">From the sequence</span>
-                <p className="render-value render-value--mono">
-                  {sequence.settings.audio.sampleRate / 1000}kHz ·{' '}
-                  {sequence.settings.audio.channels === 1 ? 'mono' : 'stereo'}
-                </p>
-                <span className="render-hint">
-                  {oneFile
-                    ? 'The mixdown follows the fader, mute and solo on every audio track.'
-                    : 'A clip whose track is muted, or not soloed, is written with no sound at all.'}
-                </span>
-              </div>
+              </label>
+
+              <Inherited
+                label="Bitrate"
+                value={settings.audioBitrate}
+                follows={192}
+                unit=" kbps"
+                disabled={rendering}
+                hint="Chosen rather than measured — the encode tests scored pictures, not sound."
+                onChange={(audioBitrate) => updateRenderSettings({ audioBitrate })}
+              />
+
+              <Inherited
+                label="Sample rate"
+                value={settings.audioSampleRate}
+                follows={oneFile ? sequence.settings.audio.sampleRate : 'each source'}
+                unit={oneFile ? ' Hz' : ''}
+                disabled={rendering}
+                hint={
+                  oneFile
+                    ? 'The mixdown already resamples to this.'
+                    : 'Left alone, a 44.1kHz source stays 44.1. Setting it resamples every clip.'
+                }
+                onChange={(audioSampleRate) => updateRenderSettings({ audioSampleRate })}
+              />
+
+              <Inherited
+                label="Channels"
+                value={settings.audioChannels}
+                follows={oneFile ? sequence.settings.audio.channels : 'each source'}
+                disabled={rendering}
+                hint={oneFile ? '1 is mono, 2 is stereo.' : 'Setting it downmixes every clip.'}
+                onChange={(audioChannels) => updateRenderSettings({ audioChannels })}
+              />
             </div>
+
+            <p className="batch-note">
+              {oneFile
+                ? 'The mixdown follows the fader, mute and solo on every audio track.'
+                : 'A clip whose track is muted, or not soloed, is written with no sound at all.'}
+            </p>
           </Section>
 
           <Section
