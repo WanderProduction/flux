@@ -142,9 +142,11 @@ export function startUpdates() {
     /*
      * An unreachable feed is not a broken app.
      *
-     * This is the common case — offline, or the update server down — and it
-     * must not read as something being wrong with FLUX itself. It is reported
-     * where someone can see it and otherwise ignored.
+     * This is the common case — offline, or the update server simply not
+     * running — and it must not read as something being wrong with FLUX
+     * itself. It is recorded here and deliberately not shown; see updateLabel
+     * in src/kernel/updates.ts for why a standing failure in the status bar
+     * would be worse than silence.
      */
     publish({ state: 'error', error: String(err?.message ?? err) }),
   )

@@ -92,7 +92,19 @@ export function updateLabel(status: UpdateStatus): string | null {
     case 'ready':
       return `${status.version} ready — restart to install`
     case 'error':
-      return 'update check failed'
+      /*
+       * Nothing. A feed that cannot be reached is the *resting state* of a
+       * FLUX whose updates come off a folder on one machine — the server is
+       * only running when someone is shipping a build, so an app that said
+       * "update check failed" would say it on nearly every launch.
+       *
+       * That is the same argument as the one against a permanent "up to
+       * date", and it bites harder: a standing failure in the one line that
+       * reports real problems teaches you to stop reading it. The error is
+       * kept in the state rather than thrown away, so a deliberate check can
+       * still answer for itself.
+       */
+      return null
     default:
       return null
   }

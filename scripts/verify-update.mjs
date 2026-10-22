@@ -315,14 +315,23 @@ try {
   serving.server.kill()
   serving = null
 
-  await check('an unreachable feed is reported, and FLUX still runs', async () => {
+  await check('an unreachable feed is recorded, shown nowhere, and FLUX still runs', async () => {
     clearUpdaterCache()
-    const { status } = await runAgainst(`http://127.0.0.1:${DEAD_PORT}/`, {
+    const { status, badge } = await runAgainst(`http://127.0.0.1:${DEAD_PORT}/`, {
       until: (s) => s.state === 'error',
       timeoutMs: 45_000,
     })
     assert.equal(status.state, 'error', `ended in "${status.state}" with no server to talk to`)
     assert.ok(status.error, 'an error state with no error in it')
+    /*
+     * And says nothing about it.
+     *
+     * With a feed served off a folder on one machine, the server is only up
+     * when someone is shipping — so this is the state of nearly every launch,
+     * and an app that announced it would be announcing it permanently. Pinned
+     * because it is a decision, not an oversight: see updateLabel.
+     */
+    assert.equal(badge, null, `a failed check put "${badge}" in the interface`)
   })
 } finally {
   serving?.server.kill()

@@ -121,8 +121,11 @@ npm run verify:update
 
 That drives the packaged app against three feeds — one offering the version already running, one
 offering a newer build, and one that is not there — and checks it says the right thing to each,
-including that an unreachable feed is reported and FLUX keeps working. An editor that would not
-start because a release server was down would be a far worse bug than never updating at all.
+including that an unreachable feed leaves FLUX working and says nothing about it. A feed served
+off a folder is only up when someone is shipping, so a failed check is the state of nearly every
+launch — and a standing failure in the one line that reports real problems teaches you to stop
+reading it. The error is kept in the state, not thrown away. And an editor that would not start
+because a release server was down would be a far worse bug than one that never updated at all.
 
 > **Pick a port that is actually free.** The default is 8911 rather than something tidier,
 > because 8788 — the first choice — is what `wrangler pages dev` listens on, and on a machine that

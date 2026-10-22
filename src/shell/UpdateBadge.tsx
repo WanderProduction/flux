@@ -40,9 +40,8 @@ export function UpdateBadge() {
   /*
    * Only the staged state is a button.
    *
-   * A download in progress has nothing to click — pressing it could only mean
-   * "hurry up" — and a failed check is a fact, not an action: retrying is what
-   * the next launch does anyway.
+   * A download in progress has nothing to click: pressing it could only mean
+   * "hurry up". A failed check is not shown at all — see updateLabel.
    */
   if (status.state === 'ready') {
     return (
