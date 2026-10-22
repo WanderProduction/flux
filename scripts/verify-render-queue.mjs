@@ -66,6 +66,13 @@ if (!tools.ok) {
   process.exit(1)
 }
 
+/** `30000/1001` -> 29.97. */
+function rateOf(text) {
+  const [num, den] = String(text ?? '').split('/').map(Number)
+  if (!den) return num || 0
+  return num / den
+}
+
 /** Whether a written file carries any sound. Asked of the file, not the plan. */
 async function hasSound(file) {
   const { stdout } = await run(
@@ -624,6 +631,156 @@ try {
     assert.equal(state.queued, 3, 'the selection did not reach the queue')
     assert.deepEqual(state.statuses, ['waiting'])
     assert.equal(state.workspace, 'export', 'it queued but did not go and show you')
+  })
+
+  // ── fields that follow until they are touched ─────────────────
+
+  /** Everything about a written file's streams that a field could have moved. */
+  async function factsOf(file) {
+    const { stdout } = await run(
+      tools.ffprobe,
+      ['-v', 'error', '-show_entries',
+       'stream=codec_type,codec_name,width,height,sample_rate,channels,r_frame_rate',
+       '-print_format', 'json', '--', file],
+      { maxBuffer: 8 << 20 },
+    )
+    const streams = JSON.parse(stdout).streams ?? []
+    const v = streams.find((s) => s.codec_type === 'video')
+    const a = streams.find((s) => s.codec_type === 'audio')
+    return {
+      width: v?.width ?? 0,
+      height: v?.height ?? 0,
+      // `30000/1001`, not a decimal — a rate is a ratio in the container.
+      rate: v ? rateOf(v.r_frame_rate) : 0,
+      sampleRate: a ? Number(a.sample_rate) : 0,
+      channels: a?.channels ?? 0,
+      audioCodec: a?.codec_name ?? null,
+    }
+  }
+
+  /** Renders clips[0] once with the given settings and reads the file back. */
+  const renderWith = (patch) =>
+    evaluate(
+      cdp,
+      SEED +
+        `renderSettings.updateRenderSettings({
+           mode: 'clips', video: true, audio: true, resume: false,
+           width: null, height: null, fps: null,
+           audioBitrate: null, audioSampleRate: null, audioChannels: null,
+           ...${JSON.stringify(patch)},
+         });
+         selection.setSelection(new Set([clips[0].id]));
+         renderQueue.clear();
+         renderQueue.add('selection');
+         const job = renderQueue.getQueue()[0];
+         const result = await renderQueue.start();
+         const row = renderQueue.getQueue()[0];
+         renderSettings.updateRenderSettings({
+           width: null, height: null, fps: null,
+           audioBitrate: null, audioSampleRate: null, audioChannels: null,
+         });
+         return {
+           result, status: row.status, error: row.error, output: row.output,
+           jobScale: job.scale ?? null, jobRate: job.frameRate ?? null,
+           source: job.source,
+         };`,
+    )
+
+  await check('an untouched field changes nothing about the file', async () => {
+    /*
+     * The baseline the next three are measured against, and a real check in
+     * itself: "follow the sequence" has to mean *emit no flag*, because
+     * emitting the number the source already has is not the same thing. On a
+     * 44.1kHz source `-ar 48000` is a resample, and a field nobody touched
+     * must not resample anything.
+     */
+    const state = await renderWith({})
+    assert.ok(state.result.ok, `start refused: ${state.result.error}`)
+    assert.equal(state.status, 'done', `ended as ${state.status}: ${state.error}`)
+    assert.equal(state.jobScale, null, 'an untouched size produced a scale')
+    const [out, src] = [await factsOf(state.output), await factsOf(state.source)]
+    assert.equal(out.width, src.width, 'the picture changed size on its own')
+    assert.equal(out.height, src.height)
+    assert.equal(
+      out.sampleRate,
+      src.sampleRate,
+      'the sound was resampled by a field nobody touched',
+    )
+    assert.equal(out.channels, src.channels, 'the channels were changed on their own')
+    console.log(
+      `       ${src.width}x${src.height} ${src.sampleRate}Hz ${src.channels}ch — unchanged`,
+    )
+  })
+
+  await check('a size that was typed is the size that comes out', async () => {
+    const state = await renderWith({ width: 640, height: 360 })
+    assert.ok(state.result.ok, `start refused: ${state.result.error}`)
+    assert.equal(state.status, 'done', `ended as ${state.status}: ${state.error}`)
+    assert.deepEqual(state.jobScale, { width: 640, height: 360 })
+    const out = await factsOf(state.output)
+    assert.equal(out.width, 640, `came out ${out.width} wide`)
+    assert.equal(out.height, 360, `came out ${out.height} high`)
+    /*
+     * And the verifier agreed, which is the half that could have been missed:
+     * it compares against the *source's* displayed size by default, so a job
+     * that scaled would fail every check unless it is told what it asked for.
+     */
+    console.log(`       scaled to ${out.width}x${out.height}, and verified against it`)
+  })
+
+  await check('one dimension on its own scales nothing', async () => {
+    /*
+     * Half a size is not a size. Scaling to a width and the source's height
+     * would deform every clip, and refusing to scale is the answer that
+     * cannot be wrong — the panel says both are needed.
+     */
+    const state = await renderWith({ width: 640 })
+    assert.equal(state.jobScale, null, 'a width with no height produced a scale')
+    assert.equal(state.status, 'done')
+    const [out, src] = [await factsOf(state.output), await factsOf(state.source)]
+    assert.equal(out.width, src.width, 'it scaled anyway')
+  })
+
+  await check('typed audio settings reach the file', async () => {
+    const state = await renderWith({ audioBitrate: 320, audioSampleRate: 44100, audioChannels: 1 })
+    assert.ok(state.result.ok, `start refused: ${state.result.error}`)
+    assert.equal(state.status, 'done', `ended as ${state.status}: ${state.error}`)
+    const out = await factsOf(state.output)
+    assert.equal(out.sampleRate, 44100, `came out at ${out.sampleRate}Hz`)
+    assert.equal(out.channels, 1, `came out ${out.channels} channels`)
+    assert.equal(out.audioCodec, 'aac')
+    console.log(`       ${out.sampleRate}Hz ${out.channels}ch aac`)
+  })
+
+  await check('a typed rate beats the frame-rate policy', async () => {
+    const state = await renderWith({ frameRate: 'source', fps: 30 })
+    assert.equal(state.jobRate, 30, `the job asked for ${state.jobRate}fps`)
+    assert.equal(state.status, 'done', `ended as ${state.status}: ${state.error}`)
+    const out = await factsOf(state.output)
+    assert.ok(Math.abs(out.rate - 30) < 0.01, `came out at ${out.rate}fps`)
+  })
+
+  await check('null survives the clamps, because it is an answer', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { renderSettings } = window.__fluxDev;
+       renderSettings.updateRenderSettings({ width: 1921, height: 1081, audioChannels: 99, fps: null });
+       const clamped = { ...renderSettings.getRenderSettings() };
+       renderSettings.updateRenderSettings({ width: null, height: null, audioChannels: null });
+       const cleared = { ...renderSettings.getRenderSettings() };
+       return {
+         clamped: { w: clamped.width, h: clamped.height, ch: clamped.audioChannels, fps: clamped.fps },
+         cleared: { w: cleared.width, h: cleared.height, ch: cleared.audioChannels },
+       };`,
+    )
+    // Odd dimensions are not a slightly wrong size, they are a frame yuv420p
+    // cannot carry — so they are rounded rather than refused.
+    assert.deepEqual(state.clamped, { w: 1920, h: 1080, ch: 8, fps: null })
+    assert.deepEqual(
+      state.cleared,
+      { w: null, h: null, ch: null },
+      'clearing a field left a number behind, so nothing can go back to following',
+    )
   })
 
   await check('the queue survives being saved and read back', async () => {

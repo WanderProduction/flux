@@ -75,7 +75,7 @@ export interface RenderSummary extends QueueState {
 export interface RenderConfig {
   outDir: string
   concurrency?: number
-  options?: { cq?: number; gop?: number }
+  options?: { cq?: number; gop?: number; audio?: { codec?: string; bitrate?: number; sampleRate?: number; channels?: number } }
   /** Skip outputs that already exist and verify. Defaults to true. */
   resume?: boolean
 }

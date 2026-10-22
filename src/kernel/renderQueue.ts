@@ -38,7 +38,7 @@
 import { getAsset } from './assets'
 import { getSequence, type Clip, type SequenceState } from './sequence'
 import { getSelection } from './selection'
-import { getRenderSettings } from './renderSettings'
+import { getRenderSettings, resolveOutput } from './renderSettings'
 import { planExport, type ExportJob, type SkippedClip } from './batchExport'
 import { isSequenceJob, planSequence, type SequenceJob } from './sequenceExport'
 import { onRenderEvent, startRender, cancelRender, type QueueEvent } from './renderBridge'
@@ -163,11 +163,24 @@ export function previewAdd(scope: AddScope): {
 } {
   const settings = getRenderSettings()
   const sequence = getSequence()
+  /*
+   * Resolved once, here, and handed to whichever planner runs. Both need the
+   * same answer to "what did the fields that nobody touched turn out to be",
+   * and working it out twice is how two modes end up disagreeing about it.
+   */
+  const output = resolveOutput(settings, {
+    width: sequence.settings.width,
+    height: sequence.settings.height,
+    frameRate: sequence.settings.frameRate,
+    sampleRate: sequence.settings.audio.sampleRate,
+    channels: sequence.settings.audio.channels,
+  })
 
   if (scope === 'one-file') {
     const plan = planSequence(settings.outDir ?? '', sequence, {
       video: settings.video,
       audio: settings.audio,
+      output,
     })
     return {
       jobs: plan.job ? [plan.job] : [],
@@ -180,6 +193,7 @@ export function previewAdd(scope: AddScope): {
     frameRate: settings.frameRate,
     video: settings.video,
     audio: settings.audio,
+    output,
   })
   if (scope === 'sequence') return { jobs: plan.jobs, skipped: plan.skipped }
 
@@ -287,7 +301,25 @@ export async function start(): Promise<{ ok: boolean; error?: string }> {
     const result = await startRender(waiting, {
       outDir: settings.outDir,
       concurrency: settings.concurrency,
-      options: { cq: settings.cq, gop: settings.gop },
+      /*
+       * Resolved at Start rather than carried on each row, and that is the one
+       * place this breaks the snapshot rule on purpose. The audio format is a
+       * property of *this run* — one output folder, one set of files someone
+       * is about to go and use — where a clip's range is a property of the
+       * edit it came from. Freezing 192k onto a row added last week would
+       * mean changing the bitrate silently failed to apply to half the queue.
+       */
+      options: {
+        cq: settings.cq,
+        gop: settings.gop,
+        audio: resolveOutput(settings, {
+          width: getSequence().settings.width,
+          height: getSequence().settings.height,
+          frameRate: getSequence().settings.frameRate,
+          sampleRate: getSequence().settings.audio.sampleRate,
+          channels: getSequence().settings.audio.channels,
+        }).audio,
+      },
       resume: settings.resume,
     })
     if (!result.ok) return { ok: false, error: result.error }

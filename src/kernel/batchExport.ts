@@ -19,7 +19,7 @@ import {
   type Clip,
   type SequenceState,
 } from './sequence'
-import type { FrameRatePolicy } from './renderSettings'
+import type { FrameRatePolicy, ResolvedOutput } from './renderSettings'
 
 export interface ExportJob {
   /**
@@ -104,6 +104,8 @@ export interface ExportJob {
    * well change before pressing Start.
    */
   video: boolean
+  /** Fit and pad the picture to this. Absent leaves every source its own size. */
+  scale?: { width: number; height: number }
 }
 
 export interface SkippedClip {
@@ -222,17 +224,31 @@ function nameJobs(clips: Clip[], outDir: string): Map<string, string> {
 export function planExport(
   outDir: string,
   sequence: SequenceState = getSequence(),
-  options: { frameRate?: FrameRatePolicy; video?: boolean; audio?: boolean } = {},
+  options: {
+    frameRate?: FrameRatePolicy
+    video?: boolean
+    audio?: boolean
+    /** Resolved overrides — see resolveOutput in kernel/renderSettings.ts. */
+    output?: ResolvedOutput
+  } = {},
 ): ExportPlan {
   // Both default on, so a caller that asks for nothing gets what it used to.
   const wantsVideo = options.video !== false
   const wantsAudio = options.audio !== false
+  const scale = options.output?.scale
   /*
    * `sequence` conforms every clip to the sequence's rate; `source` leaves each
    * one at the rate it was shot, which is the default and the one an archive
    * wants. See kernel/renderSettings.ts for why that default is not a coin flip.
    */
-  const conformTo = options.frameRate === 'sequence' ? sequence.settings.frameRate : null
+  /*
+   * A typed rate beats the policy, because it is the more specific statement
+   * of the same thing: the policy says *where* to get a rate from, and this
+   * says what it is. Null leaves the policy in charge, which is the default.
+   */
+  const conformTo =
+    options.output?.fps ??
+    (options.frameRate === 'sequence' ? sequence.settings.frameRate : null)
 
   const videoTracks = new Set(
     sequence.tracks.filter((track) => track.kind === 'video').map((track) => track.id),
@@ -393,9 +409,15 @@ export function planExport(
         : Math.abs(clip.speed - 1) > 1e-9
           ? { frameRate: sequence.settings.frameRate }
           : {}),
-      wholeFile,
+      /*
+       * A scaled cut is never "the whole file" for the purposes of the
+       * never-write-a-bigger-file rule. That rule falls back to keeping the
+       * original, and the original is the size someone just asked it not to be.
+       */
+      wholeFile: wholeFile && !scale,
       silent,
       video: wantsVideo,
+      ...(scale ? { scale } : {}),
     })
   }
 

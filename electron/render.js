@@ -328,10 +328,15 @@ export async function verify(ffprobe, job, source) {
    * Against the *displayed* size. ffmpeg bakes rotation into the pixels, so a
    * rotated source legitimately changes shape here and comparing coded sizes
    * would fail two files in five.
+   *
+   * Unless a scale was asked for, in which case that is the size to check —
+   * a job told to produce 1920x1080 is wrong if it produced the source's
+   * shape, however faithfully.
    */
-  if (facts.width !== source.display.width || facts.height !== source.display.height) {
+  const wantedSize = job.scale ?? source.display
+  if (facts.width !== wantedSize.width || facts.height !== wantedSize.height) {
     problems.push(
-      `size is ${facts.width}x${facts.height}, expected ${source.display.width}x${source.display.height}`,
+      `size is ${facts.width}x${facts.height}, expected ${wantedSize.width}x${wantedSize.height}`,
     )
   }
 

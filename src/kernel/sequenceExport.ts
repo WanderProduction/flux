@@ -40,6 +40,7 @@ import { getAsset } from './assets'
 import { trackLevel } from './media/mixer'
 import { getSequence, isTrackVisible, type SequenceState } from './sequence'
 import type { SkippedClip } from './batchExport'
+import type { ResolvedOutput } from './renderSettings'
 import { safeFolderName } from '../../shared/projectNaming.js'
 
 /** One clip, resolved to a span of a file and a place in the sequence. */
@@ -151,7 +152,7 @@ export function lengthOf(sequence: SequenceState): number {
 export function planSequence(
   outDir: string,
   sequence: SequenceState = getSequence(),
-  options: { video?: boolean; audio?: boolean } = {},
+  options: { video?: boolean; audio?: boolean; output?: ResolvedOutput } = {},
 ): SequencePlan {
   // Both default on, so a caller that asks for nothing gets what it used to.
   const wantsVideo = options.video !== false
@@ -267,12 +268,19 @@ export function planSequence(
       id: `seq:${sequence.id}`,
       name: sequence.name,
       output: join(outDir, `${safeFolderName(sequence.name)}.mp4`),
-      width: sequence.settings.width,
-      height: sequence.settings.height,
-      frameRate: sequence.settings.frameRate,
+      /*
+       * The overrides *replace* the sequence's own numbers rather than sitting
+       * beside them, which is what makes a composite simple: there is one
+       * frame, and whatever decided it, the graph composites into it and the
+       * verifier checks against it. `resolveOutput` has already folded the
+       * sequence's values in where nothing was typed.
+       */
+      width: options.output?.scale?.width ?? sequence.settings.width,
+      height: options.output?.scale?.height ?? sequence.settings.height,
+      frameRate: options.output?.fps ?? sequence.settings.frameRate,
       duration,
-      sampleRate: sequence.settings.audio.sampleRate,
-      channels: sequence.settings.audio.channels,
+      sampleRate: options.output?.audio.sampleRate ?? sequence.settings.audio.sampleRate,
+      channels: options.output?.audio.channels ?? sequence.settings.audio.channels,
       withVideo: wantsVideo,
       video,
       audio,
