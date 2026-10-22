@@ -614,7 +614,10 @@ try {
       SEED +
         `const { commands, view } = window.__fluxDev;
          renderSettings.updateRenderSettings({ mode: 'clips', video: true, audio: true });
-         view.recordView({ workspace: 'edit' });
+         // The command, not recordView: recording the id does not move any
+         // panels, so the next switch can think it is already where it is going.
+         await commands.run('workspace.switch.edit');
+         await new Promise(r => setTimeout(r, 400));
          renderQueue.clear();
          selection.setSelection(new Set(clips.slice(0, 3).map(c => c.id)));
          await commands.run('render.send');
@@ -780,6 +783,168 @@ try {
       state.cleared,
       { w: null, h: null, ch: null },
       'clearing a field left a number behind, so nothing can go back to following',
+    )
+  })
+
+  // ── the marked span ───────────────────────────────────────────
+
+  await check('slash marks exactly the span the selected clips occupy', async () => {
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `const { commands, view } = window.__fluxDev;
+         /*
+          * The Timeline has to be on screen: its commands are registered while
+          * it is mounted and disposed when it is not, which is the same rule
+          * every panel follows. An earlier check leaves the app in the Export
+          * workspace, where there is no Timeline — and pressing / there does
+          * nothing, correctly.
+          */
+         await commands.run('panel.focus.timeline');
+         await new Promise(r => setTimeout(r, 500));
+         sequence.clearRange();
+         selection.setSelection(new Set([clips[1].id, clips[2].id]));
+         await commands.run('timeline.markSelection');
+         const range = sequence.renderRange();
+         return {
+           range: { start: range.start, end: range.end, marked: range.marked },
+           wanted: { start: clips[1].start, end: clips[2].start + clips[2].duration },
+           whole: sequence.sequenceDuration(),
+         };`,
+    )
+    assert.equal(state.range.marked, true, 'nothing was marked')
+    assert.ok(
+      Math.abs(state.range.start - state.wanted.start) < 1e-6,
+      `in landed at ${state.range.start}, expected ${state.wanted.start}`,
+    )
+    assert.ok(
+      Math.abs(state.range.end - state.wanted.end) < 1e-6,
+      `out landed at ${state.range.end}, expected ${state.wanted.end}`,
+    )
+    assert.ok(state.range.end < state.whole, 'setup: the span should be shorter than the sequence')
+  })
+
+  await check('a marked span renders only what is inside it, trimmed to it', async () => {
+    /*
+     * Both halves matter and they fail differently. Clips wholly outside are
+     * *dropped* — and named, so a queue that suddenly has two rows instead of
+     * four has an answer on screen. A clip straddling a mark is *trimmed*,
+     * which moves its source in point by the same amount: the frames before
+     * the mark are not wanted, and `offset` is where the cut starts in the
+     * file.
+     */
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `const { batchExport, sequenceExport } = window.__fluxDev;
+         sequence.clearRange();
+         const whole = {
+           clips: batchExport.planExport('/out').jobs.length,
+           seq: sequenceExport.planSequence('/out').job.duration,
+         };
+
+         // A span that starts halfway through one clip and ends halfway
+         // through the next but one.
+         const from = clips[1].start + clips[1].duration / 2;
+         const to = clips[2].start + clips[2].duration / 2;
+         sequence.setRange(from, to);
+
+         const cut = batchExport.planExport('/out');
+         const seq = sequenceExport.planSequence('/out').job;
+         sequence.clearRange();
+
+         return {
+           whole,
+           from, to,
+           jobs: cut.jobs.length,
+           outside: cut.skipped.filter(s => s.reason === 'outside').length,
+           first: { duration: cut.jobs[0].duration, offset: cut.jobs[0].offset },
+           source: { duration: clips[1].duration, offset: clips[1].offset },
+           seqDuration: seq.duration,
+           seqFirstStart: seq.video[0].start,
+         };`,
+    )
+    const span = state.to - state.from
+    assert.ok(state.whole.clips > state.jobs, 'the span did not drop anything')
+    assert.ok(state.outside > 0, 'clips outside the span were dropped without being named')
+
+    // The straddling clip keeps only its second half, and reads it from the
+    // middle of the file rather than the top.
+    const expectedHead = state.source.duration / 2
+    assert.ok(
+      Math.abs(state.first.duration - expectedHead) < 0.05,
+      `the straddling clip rendered ${state.first.duration}s, expected ${expectedHead}s`,
+    )
+    assert.ok(
+      Math.abs(state.first.offset - (state.source.offset + expectedHead)) < 0.05,
+      `its source in point is ${state.first.offset}, so the trim moved the length but not the frames`,
+    )
+
+    // The composite is exactly the span, and starts at its beginning.
+    assert.ok(
+      Math.abs(state.seqDuration - span) < 1e-6,
+      `the composite is ${state.seqDuration}s, expected ${span}s`,
+    )
+    assert.ok(
+      Math.abs(state.seqFirstStart) < 1e-6,
+      `the first cut sits at ${state.seqFirstStart}s — the in point did not become zero`,
+    )
+    console.log(
+      `       ${state.whole.clips} clips -> ${state.jobs}, ` +
+        `composite ${state.whole.seq.toFixed(2)}s -> ${state.seqDuration.toFixed(2)}s`,
+    )
+  })
+
+  await check('clearing the marks renders the whole sequence again', async () => {
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `const { batchExport } = window.__fluxDev;
+         sequence.setRange(clips[1].start, clips[1].start + clips[1].duration);
+         const marked = batchExport.planExport('/out').jobs.length;
+         sequence.clearRange();
+         return {
+           marked,
+           cleared: batchExport.planExport('/out').jobs.length,
+           stillMarked: sequence.renderRange().marked,
+           all: clips.length,
+         };`,
+    )
+    assert.ok(state.marked < state.all, 'setup: the mark should have narrowed it')
+    assert.equal(state.stillMarked, false, 'the marks did not clear')
+    assert.equal(state.cleared, state.all, 'clearing did not bring the other clips back')
+  })
+
+  await check('the marks are an edit, so they survive a save and reopen', async () => {
+    /*
+     * Written into the .fluxseq rather than held in memory, because "the part
+     * I am going to render" is a decision about this cut. Losing it on reopen
+     * would mean marking it again every session.
+     */
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `const { project } = window.__fluxDev;
+         sequence.setRange(clips[1].start, clips[2].start + clips[2].duration);
+         const before = sequence.renderRange();
+         await project.saveProject();
+         const root = project.getProject().root;
+         project.closeProject();
+         await new Promise(r => setTimeout(r, 250));
+         const opened = await project.openProject(root);
+         if (!opened.ok) throw new Error(opened.error);
+         await new Promise(r => setTimeout(r, 900));
+         const after = sequence.renderRange();
+         return {
+           before: { start: before.start, end: before.end },
+           after: { start: after.start, end: after.end, marked: after.marked },
+         };`,
+    )
+    assert.equal(state.after.marked, true, 'the marks did not survive the reopen')
+    assert.ok(
+      Math.abs(state.after.start - state.before.start) < 1e-6 &&
+        Math.abs(state.after.end - state.before.end) < 1e-6,
+      `came back as ${state.after.start}–${state.after.end}, was ${state.before.start}–${state.before.end}`,
     )
   })
 

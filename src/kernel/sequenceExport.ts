@@ -38,7 +38,7 @@
 
 import { getAsset } from './assets'
 import { trackLevel } from './media/mixer'
-import { getSequence, isTrackVisible, type SequenceState } from './sequence'
+import { getSequence, isTrackVisible, renderRange, type SequenceState } from './sequence'
 import type { SkippedClip } from './batchExport'
 import type { ResolvedOutput } from './renderSettings'
 import { safeFolderName } from '../../shared/projectNaming.js'
@@ -157,7 +157,15 @@ export function planSequence(
   // Both default on, so a caller that asks for nothing gets what it used to.
   const wantsVideo = options.video !== false
   const wantsAudio = options.audio !== false
-  const duration = lengthOf(sequence)
+  /*
+   * A composite of the marked span starts at the in point and is as long as
+   * the span — so every clip's placement moves back by the in point, and a
+   * clip straddling either mark is trimmed to it. The gap rule still holds
+   * inside it: time with nothing under it is black, including a gap the in
+   * point lands in the middle of.
+   */
+  const span = renderRange(sequence)
+  const duration = span.end - span.start
   const skipped: SkippedClip[] = []
 
   const video: SequenceCut[] = []
@@ -223,12 +231,32 @@ export function planSequence(
         continue
       }
 
+      /*
+       * Clipped to the span, then moved so the in point becomes zero. The
+       * head cut comes off the source's in point as well as the placement,
+       * multiplied by the speed — a stretched clip covers `speed` seconds of
+       * file per second of timeline, so skipping a second of timeline means
+       * skipping `speed` seconds of file.
+       */
+      const headCut = Math.max(0, span.start - clip.start)
+      const tailCut = Math.max(0, clip.start + clip.duration - span.end)
+      const covered = clip.duration - headCut - tailCut
+      if (!(covered > 0)) {
+        skipped.push({
+          id: clip.id,
+          name: asset.name,
+          reason: 'outside',
+          detail: 'outside the marked in and out points',
+        })
+        continue
+      }
+
       const cut: SequenceCut = {
         id: clip.id,
         source: asset.path,
-        start: clip.start,
-        duration: clip.duration,
-        offset: clip.offset,
+        start: clip.start + headCut - span.start,
+        duration: covered,
+        offset: clip.offset + headCut * clip.speed,
         speed: clip.speed,
       }
 
@@ -250,7 +278,7 @@ export function planSequence(
 
       video.push(cut)
       const share =
-        clip.sourceDuration > 0 ? Math.min(1, clip.duration / clip.sourceDuration) : 1
+        clip.sourceDuration > 0 ? Math.min(1, covered / clip.sourceDuration) : 1
       sourceBytes += Math.round((asset.size ?? 0) * share)
     }
   }

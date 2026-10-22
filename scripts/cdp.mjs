@@ -223,6 +223,17 @@ export async function resetProject(cdp) {
      // saved work cannot reappear after the next open.
      await project.saveProject();
 
+     /*
+      * Back to Edit, through the command rather than through the recorded id.
+      * There is more than one workspace now, so a suite can be handed an app
+      * sitting in Export — where there is no Content Browser and no Timeline,
+      * and every check that reaches for one fails for a reason that has
+      * nothing to do with what it is testing. setView records the id; only
+      * the command rebuilds the panels.
+      */
+     await commands.run('workspace.switch.edit');
+     await new Promise(r => setTimeout(r, 400));
+
      // Put the Content Browser back where a suite expects to find it.
      await commands.run('content.collapseTree');
      await commands.run('content.project');

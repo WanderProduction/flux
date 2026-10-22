@@ -2,6 +2,7 @@ import {
   defaultSettings,
   makeSettings,
   makeSequenceDocument,
+  readRange,
   mediaFor,
 } from '../../shared/sequenceFormat.js'
 
@@ -171,10 +172,32 @@ export interface SequenceSettings {
   preview: { codec: string; pixelFormat: string; scale: number; cacheFrames: boolean }
 }
 
+/**
+ * The span of the sequence a render is about, or null for all of it.
+ *
+ * In and out are kept separately rather than as one `{from, to}` because they
+ * are set separately — `I` and `O` land one each, and an in point with no out
+ * yet is an ordinary half-finished state rather than an invalid one. What
+ * resolves them into an actual span is `renderRange`, which fills a missing in
+ * with zero and a missing out with the end.
+ *
+ * They belong to the *sequence*, not to the render settings, for the same
+ * reason the timeline is the manifest: marking a span is an edit — it is a
+ * statement about this cut, it is what you were looking at, and it has to be
+ * in the document when you come back tomorrow.
+ */
+export interface SequenceRange {
+  /** Seconds, or null when nothing has been marked. */
+  inPoint: number | null
+  outPoint: number | null
+}
+
 export interface SequenceState {
   id: string
   name: string
   settings: SequenceSettings
+  /** The marked span. Absent on a document written before it existed. */
+  range?: SequenceRange
   tracks: Track[]
   clips: Clip[]
   createdAt: number
@@ -653,6 +676,7 @@ export function sequenceDocument(
     tracks: one.tracks,
     clips: one.clips,
     media: mediaFor(one.clips, assets),
+    range: one.range,
     appVersion,
   }) as Record<string, unknown>
 }
@@ -732,6 +756,9 @@ function normalise(next: SequenceState): SequenceState {
     name: next.name || 'Sequence 1',
     createdAt: next.createdAt || Date.now(),
     settings: makeSettings(raw) as SequenceSettings,
+    // Undefined when nothing was marked, which is also what a document from
+    // before the marks existed reads back as.
+    range: readRange((next as unknown as { range?: unknown }).range),
     tracks,
     clips,
   }
@@ -2251,6 +2278,115 @@ export function removeClips(ids: string[]): number {
 export function sequenceDuration(): number {
   const pinned = sequence.settings.duration
   return pinned > 0 ? pinned : contentDuration()
+}
+
+// ── the marked span ───────────────────────────────────────────────
+
+/**
+ * The in and out points as an actual span, with the gaps filled in.
+ *
+ * A missing in is the start and a missing out is the end, so "nothing marked"
+ * and "the whole sequence" are the same answer — which is what lets every
+ * caller ask one question instead of four. `marked` is what tells them apart
+ * when it matters, which is only ever for saying so on screen.
+ */
+export function renderRange(
+  sequence: SequenceState = getSequenceFor(),
+): { start: number; end: number; marked: boolean } {
+  const whole = lengthOfSequence(sequence)
+  const inPoint = sequence.range?.inPoint ?? null
+  const outPoint = sequence.range?.outPoint ?? null
+  const start = Math.max(0, Math.min(inPoint ?? 0, whole))
+  const end = Math.max(start, Math.min(outPoint ?? whole, whole))
+  return { start, end, marked: inPoint !== null || outPoint !== null }
+}
+
+/** The active sequence, for defaults above. Named apart to avoid shadowing. */
+function getSequenceFor(): SequenceState {
+  return sequence
+}
+
+/** How long a given sequence is, pinned length or the clips' reach. */
+function lengthOfSequence(which: SequenceState): number {
+  const pinned = which.settings.duration
+  if (pinned > 0) return pinned
+  return which.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0)
+}
+
+/**
+ * Moves one end of the span, or clears it with null.
+ *
+ * The two ends are kept in order rather than refused when crossed: dragging
+ * the in point past the out is a thing hands do, and the useful response is
+ * the span you clearly meant rather than a drag that stops dead. Both are
+ * snapped to the frame grid for the same reason every other edit is — a mark
+ * between two frames is a mark that cannot be rendered to.
+ */
+export function setRangeEnd(which: 'in' | 'out', at: number | null): boolean {
+  const current = sequence.range ?? { inPoint: null, outPoint: null }
+  const value = at === null ? null : snapToFrame(Math.max(0, at))
+
+  let { inPoint, outPoint } = current
+  if (which === 'in') inPoint = value
+  else outPoint = value
+
+  if (inPoint !== null && outPoint !== null && outPoint < inPoint) {
+    ;[inPoint, outPoint] = [outPoint, inPoint]
+  }
+
+  if (inPoint === current.inPoint && outPoint === current.outPoint) return false
+  sequence = { ...sequence, range: { inPoint, outPoint } }
+  emit()
+  return true
+}
+
+/** Sets both ends at once. Null for either clears that end. */
+export function setRange(inPoint: number | null, outPoint: number | null): boolean {
+  const next = {
+    inPoint: inPoint === null ? null : snapToFrame(Math.max(0, inPoint)),
+    outPoint: outPoint === null ? null : snapToFrame(Math.max(0, outPoint)),
+  }
+  if (
+    next.inPoint === (sequence.range?.inPoint ?? null) &&
+    next.outPoint === (sequence.range?.outPoint ?? null)
+  ) {
+    return false
+  }
+  sequence = { ...sequence, range: next }
+  emit()
+  return true
+}
+
+export function clearRange(): boolean {
+  return setRange(null, null)
+}
+
+/**
+ * Marks exactly the span some clips occupy.
+ *
+ * What `/` does with a selection, and the reason it is worth a key: the span
+ * someone wants to render is almost always the span of the clips they just
+ * picked, and setting it by dragging two handles to land on the same frames
+ * is work the app can simply do.
+ *
+ * Linked halves are not followed. A selection of one video clip marks that
+ * clip's span, and its sound occupies the same span anyway — pulling in
+ * partners would only matter for a selection that is already asymmetric, and
+ * there the clips you picked are the clips you meant.
+ */
+export function rangeToFit(ids: Iterable<string>): boolean {
+  const wanted = new Set(ids)
+  const chosen = sequence.clips.filter((clip) => wanted.has(clip.id))
+  if (chosen.length === 0) return false
+
+  let start = Infinity
+  let end = 0
+  for (const clip of chosen) {
+    start = Math.min(start, clip.start)
+    end = Math.max(end, clip.start + clip.duration)
+  }
+  if (!Number.isFinite(start) || end <= start) return false
+  return setRange(start, end)
 }
 
 /** How far the clips themselves reach, whatever the sequence says its length is. */

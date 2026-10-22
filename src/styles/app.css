@@ -658,6 +658,42 @@ kbd {
   user-select: none;
 }
 
+/* ── the marked span ──────────────────────────────────────────────
+   A band over the ticks saying which part renders, and a handle at
+   each end. Lighter rather than coloured: it is the part that is
+   *included*, so dimming everything else would be the stronger
+   statement and also the one that fights with every clip colour. */
+.tl-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--flux-text-faint);
+  opacity: 0.22;
+  pointer-events: none;
+}
+.tl-range-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  background: var(--flux-text-dim);
+  cursor: ew-resize;
+  z-index: 3;
+}
+.tl-range-handle:hover {
+  background: var(--flux-accent);
+}
+/* Each handle sits *outside* its own mark, the way a bracket does, so the
+   band covers exactly the frames that will be rendered and the grips do
+   not hide the first and last of them. */
+.tl-range-handle--in {
+  margin-left: -9px;
+  border-radius: 2px 0 0 2px;
+}
+.tl-range-handle--out {
+  border-radius: 0 2px 2px 0;
+}
+
 /*
  * One line down the whole timeline.
  *

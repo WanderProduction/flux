@@ -285,7 +285,9 @@ export function mediaFor(clips, assets) {
  * Builds a sequence document from the parts the renderer holds.
  * @returns {object}
  */
-export function makeSequenceDocument({ id, name, settings, tracks, clips, media, createdAt, appVersion }) {
+export function makeSequenceDocument({
+  id, name, settings, tracks, clips, media, createdAt, appVersion, range,
+}) {
   return {
     flux: { format: SEQUENCE_FORMAT, version: appVersion ?? '0.0.0' },
     id,
@@ -293,10 +295,38 @@ export function makeSequenceDocument({ id, name, settings, tracks, clips, media,
     createdAt: createdAt ?? Date.now(),
     savedAt: Date.now(),
     settings: makeSettings(settings),
+    /*
+     * The marked span, written down because it is an edit rather than a view.
+     * "The part I am going to render" is a decision someone made about this
+     * cut, and losing it on reopen would mean marking it again every session.
+     *
+     * Absent rather than nulls when nothing is marked, so a document from
+     * before this existed and a document with the marks cleared read back
+     * identically — there is one way to say "all of it".
+     */
+    ...(range && (range.inPoint !== null || range.outPoint !== null)
+      ? { range: { inPoint: range.inPoint ?? null, outPoint: range.outPoint ?? null } }
+      : {}),
     tracks: tracks ?? [],
     clips: clips ?? [],
     media: media ?? [],
   }
+}
+
+/**
+ * The marked span read back off a document, or undefined.
+ *
+ * Anything that is not a finite second is dropped rather than believed: a
+ * hand-edited `"in": "start"` should mark nothing, not place a mark at NaN
+ * that every later comparison silently fails against.
+ */
+export function readRange(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const at = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null)
+  const inPoint = at(raw.inPoint)
+  const outPoint = at(raw.outPoint)
+  if (inPoint === null && outPoint === null) return undefined
+  return { inPoint, outPoint }
 }
 
 /**

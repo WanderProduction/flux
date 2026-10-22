@@ -35,6 +35,20 @@ export const defaultKeymap: Keymap = {
   'ctrl+s': 'project.save',
   'ctrl+alt+s': 'workspace.save',
   'ctrl+shift+r': 'workspace.reset',
+  /*
+   * The marked span. '/' marks exactly what is selected, which is the span
+   * someone almost always means — the clips you just picked are the clips you
+   * want to render.
+   *
+   * Mark In and Mark Out are deliberately *not* on I and O, which is where
+   * every NLE puts them: I is already the eyedropper, and single letters are
+   * the tool strip's. The commands exist and are in the palette, and the ends
+   * are draggable on the ruler, so nothing here is unreachable — but if the
+   * I/O muscle memory is worth more than a tool that is still a stub, moving
+   * the eyedropper is the change to make, and it should be made on purpose.
+   */
+  '/': 'timeline.markSelection',
+  'ctrl+shift+x': 'timeline.clearMarks',
   delete: 'timeline.deleteSelected',
   // Backspace deletes the way Delete does: the clip goes, the hole stays.
   // Ripple is Shift W, and it should stay a decision rather than a near-miss.

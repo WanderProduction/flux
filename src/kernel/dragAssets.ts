@@ -143,3 +143,44 @@ export function readNativeFileDrag(event: React.DragEvent): DraggedFile[] {
   }
   return files
 }
+
+/**
+ * Folders in a native drop, as real paths.
+ *
+ * A dropped folder arrives as a `File` with no extension, so `mediaKindOf`
+ * gives it no kind and `readNativeFileDrag` above discards it — which is
+ * exactly right for a `.txt` and exactly wrong for a shoot folder. The
+ * entries API is what can tell the two apart: `isDirectory` is the only
+ * honest answer, where guessing from a zero size would also catch every
+ * empty file.
+ *
+ * ## It must be called before the first `await`
+ *
+ * `dataTransfer.items` is neutered the moment the drop handler yields — the
+ * browser reclaims it at the end of the synchronous task. A folder read after
+ * an `await` is a folder that always comes back empty, and the failure looks
+ * like "dropping folders does not work" rather than like a timing bug. See
+ * the capture at the top of the Timeline's `onDrop`.
+ */
+export function readDroppedFolders(event: React.DragEvent): string[] {
+  const bridge = (globalThis as { flux?: FilePathBridge }).flux
+  const pathForFile = bridge?.fs?.pathForFile
+  if (!pathForFile || !isNativeFileDrag(event)) return []
+
+  const items = Array.from(event.dataTransfer.items)
+  const files = Array.from(event.dataTransfer.files)
+  const folders: string[] = []
+
+  items.forEach((item, index) => {
+    if (item.kind !== 'file') return
+    const entry = item.webkitGetAsEntry?.()
+    if (!entry?.isDirectory) return
+    // `items` and `files` are parallel for file-kind entries, and the path can
+    // only come from the File — an entry knows its name, not where it lives.
+    const file = files[index]
+    const path = file ? pathForFile(file) : null
+    if (path) folders.push(path)
+  })
+
+  return folders
+}
