@@ -165,7 +165,10 @@ export function previewAdd(scope: AddScope): {
   const sequence = getSequence()
 
   if (scope === 'one-file') {
-    const plan = planSequence(settings.outDir ?? '', sequence)
+    const plan = planSequence(settings.outDir ?? '', sequence, {
+      video: settings.video,
+      audio: settings.audio,
+    })
     return {
       jobs: plan.job ? [plan.job] : [],
       skipped: plan.skipped,
@@ -173,7 +176,11 @@ export function previewAdd(scope: AddScope): {
     }
   }
 
-  const plan = planExport(settings.outDir ?? '', sequence, { frameRate: settings.frameRate })
+  const plan = planExport(settings.outDir ?? '', sequence, {
+    frameRate: settings.frameRate,
+    video: settings.video,
+    audio: settings.audio,
+  })
   if (scope === 'sequence') return { jobs: plan.jobs, skipped: plan.skipped }
 
   const held = getSelection()

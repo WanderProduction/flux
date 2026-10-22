@@ -212,6 +212,7 @@ export function atempoChain(speed) {
  * @param {number} [job.speed] how fast the source runs; 1 when untouched
  * @param {number} [job.frameRate] rate to force, or undefined to keep the source's
  * @param {boolean} [job.silent] write no audio stream
+ * @param {boolean} [job.video] false to write no video stream
  * @param {{ cq?: number, gop?: number }} [options]
  * @returns {string[]}
  */
@@ -236,6 +237,17 @@ export function cutArgs(job, options = {}) {
   if (job.frameRate) args.push('-r', String(job.frameRate))
   args.push(...encodeArgs(options))
   if (job.silent) args.push('-an')
+  /*
+   * Sound only, when the Video switch is off. Same trick as `-an`: after the
+   * encoder flags, so the later option wins and the codec choice is simply
+   * unused rather than contradicted.
+   *
+   * The file keeps its `.mp4` extension rather than becoming `.m4a`. AAC in
+   * mp4 is a perfectly ordinary sound file, and an export whose *names* change
+   * when a switch is flicked would break every resume — `alreadyDone` looks
+   * for the output path, and a path that moved is a path that is not there.
+   */
+  if (job.video === false) args.push('-vn')
   /*
    * The container stated rather than inferred from the extension.
    *

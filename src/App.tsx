@@ -8,6 +8,9 @@ import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
 import { getSequence, subscribeSequence } from './kernel/sequence'
 import { getView, recordView } from './kernel/view'
+import { getSelection } from './kernel/selection'
+import { getRenderSettings } from './kernel/renderSettings'
+import { add as addToQueue } from './kernel/renderQueue'
 import { CommandPalette } from './shell/CommandPalette'
 import { ImportChoiceHost } from './shell/ImportChoiceHost'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
@@ -274,6 +277,39 @@ function Workspace({ project }: { project: Project }) {
         category: 'Project',
         detail: 'Returns to the launcher',
         run: closeProject,
+      },
+      {
+        /*
+         * Send to render: queue what is selected, then go and look at it.
+         *
+         * One keystroke doing two things, and that pairing is the whole point
+         * of it — "send this to render" is a single thought, and splitting it
+         * into *add* and then *go and check* is how a queue ends up with
+         * something in it nobody looked at. With nothing selected it takes the
+         * whole sequence, because that is what someone pressing it on an empty
+         * selection means; in sequence mode there is only ever one thing to
+         * send, so the selection does not come into it.
+         */
+        id: 'render.send',
+        title: 'Send to Render',
+        category: 'Render',
+        detail: 'Queues the selected clips and opens the Export workspace',
+        run: () => {
+          const settings = getRenderSettings()
+          const scope =
+            settings.mode === 'sequence'
+              ? 'one-file'
+              : getSelection().size > 0
+                ? 'selection'
+                : 'sequence'
+          const result = addToQueue(scope)
+          applyWorkspace('export')
+          const parts: string[] = []
+          if (result.added) parts.push(`${result.added} queued`)
+          if (result.replaced) parts.push(`${result.replaced} updated`)
+          if (result.skipped.length) parts.push(`${result.skipped.length} refused`)
+          say(parts.length ? parts.join(' · ') : 'Nothing to render')
+        },
       },
       ...panels.list().map((panel) => ({
         id: `panel.focus.${panel.id}`,

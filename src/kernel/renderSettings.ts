@@ -48,6 +48,23 @@ export type RenderMode = 'clips' | 'sequence'
 export interface RenderSettings {
   /** What one job is. See the note above. */
   mode: RenderMode
+  /**
+   * Whether the output carries a picture at all, and whether it carries sound.
+   *
+   * The two switches at the top of the Video and Audio sections, and they are
+   * the coarsest thing on the page on purpose: before anyone asks what bitrate
+   * the sound should be, the question is whether there is any. Turning Video
+   * off writes a sound-only file; turning Audio off writes a silent one.
+   *
+   * They are a *ceiling*, not an override. Audio on does not put sound into a
+   * clip whose track was muted — the timeline still decides that, and this only
+   * decides whether the question is asked at all. See `silent` on ExportJob.
+   *
+   * Both off is refused rather than producing an empty container, because a
+   * file with neither is not a smaller render, it is a mistake.
+   */
+  video: boolean
+  audio: boolean
   /** Absolute path, or null until one is chosen. */
   outDir: string | null
   /** Constant-quality target. Lower is bigger and better. */
@@ -63,6 +80,8 @@ export interface RenderSettings {
 
 export const DEFAULTS: RenderSettings = {
   mode: 'clips',
+  video: true,
+  audio: true,
   outDir: null,
   cq: 26,
   gop: 30,
@@ -104,9 +123,21 @@ export function onRenderSettingsChanged(handler: () => void): void {
  * encoder takes, not a render that fails four hundred times.
  */
 export function updateRenderSettings(change: Partial<RenderSettings>, options?: { persist?: boolean }): void {
+  const wanted = { ...settings, ...change }
+  /*
+   * Neither picture nor sound is not a render. Turning the second one off puts
+   * the first back on rather than refusing the click, so the pair behaves like
+   * a choice of three states — both, picture only, sound only — which is what
+   * someone flicking the switches means by it.
+   */
+  if (!wanted.video && !wanted.audio) {
+    if (change.video === false) wanted.audio = true
+    else wanted.video = true
+  }
+
   const next: RenderSettings = {
     ...settings,
-    ...change,
+    ...wanted,
     cq: clamp(change.cq ?? settings.cq, MIN_CQ, MAX_CQ),
     gop: clamp(Math.round(change.gop ?? settings.gop), 1, 600),
     /*

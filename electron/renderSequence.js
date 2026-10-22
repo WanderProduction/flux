@@ -145,8 +145,17 @@ export async function verifySequence(ffprobe, job, file = job.output) {
     display: { width: job.width, height: job.height },
     frameRate: job.frameRate,
   }
-  const checked = await verify(ffprobe, { ...job, output: file }, asSource)
+  /*
+   * `video: false` is what tells `verify` to measure a sound-only file — no
+   * picture to compare, and a picture present means the switch was ignored.
+   */
+  const checked = await verify(
+    ffprobe,
+    { ...job, output: file, video: job.withVideo !== false },
+    asSource,
+  )
   if (!checked.ok) return checked
+  if (job.withVideo === false) return checked
 
   /*
    * And then the half `verify` does not look at. A composite with no sound at

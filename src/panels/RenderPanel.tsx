@@ -84,6 +84,71 @@ import { CQ, GOP_FRAMES } from '../../shared/renderFormat.js'
  * is the quality/size trade, how hard to drive the disk, and the frame rate
  * policy, and those are the only things here you can move.
  */
+/**
+ * One collapsible section of the settings, with the switch that decides
+ * whether its contents mean anything.
+ *
+ * The switch sits in the *header* rather than among the fields, because it is
+ * not one of them — it decides whether the rest of the section applies at all.
+ * A section that is off is collapsed and dimmed rather than hidden, so the page
+ * still says what a render *could* carry, not only what this one will.
+ *
+ * `pending` marks the three that are scaffolding. They are shown, off, and say
+ * what they are waiting for — which is a different and more honest thing than
+ * leaving them out, because the question "can FLUX burn in captions yet" has an
+ * answer and this is where someone will look for it.
+ */
+function Section({
+  title,
+  on,
+  onToggle,
+  pending,
+  hint,
+  children,
+}: {
+  title: string
+  on: boolean
+  onToggle?: (next: boolean) => void
+  pending?: string
+  hint?: string
+  children?: React.ReactNode
+}) {
+  const [open, setOpen] = useState(!pending && on)
+
+  return (
+    <section className={`xs${pending ? ' xs--pending' : ''}${on ? '' : ' xs--off'}`}>
+      <div className="xs-head">
+        <button
+          className="xs-title"
+          onClick={() => setOpen((was) => !was)}
+          aria-expanded={open}
+          disabled={Boolean(pending)}
+        >
+          <span className="xs-chevron" aria-hidden="true">
+            {open ? '▾' : '▸'}
+          </span>
+          {title}
+        </button>
+        {pending ? (
+          <span className="xs-pending">not yet</span>
+        ) : (
+          <label className="xs-switch" title={on ? `${title} on` : `${title} off`}>
+            <input
+              type="checkbox"
+              checked={on}
+              disabled={!onToggle}
+              onChange={(e) => onToggle?.(e.target.checked)}
+            />
+            <span className="xs-track" aria-hidden="true" />
+          </label>
+        )}
+      </div>
+      {open && <div className="xs-body">{children}</div>}
+      {!open && (hint || pending) && <p className="xs-hint">{pending ?? hint}</p>}
+    </section>
+  )
+}
+
 export function RenderPanel() {
   const [settings, setSettings] = useState<RenderSettings>(getRenderSettings)
   const [jobs, setJobs] = useState<readonly QueuedJob[]>(getQueue)
@@ -216,6 +281,17 @@ export function RenderPanel() {
             </p>
           )}
 
+          {/*
+            Sections, in the order a deliverable is described: what it looks
+            like, what it sounds like, then the three that do not exist yet,
+            then the things that are about the *run* rather than the file.
+          */}
+          <Section
+            title="Video"
+            on={settings.video}
+            onToggle={rendering ? undefined : (next) => updateRenderSettings({ video: next })}
+            hint="No picture — the output will be a sound file."
+          >
           <div className="render-fields">
             <label className="render-field">
               <span className="render-label">Quality (CQ)</span>
@@ -249,21 +325,6 @@ export function RenderPanel() {
               </span>
             </label>
 
-            <label className="render-field">
-              <span className="render-label">At once</span>
-              <input
-                type="number"
-                min={1}
-                max={8}
-                value={settings.concurrency}
-                disabled={rendering}
-                onChange={(e) => updateRenderSettings({ concurrency: Number(e.target.value) })}
-              />
-              <span className="render-hint">
-                The disk saturates before the GPU does. Two is right for spinning drives; raise it
-                for an SSD.
-              </span>
-            </label>
 
             {/*
               Offered only for clips. A composite has one frame and one rate by
@@ -304,18 +365,6 @@ export function RenderPanel() {
             )}
           </div>
 
-          <label className="render-check">
-            <input
-              type="checkbox"
-              checked={settings.resume}
-              disabled={rendering}
-              onChange={(e) => updateRenderSettings({ resume: e.target.checked })}
-            />
-            <span>
-              Skip files already rendered <em>and verified</em>
-            </span>
-          </label>
-
           {/*
             Shown rather than offered. These were measured, not chosen, and a
             field implies a decision nobody should be making casually.
@@ -324,11 +373,88 @@ export function RenderPanel() {
             <summary>What the encode is</summary>
             <p className="batch-note">
               HEVC through <code>hevc_nvenc</code>, constant quality, 10-bit <code>p010le</code>,
-              tagged <code>hvc1</code> so it plays in QuickTime and Premiere on macOS. AAC 192k.
-              Never scaled, so 4K stays 4K. Measured against this library at 10.6× to 23.9×
-              smaller.
+              tagged <code>hvc1</code> so it plays in QuickTime and Premiere on macOS. Never
+              scaled, so 4K stays 4K. Measured against this library at 10.6× to 23.9× smaller.
             </p>
           </details>
+          </Section>
+
+          <Section
+            title="Audio"
+            on={settings.audio}
+            onToggle={rendering ? undefined : (next) => updateRenderSettings({ audio: next })}
+            hint="Silent — every output will be written with no audio stream."
+          >
+            <div className="render-fields">
+              <div className="render-field">
+                <span className="render-label">Format</span>
+                <p className="render-value render-value--mono">AAC · 192 kbps</p>
+                <span className="render-hint">
+                  Not yet a choice. Format, bitrate, sample rate and channels become fields that
+                  follow the sequence until you change one.
+                </span>
+              </div>
+              <div className="render-field">
+                <span className="render-label">From the sequence</span>
+                <p className="render-value render-value--mono">
+                  {sequence.settings.audio.sampleRate / 1000}kHz ·{' '}
+                  {sequence.settings.audio.channels === 1 ? 'mono' : 'stereo'}
+                </p>
+                <span className="render-hint">
+                  {oneFile
+                    ? 'The mixdown follows the fader, mute and solo on every audio track.'
+                    : 'A clip whose track is muted, or not soloed, is written with no sound at all.'}
+                </span>
+              </div>
+            </div>
+          </Section>
+
+          <Section
+            title="Captions"
+            on={false}
+            pending="No caption track is read or burned in yet."
+          />
+          <Section
+            title="Effects"
+            on={false}
+            pending="There is nothing to render: no per-clip transform, blend or effect exists."
+          />
+          <Section
+            title="Metadata"
+            on={false}
+            pending="Timecode and camera metadata are dropped, not carried across."
+          />
+
+          <Section title="General" on hint="How hard to drive the disk, and what to skip.">
+            <div className="render-fields">
+              <label className="render-field">
+                <span className="render-label">At once</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={settings.concurrency}
+                  disabled={rendering}
+                  onChange={(e) => updateRenderSettings({ concurrency: Number(e.target.value) })}
+                />
+                <span className="render-hint">
+                  The disk saturates before the GPU does. Two is right for spinning drives; raise
+                  it for an SSD.
+                </span>
+              </label>
+            </div>
+            <label className="render-check">
+              <input
+                type="checkbox"
+                checked={settings.resume}
+                disabled={rendering}
+                onChange={(e) => updateRenderSettings({ resume: e.target.checked })}
+              />
+              <span>
+                Skip files already rendered <em>and verified</em>
+              </span>
+            </label>
+          </Section>
         </section>
 
         {/* ── queue ────────────────────────────────────────────── */}
