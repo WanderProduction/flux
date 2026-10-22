@@ -145,6 +145,49 @@ try {
     assert.ok(csp.includes('flux-asset:'), 'the CSP does not allow the media scheme')
   })
 
+  await check('the updater is alive in a build, with a feed to ask', async () => {
+    /*
+     * Three things that are only true of a package, and each of which fails
+     * silently as "there is no update".
+     *
+     * `app-update.yml` is written by electron-builder from the `publish` block
+     * and does not exist in a checkout, so a dev run cannot tell whether it is
+     * being produced at all — and without it the updater has no feed and
+     * reports nothing to ask.
+     *
+     * The state must not be 'disabled'. That is what an unpackaged app
+     * correctly reports, and seeing it here would mean `app.isPackaged` is
+     * false in something that was packaged.
+     *
+     * And it must not have fallen over on the way in: `autoUpdater` is a lazy
+     * getter on a CommonJS module, so a wrong import shape gives `undefined`
+     * rather than an error, and the first symptom is an app that never
+     * updates. See electron/updater.js.
+     */
+    const manifest = path.join(path.dirname(EXE), 'resources', 'app-update.yml')
+    assert.ok(
+      fs.existsSync(manifest),
+      `no app-update.yml beside the app — electron-builder's "publish" block is missing`,
+    )
+
+    const updates = await read(`return {
+      bridge: typeof window.flux?.updates?.state,
+      status: await window.flux?.updates?.state(),
+    };`)
+    assert.equal(updates.bridge, 'function', 'the updates bridge is missing')
+    assert.notEqual(
+      updates.status.state,
+      'disabled',
+      'a packaged FLUX reported itself as a development build',
+    )
+    assert.equal(
+      updates.status.feed?.from,
+      'app-update.yml',
+      `the feed came from ${updates.status.feed?.from}, not the one built in`,
+    )
+    console.log(`       feed: ${fs.readFileSync(manifest, 'utf8').match(/url:\s*(\S+)/)?.[1]}`)
+  })
+
   await check('nothing failed on the way up', async () => {
     const errors = cdp.consoleErrors ?? []
     assert.deepEqual(errors, [], `the packaged app logged: ${errors.join(' · ')}`)

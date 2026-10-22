@@ -37,6 +37,7 @@ import {
   writeQueue,
 } from './project.js'
 import { PROJECT_EXTENSION } from '../shared/projectFormat.js'
+import { startUpdates } from './updater.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -677,6 +678,10 @@ app.whenReady().then(() => {
   // the app starting, and a directory full of indexes to stat is exactly the
   // kind of thing that has no business happening before the first paint.
   pruneCache(mediaCachePath()).catch(() => {})
+
+  // Same reasoning, one step further: whether a newer FLUX exists is never a
+  // reason to make this one slower to appear.
+  startUpdates()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -44,6 +44,20 @@ export default defineConfig({
      */
     port: Number(process.env.FLUX_DEV_PORT) || 5273,
     strictPort: true,
+    watch: {
+      /*
+       * The watcher must not follow the build output.
+       *
+       * `release/` is where electron-builder extracts a ~400MB Electron and
+       * then *renames* the directory into place. Chokidar walking into that
+       * extract holds handles on it, and the rename then fails with EPERM —
+       * so a dev server left running in one terminal makes `npm run dist` in
+       * another fail, with an error that points at the packager and says
+       * nothing about the real cause. Vite ignores node_modules and dist by
+       * default; this one it does not know about.
+       */
+      ignored: ['**/release/**'],
+    },
   },
   build: {
     outDir: 'dist',

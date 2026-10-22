@@ -15,6 +15,7 @@ import {
   type ProjectError,
   type RecentProject,
 } from '../kernel/project'
+import { UpdateBadge } from '../shell/UpdateBadge'
 import { projectFolderPath } from '../../shared/projectNaming.js'
 
 /**
@@ -202,6 +203,16 @@ export function ProjectLauncher() {
             )}
           </section>
         </div>
+
+        {/*
+          An update is offered here as well as in the editor's status bar, and
+          this is the better of the two places: nothing is open, so installing
+          costs nothing but the restart. Renders nothing at all when there is
+          nothing to offer, and the footer collapses with it.
+        */}
+        <footer className="launcher-foot">
+          <UpdateBadge />
+        </footer>
       </div>
     </div>
   )
