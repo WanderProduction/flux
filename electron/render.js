@@ -252,6 +252,55 @@ function rateOf(text) {
  * @returns {Promise<{ ok: true, facts: object } | { ok: false, error: string, facts?: object }>}
  */
 export async function verify(ffprobe, job, source) {
+  /*
+   * A sound-only render has no picture to measure, so none of the assertions
+   * below apply — size, rate and frame count are all about a stream that was
+   * deliberately not written. What is left is the two things that still mean
+   * something: there must be sound, and there must be no picture.
+   *
+   * The second half matters as much as the first. Without it, flicking Video
+   * off and rendering again would be skipped by resume: the old file with its
+   * picture passes every check that remains.
+   */
+  if (job.video === false) {
+    let length = 0
+    try {
+      const { stdout } = await run(
+        ffprobe,
+        ['-v', 'error', '-show_entries', 'stream=codec_type,duration:format=duration,size',
+         '-print_format', 'json', '--', job.output],
+        { maxBuffer: 8 << 20 },
+      )
+      const parsed = JSON.parse(stdout)
+      const streams = parsed.streams ?? []
+      const sound = streams.find((one) => one.codec_type === 'audio')
+      const picture = streams.find((one) => one.codec_type === 'video')
+      if (picture) return { ok: false, error: 'the output has a video stream, and this is a sound-only render' }
+      if (!sound) return { ok: false, error: 'the output has no audio stream' }
+      length = Number(sound.duration ?? parsed.format?.duration ?? 0)
+      const facts = {
+        width: 0,
+        height: 0,
+        frameRate: 0,
+        frames: 0,
+        duration: length,
+        bytes: Number(parsed.format?.size ?? 0),
+        hasAudio: true,
+        soundOnly: true,
+      }
+      if (length > 0 && Math.abs(length - job.duration) > DURATION_TOLERANCE_S) {
+        return {
+          ok: false,
+          error: `the audio is ${length.toFixed(2)}s, expected ${job.duration.toFixed(2)}s`,
+          facts,
+        }
+      }
+      return { ok: true, facts }
+    } catch (err) {
+      return { ok: false, error: `could not probe the output: ${err.message}` }
+    }
+  }
+
   let facts
   try {
     const { stdout } = await run(ffprobe, probeArgs(job.output), { maxBuffer: 8 << 20 })
@@ -453,8 +502,14 @@ export async function encodeCut({ job, onProgress, signal, options = {} }) {
    * losing trim is reported and kept; it is still smaller than the whole source
    * it came from.
    */
+  /*
+   * Never on a sound-only render. The rule falls back to *keeping the
+   * original*, and the original has a picture in it — answering "your audio
+   * export was bigger than the source" with the whole video file is not a
+   * smaller file, it is the wrong file.
+   */
   const grew = job.sourceBytes > 0 && checked.facts.bytes >= job.sourceBytes
-  if (grew && job.wholeFile) {
+  if (grew && job.wholeFile && job.video !== false) {
     await fs.rm(partial, { force: true })
     const copy = path.join(
       path.dirname(job.output),

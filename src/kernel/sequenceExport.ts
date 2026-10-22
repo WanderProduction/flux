@@ -84,6 +84,14 @@ export interface SequenceJob {
   /** The sequence's audio format, carried so the snapshot is complete. */
   sampleRate: number
   channels: number
+  /**
+   * False when the render is to be sound only.
+   *
+   * Distinct from `video` being empty, which is a sequence that simply has no
+   * picture under the playhead and still renders as black. This says there is
+   * to be no picture *stream* at all.
+   */
+  withVideo: boolean
   /** Bottom track first, which is draw order. */
   video: SequenceCut[]
   audio: SequenceCut[]
@@ -143,7 +151,11 @@ export function lengthOf(sequence: SequenceState): number {
 export function planSequence(
   outDir: string,
   sequence: SequenceState = getSequence(),
+  options: { video?: boolean; audio?: boolean } = {},
 ): SequencePlan {
+  // Both default on, so a caller that asks for nothing gets what it used to.
+  const wantsVideo = options.video !== false
+  const wantsAudio = options.audio !== false
   const duration = lengthOf(sequence)
   const skipped: SkippedClip[] = []
 
@@ -163,7 +175,10 @@ export function planSequence(
       .sort((a, b) => a.start - b.start)
     if (clips.length === 0) continue
 
-    if (track.kind === 'video' && !isTrackVisible(track)) continue
+    // The switches are a ceiling over the track state: Video off leaves the
+    // picture out entirely, and the hidden/muted rules still apply under it.
+    if (track.kind === 'video' && (!wantsVideo || !isTrackVisible(track))) continue
+    if (track.kind === 'audio' && !wantsAudio) continue
     const gain = track.kind === 'audio' ? trackLevel(track, sequence.tracks) : 1
     // A silent track is not decoded at all. See the note above.
     if (track.kind === 'audio' && gain <= 0) continue
@@ -258,6 +273,7 @@ export function planSequence(
       duration,
       sampleRate: sequence.settings.audio.sampleRate,
       channels: sequence.settings.audio.channels,
+      withVideo: wantsVideo,
       video,
       audio,
       sourceBytes,

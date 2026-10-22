@@ -17,6 +17,7 @@ import { ContentBrowserPanel } from './ContentBrowserPanel'
 import { ToolsPanel } from './ToolsPanel'
 import { BatchPanel } from './BatchPanel'
 import { RenderPanel } from './RenderPanel'
+import { ExportListPanel } from './ExportListPanel'
 
 export function registerBuiltinPanels() {
   panels.registerAll([
@@ -55,6 +56,12 @@ export function registerBuiltinPanels() {
       title: 'Render',
       description: 'Encode settings, and the queue of clips waiting to be written',
       component: RenderPanel,
+    },
+    {
+      id: 'exportList',
+      title: 'To render',
+      description: 'What is about to be written, with the pictures to check it by',
+      component: ExportListPanel,
     },
   ])
 }

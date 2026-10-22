@@ -20,6 +20,12 @@ export const defaultKeymap: Keymap = {
   'ctrl+3': 'panel.focus.content',
   'ctrl+4': 'panel.focus.batch',
   'ctrl+5': 'panel.focus.render',
+  '2': 'workspace.switch.export',
+  /*
+   * Send to render. The key every NLE uses for it — Premiere's Export, Media
+   * Encoder's queue — so the muscle memory arrives with the user.
+   */
+  'ctrl+m': 'render.send',
   /*
    * A new sequence, on the key every app uses for "a new one of the thing this
    * app makes". FLUX makes sequences; a project is made once, from the

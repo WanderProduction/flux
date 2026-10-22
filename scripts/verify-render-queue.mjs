@@ -507,6 +507,125 @@ try {
     console.log('       baseline had sound; after the mute it re-encoded and has none')
   })
 
+  // ── the two switches at the top of the page ───────────────────
+
+  /** Which streams a written file actually has. */
+  async function streamsOf(file) {
+    const { stdout } = await run(
+      tools.ffprobe,
+      ['-v', 'error', '-show_entries', 'stream=codec_type', '-print_format', 'json', '--', file],
+      { maxBuffer: 8 << 20 },
+    )
+    const streams = (JSON.parse(stdout).streams ?? []).map((s) => s.codec_type)
+    return { video: streams.includes('video'), audio: streams.includes('audio') }
+  }
+
+  await check('Video off writes a sound-only file', async () => {
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `renderSettings.updateRenderSettings({ video: false, audio: true, resume: false });
+         selection.setSelection(new Set([clips[0].id]));
+         renderQueue.clear();
+         renderQueue.add('selection');
+         const job = renderQueue.getQueue()[0];
+         const result = await renderQueue.start();
+         const row = renderQueue.getQueue()[0];
+         renderSettings.updateRenderSettings({ video: true, audio: true });
+         return {
+           jobVideo: job.video, jobSilent: job.silent,
+           result, status: row.status, error: row.error, output: row.output,
+         };`,
+    )
+    assert.equal(state.jobVideo, false, 'the switch did not reach the job')
+    assert.equal(state.jobSilent, false, 'Video off must not also silence it')
+    assert.ok(state.result.ok, `start refused: ${state.result.error}`)
+    assert.equal(state.status, 'done', `the render ended as ${state.status}: ${state.error}`)
+    const has = await streamsOf(state.output)
+    assert.equal(has.video, false, 'the output still has a picture in it')
+    assert.equal(has.audio, true, 'a sound-only render with no sound is not a render')
+    console.log(`       ${path.basename(state.output)}: audio only`)
+  })
+
+  await check('Audio off writes a silent file, whatever the tracks say', async () => {
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `const audio = sequence.getSequence().tracks.find(t => t.kind === 'audio');
+         // Audible on the timeline, so only the switch can silence it.
+         sequence.setTrackMuted(audio.id, false);
+         renderSettings.updateRenderSettings({ video: true, audio: false, resume: false });
+         selection.setSelection(new Set([clips[0].id]));
+         renderQueue.clear();
+         renderQueue.add('selection');
+         const job = renderQueue.getQueue()[0];
+         const result = await renderQueue.start();
+         const row = renderQueue.getQueue()[0];
+         renderSettings.updateRenderSettings({ video: true, audio: true });
+         return { jobSilent: job.silent, jobVideo: job.video, result, status: row.status, output: row.output };`,
+    )
+    assert.equal(state.jobSilent, true, 'the switch did not silence the job')
+    assert.equal(state.jobVideo, true, 'Audio off must not also drop the picture')
+    assert.ok(state.result.ok, `start refused: ${state.result.error}`)
+    assert.equal(state.status, 'done', `the render ended as ${state.status}`)
+    const has = await streamsOf(state.output)
+    assert.equal(has.video, true, 'the picture went missing')
+    assert.equal(has.audio, false, 'the output still has sound in it')
+  })
+
+  await check('turning both off is refused rather than writing an empty file', async () => {
+    /*
+     * The pair behaves as a choice of three states rather than two
+     * independent switches, because a render with neither picture nor sound
+     * is not a smaller file, it is a mistake.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { renderSettings } = window.__fluxDev;
+       renderSettings.updateRenderSettings({ video: true, audio: true });
+       renderSettings.updateRenderSettings({ video: false });
+       const afterVideoOff = { ...renderSettings.getRenderSettings() };
+       renderSettings.updateRenderSettings({ audio: false });
+       const afterBoth = { ...renderSettings.getRenderSettings() };
+       renderSettings.updateRenderSettings({ video: true, audio: true });
+       return {
+         afterVideoOff: { video: afterVideoOff.video, audio: afterVideoOff.audio },
+         afterBoth: { video: afterBoth.video, audio: afterBoth.audio },
+       };`,
+    )
+    assert.deepEqual(state.afterVideoOff, { video: false, audio: true })
+    assert.deepEqual(
+      state.afterBoth,
+      { video: true, audio: false },
+      'turning the second one off should put the first back, not leave an empty render',
+    )
+  })
+
+  await check('Ctrl M queues the selection and opens the Export workspace', async () => {
+    const state = await evaluate(
+      cdp,
+      SEED +
+        `const { commands, view } = window.__fluxDev;
+         renderSettings.updateRenderSettings({ mode: 'clips', video: true, audio: true });
+         view.recordView({ workspace: 'edit' });
+         renderQueue.clear();
+         selection.setSelection(new Set(clips.slice(0, 3).map(c => c.id)));
+         await commands.run('render.send');
+         await new Promise(r => setTimeout(r, 400));
+         return {
+           workspace: view.getView().workspace,
+           queued: renderQueue.getQueue().length,
+           statuses: [...new Set(renderQueue.getQueue().map(j => j.status))],
+           binding: Object.entries(window.__fluxDev.keymap.defaultKeymap)
+             .find(([, id]) => id === 'render.send')?.[0] ?? null,
+         };`,
+    )
+    assert.equal(state.binding, 'ctrl+m', `render.send is bound to ${state.binding}`)
+    assert.equal(state.queued, 3, 'the selection did not reach the queue')
+    assert.deepEqual(state.statuses, ['waiting'])
+    assert.equal(state.workspace, 'export', 'it queued but did not go and show you')
+  })
+
   await check('the queue survives being saved and read back', async () => {
     const state = await evaluate(
       cdp,

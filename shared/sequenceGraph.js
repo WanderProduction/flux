@@ -236,15 +236,26 @@ export function sequenceArgs(job, options = {}) {
   const chains = []
 
   /*
+   * Sound only, when the Video switch is off. The picture half of the graph is
+   * not built at all rather than built and then dropped with `-vn`: a composite
+   * nobody is going to keep still costs every decode and every overlay, and on
+   * a long sequence that is the whole render time for a file with no picture
+   * in it.
+   */
+  const withVideo = job.withVideo !== false
+
+  /*
    * The base: opaque black, the sequence's size and rate, the sequence's whole
    * length. It is what a gap is, and it is what fixes the output's duration —
    * so a sequence whose last clip ends early still comes out its stated length,
    * rather than silently stopping where the footage did.
    */
-  chains.push(
-    `color=c=black:s=${job.width}x${job.height}:r=${job.frameRate}:` +
-      `d=${s(job.duration)},format=yuv420p10le,setsar=1[b]`,
-  )
+  if (withVideo) {
+    chains.push(
+      `color=c=black:s=${job.width}x${job.height}:r=${job.frameRate}:` +
+        `d=${s(job.duration)},format=yuv420p10le,setsar=1[b]`,
+    )
+  }
 
   /** `-i` index of the next input, which is also the clip's label number. */
   let input = 0
@@ -260,10 +271,12 @@ export function sequenceArgs(job, options = {}) {
   }
 
   const videoLabels = []
-  for (const cut of job.video) {
-    const index = addInput(cut)
-    chains.push(videoChain(index, cut, job))
-    videoLabels.push(`v${index}`)
+  if (withVideo) {
+    for (const cut of job.video) {
+      const index = addInput(cut)
+      chains.push(videoChain(index, cut, job))
+      videoLabels.push(`v${index}`)
+    }
   }
 
   const audioLabels = []
@@ -287,7 +300,7 @@ export function sequenceArgs(job, options = {}) {
   })
   // A sequence with no picture anywhere is black for its whole length, which is
   // a truthful render of an empty video track rather than a failure.
-  if (videoLabels.length === 0) chains.push(`[b]null[vout]`)
+  if (withVideo && videoLabels.length === 0) chains.push(`[b]null[vout]`)
 
   /*
    * Silence under the mix, the length of the sequence.
@@ -319,7 +332,8 @@ export function sequenceArgs(job, options = {}) {
   }
 
   args.push('-filter_complex_script', `${job.output}.flux-graph`)
-  args.push('-map', '[vout]', '-map', '[aout]')
+  if (withVideo) args.push('-map', '[vout]')
+  args.push('-map', '[aout]')
   args.push(...encodeArgs(options))
   /*
    * The rate is forced, and here that is a statement rather than a conform: a
@@ -327,7 +341,7 @@ export function sequenceArgs(job, options = {}) {
    * resampled to that rate, and the output is what the sequence is. It is the
    * same mechanism a speed change and the clip-mode conform policy use.
    */
-  args.push('-r', String(job.frameRate))
+  if (withVideo) args.push('-r', String(job.frameRate))
   // The length the sequence says it is, not the length the footage reaches.
   args.push('-t', s(job.duration))
   // The muxer stated, because the path handed to ffmpeg ends in `.flux-part`.

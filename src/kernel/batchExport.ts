@@ -96,6 +96,14 @@ export interface ExportJob {
    * supposed to sound like what was heard. See kernel/sequenceExport.ts.
    */
   silent: boolean
+  /**
+   * False when the output is to be sound only.
+   *
+   * The Video switch, carried per job because a queued job is a snapshot of
+   * everything that decided it — including the settings, which someone may
+   * well change before pressing Start.
+   */
+  video: boolean
 }
 
 export interface SkippedClip {
@@ -214,8 +222,11 @@ function nameJobs(clips: Clip[], outDir: string): Map<string, string> {
 export function planExport(
   outDir: string,
   sequence: SequenceState = getSequence(),
-  options: { frameRate?: FrameRatePolicy } = {},
+  options: { frameRate?: FrameRatePolicy; video?: boolean; audio?: boolean } = {},
 ): ExportPlan {
+  // Both default on, so a caller that asks for nothing gets what it used to.
+  const wantsVideo = options.video !== false
+  const wantsAudio = options.audio !== false
   /*
    * `sequence` conforms every clip to the sequence's rate; `source` leaves each
    * one at the rate it was shot, which is the default and the one an archive
@@ -353,7 +364,12 @@ export function planExport(
      * nobody could see.
      */
     const sound = clip.linkId ? soundOf.get(clip.linkId) : undefined
-    const silent = sound ? audible.get(sound.trackId) === false : false
+    /*
+     * The switch is a ceiling over the track state, not a replacement for it:
+     * Audio off silences everything, Audio on silences whatever the timeline
+     * already said was not being heard.
+     */
+    const silent = !wantsAudio || (sound ? audible.get(sound.trackId) === false : false)
 
     jobs.push({
       kind: 'clip',
@@ -379,6 +395,7 @@ export function planExport(
           : {}),
       wholeFile,
       silent,
+      video: wantsVideo,
     })
   }
 

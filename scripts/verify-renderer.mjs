@@ -23,7 +23,14 @@ import path from 'node:path'
 
 import { ensureProject } from './cdp.mjs'
 
-const PORT = 9222
+/*
+ * This suite talks to the DevTools endpoint itself rather than through
+ * cdp.mjs's `attach`, so it needs its own copy of the override — see
+ * electron/main.js for why the port moves at all. Without this it is the one
+ * harness that still goes to 9222, which on a second worktree means verifying
+ * the first one's app.
+ */
+const PORT = Number(process.env.FLUX_DEBUG_PORT) || 9222
 const MEDIA_DIR = process.argv[2] ?? path.join(os.homedir(), 'flux-media-test')
 
 // ── CDP plumbing ──────────────────────────────────────────────

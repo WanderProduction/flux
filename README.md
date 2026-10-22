@@ -58,7 +58,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 |---|---|
 | **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
-| **Workspaces** | Saved panel layouts. `1` Edit. |
+| **Workspaces** | Saved panel layouts. `1` Edit, `2` Export. |
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
@@ -89,6 +89,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
 | **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
 | **Sequence render** | Or the whole sequence as *one* file: layers composited, audio mixed down, gaps black. |
+| **Export page** | `Ctrl M` queues what is selected and opens a whole page showing it, with the pictures. |
 
 Six built-in panels: **Viewer**, **Timeline**, **Content Browser**, **Tools**, **Batch** and
 **Render** — and all six do real work.
@@ -965,6 +966,59 @@ built today is still there tomorrow.
 The first setting decides what one job *is*: **each clip as its own file**, which is what an
 archive wants, or **the whole sequence as one file**, which is what a deliverable wants. Both go
 through the same queue, the same encode and the same verifier.
+
+#### `Ctrl M`, and a page rather than a dialog
+
+Select clips, press `Ctrl M`: they are queued and the **Export** workspace opens with them on
+screen, each with a frame from the footage. With nothing selected it takes the whole sequence.
+
+One keystroke doing two things, and that pairing is the point — "send this to render" is a single
+thought, and splitting it into *add* and then *go and check* is how a queue ends up with something
+in it nobody looked at.
+
+The page is three panels: what is about to be rendered, what it will be rendered as, and the
+Viewer. No Timeline and no Tools, because this is not where you edit — and an export page that
+invited a trim would invite trimming something already queued, which the snapshot rule says will
+not take effect.
+
+**The pictures are the point of the left-hand panel.** The Render panel already lists the queue as
+text, and this lists the same queue, which is deliberate rather than duplication: they answer two
+different questions. A row of text beside the settings answers *how many and how long*, which is
+what you want while deciding a bitrate. The cards answer **"is that the right footage?"** — and a
+filename tells you a clip is called `DSCF3957`, while a frame of it tells you it is the shot you
+meant.
+
+#### Sections, and the two switches at the top of them
+
+The settings are grouped the way a deliverable is described — **Video**, **Audio**, then
+**Captions**, **Effects** and **Metadata**, then **General** for the things that are about the run
+rather than the file. The last three are scaffolding and say so: shown, off, and carrying the
+reason they are empty. Leaving them out would be tidier and would lose the answer to "can FLUX
+burn in captions yet", which is a question someone will come here to ask.
+
+Video and Audio each carry a switch, and those two are the coarsest thing on the page on purpose.
+Before anyone asks what bitrate the sound should be, the question is whether there is any:
+
+| | |
+|---|---|
+| **Video off** | A sound-only file. For a sequence render the picture half of the filter graph is not built at all — a composite nobody is going to keep still costs every decode and every overlay. |
+| **Audio off** | Every output written with no audio stream. |
+| **Both off** | Refused. Turning the second one off puts the first back, so the pair behaves as a choice of three states — a file with neither is not a smaller render, it is a mistake. |
+
+They are a **ceiling, not an override**. Audio on does not put sound into a clip whose track was
+muted; the timeline still decides that, and the switch only decides whether the question is asked.
+
+A sound-only file keeps its `.mp4` extension rather than becoming `.m4a`. AAC in mp4 is an ordinary
+sound file, and an export whose *names* changed when a switch was flicked would break every resume
+— `alreadyDone` looks for the output path, and a path that moved is a path that is not there.
+
+The verifier branches with it. There is no picture to measure, so what is left is that there must
+be sound and there must be **no** picture — and the second half matters as much as the first,
+because without it, flicking Video off and rendering again would be skipped by resume: the old file
+with its picture passes every check that remains.
+
+*Not yet: the audio **fields**. Format, bitrate, sample rate and channels are shown as what they
+are and are not yet editable; they become fields that follow the sequence until you change one.*
 
 #### A queued job is a snapshot, not a reference
 
