@@ -16,6 +16,7 @@ import {
   type DraggedFile,
 } from '../kernel/dragAssets'
 import { planBatch } from '../kernel/batchImport'
+import { pickDirectory } from '../kernel/project'
 import { importFiles } from '../kernel/importPipeline'
 import { getSelection, setSelection, subscribeSelection } from '../kernel/selection'
 import { importSequenceFile } from '../kernel/project'
@@ -87,6 +88,7 @@ import {
   setRangeEnd,
   rangeToFit,
   clearRange,
+  contentDuration,
   renderRange,
   snapToFrame,
   subscribeSequence,
@@ -255,6 +257,47 @@ interface ClipTrim {
   /** True when the drag is changing the rate rather than which frames play. */
   stretching: boolean
 }
+
+
+/**
+ * The footage under a folder, in scan order.
+ *
+ * The Batch panel's own scan, so "every clip under this folder" has one
+ * meaning in the app: the same proxy-folder skipping, the same cap, the same
+ * ordering. A folder dropped on a track and a folder chosen from the palette
+ * resolve through this one function, so they cannot drift apart.
+ */
+async function footageUnder(folder: string): Promise<DraggedFile[]> {
+  const planned = await planBatch(folder)
+  if (!planned.ok) return []
+  return planned.plan.files.map((file) => ({
+    path: file.path,
+    kind: file.kind,
+    size: file.size,
+  }))
+}
+
+/**
+ * Assets for a set of files, importing whatever is not in the project yet.
+ *
+ * Importing one that is already there is a no-op, so its id has to come from
+ * the store rather than from what was just added — otherwise dropping a file
+ * twice places a clip the first time and nothing the second.
+ */
+async function idsForFiles(files: DraggedFile[]): Promise<string[]> {
+  if (files.length === 0) return []
+  const added = await importFiles(files)
+  const known = allAssets()
+  const ids: string[] = []
+  for (const file of files) {
+    const hit =
+      added.find((asset) => asset.path === file.path) ??
+      known.find((asset) => asset.path === file.path)
+    if (hit && !ids.includes(hit.id)) ids.push(hit.id)
+  }
+  return ids
+}
+
 
 export function TimelinePanel() {
   const [sequence, setSequence] = useState<SequenceState>(getSequence)
@@ -1001,59 +1044,28 @@ export function TimelinePanel() {
 
     let files: DraggedFile[] = dropped.files
 
-    /*
-     * A dropped folder becomes the footage under it, in scan order, and then
-     * takes exactly the same route as a handful of dropped files — the same
-     * copy-or-link question, the same placement end to end. Dropping a shoot
-     * folder and dropping its contents should not be two different features.
-     *
-     * The scan is the Batch panel's own, so "every clip under this folder" has
-     * one meaning in the app: the same proxy-folder skipping, the same cap,
-     * the same ordering.
-     */
     for (const folder of dropped.folders) {
-      const planned = await planBatch(folder)
-      if (!planned.ok) continue
-      for (const entry of planned.plan.files) {
+      for (const entry of await footageUnder(folder)) {
         if (files.some((file) => file.path === entry.path)) continue
-        files.push({ path: entry.path, kind: entry.kind, size: entry.size })
+        files.push(entry)
       }
     }
 
-    if (files.length === 0) return []
-
-    const added = await importFiles(files)
-    const ids = added.map((asset) => asset.id)
-
-    // Dropping a file that is already in the project still has to place a clip
-    // — importing is a no-op there, so `added` will not contain it.
-    const existing = allAssets()
-    for (const file of files) {
-      const hit = existing.find((asset) => asset.path === file.path)
-      if (hit && !ids.includes(hit.id)) ids.push(hit.id)
-    }
-    return ids
+    return idsForFiles(files)
   }, [])
 
-  const onDrop = useCallback(
-    async (event: React.DragEvent, track: Track) => {
-      if (!isDroppableDrag(event) && !hasSequenceFile(event)) return
-      event.preventDefault()
-      setPreview(null)
-
-      // Read before anything is awaited: the drag's `items` do not survive
-      // the handler yielding, and a folder read afterwards is always empty.
-      const dropped = captureDrop(event)
-      const dropTime = timeAt(event.clientX)
-
-      // A sequence dropped in from outside is a sequence, not footage: it goes
-      // into the project's sequences folder and opens, rather than being
-      // laid on a track.
-      if (await importDroppedSequences(event)) return
-
-      const ids = await idsFromDrop(dropped)
-      if (ids.length === 0) return
-
+  /**
+   * Lays a set of assets down one after another, and says what it could not do.
+   *
+   * Shared by the drop handler and by the Place Folder command, because the
+   * two are the same act arriving by different routes — and a folder whose
+   * clips landed differently depending on whether it came off a pointer or
+   * out of the palette would be two behaviours wearing one name.
+   *
+   * Returns where the last clip ended, so a caller can carry on from there.
+   */
+  const placeAssets = useCallback(
+    async (ids: string[], track: Track, at: number): Promise<number> => {
       // What the drop could not do, in the words of whoever is watching it.
       // A clip that arrives without its sound looks identical to a broken
       // timeline unless the timeline says which it was.
@@ -1061,7 +1073,7 @@ export function TimelinePanel() {
 
       // Sequential so several assets dropped together land end to end rather
       // than all resolving against the same free slot.
-      let cursor = dropTime
+      let cursor = at
       for (const assetId of ids) {
         const asset = await ensureProbed(assetId)
         if (!asset || asset.missing || asset.unreadable || !asset.duration) continue
@@ -1145,8 +1157,61 @@ export function TimelinePanel() {
       // left over from the last one would be describing a clip you have already
       // stopped thinking about.
       setNotice(notices.length > 0 ? notices.join(' · ') : null)
+      return cursor
     },
-    [timeAt, idsFromDrop],
+    [],
+  )
+
+  /**
+   * Every clip under a folder, laid end to end on a track.
+   *
+   * The same two steps a dropped folder takes — expand it with the Batch
+   * panel's own scan, then place what comes back — so there is one answer to
+   * "what does this folder become" however it arrived.
+   *
+   * It exists as much to be *checkable* as to be useful. A native drag cannot
+   * be synthesised: `webkitGetAsEntry` has to report a real directory and
+   * Electron's `pathForFile` only answers for a real dragged File, so the
+   * folder path in `onDrop` can only come from a hand doing it. Behind that
+   * one unreachable step, everything else is this — and a command takes a
+   * path, so a harness can drive it.
+   */
+  const placeFolder = useCallback(
+    async (folder: string, track: Track, at: number): Promise<number> => {
+      const files = await footageUnder(folder)
+      if (files.length === 0) {
+        setNotice('No footage under that folder')
+        return at
+      }
+      const ids = await idsForFiles(files)
+      if (ids.length === 0) return at
+      return placeAssets(ids, track, at)
+    },
+    [placeAssets],
+  )
+
+  const onDrop = useCallback(
+    async (event: React.DragEvent, track: Track) => {
+      if (!isDroppableDrag(event) && !hasSequenceFile(event)) return
+      event.preventDefault()
+      setPreview(null)
+
+      // Read before anything is awaited: the drag's `items` do not survive
+      // the handler yielding, and a folder read afterwards is always empty.
+      const dropped = captureDrop(event)
+      const at = timeAt(event.clientX)
+
+      // A sequence dropped in from outside is a sequence, not footage: it goes
+      // into the project's sequences folder and opens, rather than being
+      // laid on a track.
+      if (await importDroppedSequences(event)) return
+
+      const ids = await idsFromDrop(dropped)
+      if (ids.length === 0) return
+
+      await placeAssets(ids, track, at)
+    },
+    [timeAt, idsFromDrop, placeAssets],
   )
 
   /*
@@ -2032,6 +2097,37 @@ export function TimelinePanel() {
        * render is almost always the span of the clips you just picked.
        */
       {
+        /*
+         * The palette's way in to what a dropped folder does, and the only
+         * way any of it can be checked: a native drag cannot be synthesised,
+         * so without a command taking a path the whole route would rest on
+         * someone remembering to try it by hand.
+         *
+         * It appends rather than dropping at the playhead. "Add this folder"
+         * means adding to what is there, and landing a hundred clips across
+         * the middle of an edit is not a thing anyone means by it.
+         */
+        id: 'timeline.placeFolder',
+        title: 'Place a Folder on the Timeline…',
+        category: 'Timeline',
+        detail: 'Every clip under a folder, end to end — the same as dropping it',
+        run: async (target?: unknown) => {
+          const folder = typeof target === 'string' && target ? target : await pickDirectory()
+          if (!folder) return
+          /*
+           * The targeted video track, or the bottom one. Same rule the other
+           * keyboard edits follow: a track you aimed at wins, and otherwise
+           * there is one obvious place for footage to go.
+           */
+          const tracks = getSequence().tracks
+          const track =
+            tracks.find((one) => one.id === targetRef.current && one.kind === 'video') ??
+            [...tracks].reverse().find((one) => one.kind === 'video')
+          if (!track) return
+          await placeFolder(folder, track, contentDuration())
+        },
+      },
+      {
         id: 'timeline.markIn',
         title: 'Mark In',
         category: 'Timeline',
@@ -2083,6 +2179,7 @@ export function TimelinePanel() {
     rippleDelete,
     toEdge,
     deleteSelected,
+    placeFolder,
     toggleLinkSelected,
     selectAtPlayhead,
     nudge,
