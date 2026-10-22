@@ -150,6 +150,29 @@ kbd {
   color: var(--flux-accent);
 }
 
+/* An update is mentioned in the status bar and nowhere else: no modal, no
+   toast. Something that interrupts an edit to announce a download is a worse
+   bargain than something you notice when you happen to look down. */
+.status-update {
+  color: var(--flux-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* The staged state is the only one that is a button, so it is the only one
+   that gets the accent — it is also the only one asking for anything. */
+.status-update-ready {
+  padding: 1px 8px;
+  border: 1px solid var(--flux-accent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--flux-accent);
+  font: inherit;
+  cursor: pointer;
+}
+.status-update-ready:hover {
+  background: var(--flux-accent);
+  color: var(--flux-bg);
+}
+
 /* ── Panel chrome ──────────────────────────────────────────── */
 
 .panel {
@@ -2064,6 +2087,21 @@ kbd {
 .launcher-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
+}
+
+.launcher-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 28px;
+  border-top: 1px solid var(--flux-border);
+  font-size: var(--flux-text-sm);
+}
+/* Most launches have no update to mention, and a strip of empty chrome under
+   the panel would be a permanent reminder of a feature doing nothing. With
+   UpdateBadge rendering null there are no child nodes at all, so :empty is
+   exactly the right test. */
+.launcher-foot:empty {
+  display: none;
 }
 .launcher-col {
   padding: 22px 28px 26px;

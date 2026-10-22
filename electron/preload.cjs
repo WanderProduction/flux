@@ -117,5 +117,24 @@ contextBridge.exposeInMainWorld('flux', {
       return () => ipcRenderer.removeListener('render:event', listener)
     },
   },
+
+  /**
+   * Updates. Nothing here starts one — see electron/updater.js: the check runs
+   * at startup on its own, and this is how the window learns what it found.
+   *
+   * `state()` as well as `onState`, because the check can finish before a
+   * window exists to be told about it, and a renderer that only listened would
+   * then never hear that an update is already waiting.
+   */
+  updates: {
+    state: () => ipcRenderer.invoke('update:state'),
+    check: () => ipcRenderer.invoke('update:check'),
+    install: () => ipcRenderer.invoke('update:install'),
+    onState: (handler) => {
+      const listener = (_e, payload) => handler(payload)
+      ipcRenderer.on('update:state', listener)
+      return () => ipcRenderer.removeListener('update:state', listener)
+    },
+  },
   platform: process.platform,
 })

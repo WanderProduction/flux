@@ -47,7 +47,7 @@ To run it like an installed program rather than through Vite:
 npm run dist
 ```
 
-That writes `release/FLUX Setup 0.0.1.exe` — a per-user installer that puts FLUX in the Start
+That writes `release/FLUX Setup <version>.exe` — a per-user installer that puts FLUX in the Start
 Menu and registers `.flux` properly. `npm run pack` is the faster half: no installer, just
 `release/win-unpacked/FLUX.exe`, which runs exactly the same.
 
@@ -76,6 +76,59 @@ up, window open, title right. So there is a check that asks the page what is in 
 ```bash
 npm run verify:packaged
 ```
+
+### Shipping an update
+
+An installed FLUX updates itself. The loop is three commands:
+
+```bash
+npm version patch --no-git-tag-version
+npm run dist
+npm run serve:updates
+```
+
+`npm run dist` writes the installer *and* a `latest.yml` naming it, with its size and SHA-512.
+That pair is the whole feed format: `electron-updater`'s generic provider wants nothing more than
+a static directory holding those two things. `serve:updates` is that directory served over HTTP —
+a stand-in for a release server, and the only thing a real one has to do better.
+
+A running FLUX checks the feed at startup, downloads a newer build quietly, and then **waits**. It
+does not restart itself: fetching is invisible and recoverable, while installing restarts the app,
+and restarting an editor out from under someone mid-edit is a way to lose work. The offer appears
+in the status bar, and on the launcher — which is the better of the two places, since nothing is
+open there and installing costs only the restart.
+
+> **The feed URL is changeable without building a new app**, which is the whole shape of this.
+> FLUX is served off a folder on one machine today and off a server later, and if the URL were only
+> baked in then moving the feed would mean shipping a release whose only purpose was to say where
+> the *next* release lives — and anyone still on the old build could never be told. So the baked-in
+> URL is the last resort:
+>
+> | | |
+> |---|---|
+> | `FLUX_UPDATE_FEED` | an environment variable — what the harness uses |
+> | `update-feed.json` in userData | `{"url": "…"}` — what a user sets |
+> | `app-update.yml` | written at build time from `publish` in package.json |
+
+Updating is the one feature whose failure mode is that *nothing happens*. A wrong URL, a missing
+`latest.yml`, a stale checksum, an updater that quietly refuses because the build is unpackaged —
+every one of those looks exactly like "there is no update yet", which is also the correct answer
+almost all of the time. Nothing about using the app tells them apart, so:
+
+```bash
+npm run verify:update
+```
+
+That drives the packaged app against three feeds — one offering the version already running, one
+offering a newer build, and one that is not there — and checks it says the right thing to each,
+including that an unreachable feed is reported and FLUX keeps working. An editor that would not
+start because a release server was down would be a far worse bug than never updating at all.
+
+> **Pick a port that is actually free.** The default is 8911 rather than something tidier,
+> because 8788 — the first choice — is what `wrangler pages dev` listens on, and on a machine that
+> does any Cloudflare work the bind fails with `EADDRINUSE` while `netstat` shows *nothing* holding
+> it. Windows services and WSL can take a port invisibly, so `serve:updates` says so plainly and
+> suggests `--port` rather than dying in a stack trace.
 
 **[Batch](#batch-a-folder-in-a-folder-out) needs ffmpeg**, and only Batch does. Everything else —
 browsing, importing, editing, playback — runs without it.

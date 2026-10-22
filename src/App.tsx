@@ -12,6 +12,7 @@ import { getSelection } from './kernel/selection'
 import { getRenderSettings } from './kernel/renderSettings'
 import { add as addToQueue } from './kernel/renderQueue'
 import { CommandPalette } from './shell/CommandPalette'
+import { UpdateBadge } from './shell/UpdateBadge'
 import { ImportChoiceHost } from './shell/ImportChoiceHost'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
 import {
@@ -400,6 +401,9 @@ function Workspace({ project }: { project: Project }) {
         </span>
         <span className="status-right">
           {flash && <span className="status-flash">{flash}</span>}
+          {/* Says nothing at all unless there is an update to mention — see
+              updateLabel in kernel/updates. */}
+          <UpdateBadge />
           <span className="status-dim">{isDesktop ? 'desktop' : 'browser'}</span>
           {/*
             Said plainly rather than left as "shell only — no engine", which
