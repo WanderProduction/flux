@@ -28,6 +28,20 @@ import {
   type Clip,
   type SequenceState,
 } from '../kernel/sequence'
+import { getView, recordView, subscribeView } from '../kernel/view'
+import {
+  aspectLabel,
+  framePixels,
+  resolveZoom,
+  stepZoom,
+  zoomToward,
+  DEFAULT_PAUSED_RESOLUTION,
+  DEFAULT_PLAYBACK_RESOLUTION,
+  RESOLUTIONS,
+  ZOOM_LEVELS,
+  type Point,
+  type Zoom,
+} from '../kernel/viewer'
 import { PanelFrame } from './PanelFrame'
 
 /**
@@ -208,6 +222,167 @@ export function ViewerPanel() {
     [],
   )
 
+  // ── the stage: what shape the frame is, and where you are looking ──
+
+  const [view, setViewState] = useState(getView)
+  useEffect(() => subscribeView(() => setViewState({ ...getView() })), [])
+
+  const stageRef = useRef<HTMLDivElement>(null)
+  /**
+   * The stage's size in CSS pixels, measured rather than assumed.
+   *
+   * Fit is a question about the panel, and the panel is resized by dragging a
+   * dock splitter — which fires no window resize and no React render. Without
+   * an observer the frame would stay the size it was when the panel mounted.
+   */
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
+  useEffect(() => {
+    const element = stageRef.current
+    if (!element) return
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect
+      setStageSize({ width, height })
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  const [zoom, setZoom] = useState<Zoom>('fit')
+  const [pan, setPan] = useState<Point>({ x: 0, y: 0 })
+
+  /** The sequence's own frame — the shape everything is composited into. */
+  const frame = useMemo(
+    () => ({ width: sequence.settings.width, height: sequence.settings.height }),
+    [sequence.settings.width, sequence.settings.height],
+  )
+  const scale = resolveZoom(zoom, frame, stageSize)
+
+  const fit = useCallback(() => {
+    panRef.current = { x: 0, y: 0 }
+    setZoom('fit')
+    setPan({ x: 0, y: 0 })
+  }, [])
+
+  /*
+   * Back to Fit whenever the frame changes shape.
+   *
+   * A sequence switched from landscape to portrait at 400% would otherwise
+   * keep the old scale and the old offset, and the picture would be somewhere
+   * off the side of the panel — looking exactly like the viewer had gone
+   * blank. Keyed on the size rather than the sequence id so that changing a
+   * sequence's resolution in its settings does the same.
+   */
+  useEffect(() => {
+    fit()
+  }, [frame.width, frame.height, fit])
+
+  /** Kept in refs so the commands below do not re-register on every wheel tick. */
+  const scaleRef = useRef(scale)
+  scaleRef.current = scale
+  const panRef = useRef(pan)
+  panRef.current = pan
+
+  /**
+   * Moves the zoom by one level and *writes the refs back itself*.
+   *
+   * The refs are refreshed during render, so without this a second call made
+   * before React had re-rendered would read the scale from before the first
+   * and compute the same step again — two zoom-ins in quick succession landed
+   * on one level, which is exactly what holding a zoom key does. Updating them
+   * here makes each call see the one before it; the next render then assigns
+   * the same values over the top.
+   */
+  const applyZoom = useCallback((next: number, pointer: Point) => {
+    const from = scaleRef.current
+    if (!(from > 0) || next === from) return
+    const panned = zoomToward(pointer, panRef.current, from, next)
+    scaleRef.current = next
+    panRef.current = panned
+    setZoom(next)
+    setPan(panned)
+  }, [])
+
+  const zoomBy = useCallback(
+    // Around the centre, because a command has no cursor to zoom towards.
+    (direction: 1 | -1) => applyZoom(stepZoom(scaleRef.current, direction), { x: 0, y: 0 }),
+    [applyZoom],
+  )
+
+  /**
+   * Wheel to zoom, towards the cursor.
+   *
+   * A native listener with `passive: false` rather than React's `onWheel`:
+   * React attaches wheel at the root as a *passive* listener, so
+   * `preventDefault` from a synthetic handler does nothing and the panel
+   * scrolls underneath the zoom.
+   */
+  useEffect(() => {
+    const element = stageRef.current
+    if (!element) return
+    const onWheel = (event: WheelEvent) => {
+      const rect = element.getBoundingClientRect()
+      if (rect.width === 0) return
+      event.preventDefault()
+      const from = scaleRef.current
+      if (!(from > 0)) return
+      // Exponential so each notch is the same proportional step, and a
+      // trackpad's many small deltas add up to the same place as one notch.
+      const factor = Math.exp(-event.deltaY * 0.0015)
+      const to = Math.min(
+        ZOOM_LEVELS[ZOOM_LEVELS.length - 1],
+        Math.max(ZOOM_LEVELS[0], from * factor),
+      )
+      if (to === from) return
+      applyZoom(to, {
+        x: event.clientX - (rect.left + rect.width / 2),
+        y: event.clientY - (rect.top + rect.height / 2),
+      })
+    }
+    element.addEventListener('wheel', onWheel, { passive: false })
+    return () => element.removeEventListener('wheel', onWheel)
+  }, [applyZoom])
+
+  /**
+   * The middle button drags the picture around.
+   *
+   * Middle rather than left, so dragging never competes with whatever a click
+   * in the viewer comes to mean later. `preventDefault` on the way down is
+   * what stops Chromium opening its autoscroll ring, which otherwise appears
+   * and eats the drag.
+   */
+  const beginPan = useCallback((event: React.PointerEvent) => {
+    if (event.button !== 1) return
+    event.preventDefault()
+    const origin = { x: event.clientX, y: event.clientY }
+    const from = panRef.current
+    const onMove = (move: PointerEvent) => {
+      const next = { x: from.x + (move.clientX - origin.x), y: from.y + (move.clientY - origin.y) }
+      panRef.current = next
+      setPan(next)
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [])
+
+  // ── how many pixels are worth compositing ─────────────────────
+
+  const prefs = view.viewer ?? {
+    playbackResolution: DEFAULT_PLAYBACK_RESOLUTION,
+    pausedResolution: DEFAULT_PAUSED_RESOLUTION,
+  }
+  /**
+   * The lever Premiere calls Playback Resolution, split in two as Premiere
+   * splits it: running and stopped are different jobs. Dropping frames while
+   * playing is a cost you choose; a soft picture on the frame you have stopped
+   * on to judge focus is not.
+   */
+  const resolution = playing ? prefs.playbackResolution : prefs.pausedResolution
+  const pixels = useMemo(() => framePixels(frame, resolution), [frame, resolution])
+
   const duration = sequenceDuration()
   const layers = useMemo(() => layersAt(sequence, time), [sequence, time])
   /** Identity of the stack, so effects fire when it changes and not every tick. */
@@ -344,7 +519,17 @@ export function ViewerPanel() {
 
     let stopped = false
     let drawing = false
-    const { width, height } = sequence.settings
+    /*
+     * The *preview* size, not the sequence's.
+     *
+     * Every coordinate below is in this space, which is the whole trick: at a
+     * quarter resolution each layer is scaled into a canvas a sixteenth of the
+     * area, so the per-frame cost of compositing and of handing the result to
+     * the compositor falls with it. The element is still laid out at the
+     * frame's full size, so the browser scales it back up on the way to the
+     * screen and the picture only looks softer.
+     */
+    const { width, height } = pixels
 
     const draw = async () => {
       if (stopped || drawing) return
@@ -429,9 +614,11 @@ export function ViewerPanel() {
       unsubscribe()
     }
     // `ready` is here so the first draw happens once the sources are open,
-    // and `placement` so an edit to a clip already on screen is drawn.
+    // `placement` so an edit to a clip already on screen is drawn, and
+    // `pixels` so switching resolution — including the switch that happens on
+    // every play and pause — resizes the canvas and redraws into it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stack, placement, ready, sequence.settings.width, sequence.settings.height])
+  }, [stack, placement, ready, pixels])
 
   // ── the media element: sound, and the clock ───────────────────
 
@@ -553,9 +740,37 @@ export function ViewerPanel() {
         detail: 'Shift and an arrow',
         run: () => stepFrames(-JUMP_FRAMES),
       },
+      /*
+       * The viewer's own navigation, as commands as well as controls.
+       *
+       * No key bindings offered here: the obvious ones are taken by the tool
+       * palette, and silently stealing a letter someone already uses to reach
+       * the Razor is a worse trade than one more trip through the palette.
+       */
+      {
+        id: 'viewer.fit',
+        title: 'Fit in Viewer',
+        category: 'Viewer',
+        detail: 'Back to the zoom and position that fits the panel',
+        run: fit,
+      },
+      {
+        id: 'viewer.zoomIn',
+        title: 'Zoom In',
+        category: 'Viewer',
+        detail: 'The next level up, around the centre',
+        run: () => zoomBy(1),
+      },
+      {
+        id: 'viewer.zoomOut',
+        title: 'Zoom Out',
+        category: 'Viewer',
+        detail: 'The next level down, around the centre',
+        run: () => zoomBy(-1),
+      },
     ])
     return () => handle.dispose()
-  }, [])
+  }, [fit, zoomBy])
 
   // ── scrubbing ─────────────────────────────────────────────────
 
@@ -589,6 +804,34 @@ export function ViewerPanel() {
   const progress = duration > 0 ? Math.min(1, time / duration) : 0
   const url = playable ? assetUrl(playable.path) : undefined
 
+  /**
+   * Whether there is a frame to put on screen at all.
+   *
+   * Content, not merely an open sequence: a sequence exists from the moment a
+   * project is created, and showing its empty frame means the viewer's resting
+   * state is a black rectangle that never does anything. The frame appears when
+   * the sequence has something in it and keeps its shape from then on, gaps
+   * included.
+   */
+  const hasFrame = duration > 0 && frame.width > 0 && frame.height > 0
+
+  /**
+   * The menu's levels, plus wherever the wheel has actually landed.
+   *
+   * A wheel zoom lands between levels far more often than on one, and a select
+   * whose value matches no option renders blank — so the panel would show an
+   * empty box exactly when someone had just zoomed. The odd value joins the
+   * list for as long as it is in force.
+   */
+  const zoomOptions = useMemo(() => {
+    const levels: number[] = [...ZOOM_LEVELS]
+    if (zoom !== 'fit' && !levels.some((level) => Math.abs(level - zoom) < 1e-9)) {
+      levels.push(zoom)
+      levels.sort((a, b) => a - b)
+    }
+    return levels
+  }, [zoom])
+
   return (
     <PanelFrame
       scroll={false}
@@ -596,6 +839,14 @@ export function ViewerPanel() {
         <>
           <span className="tool-label">Scope</span>
           <span className="tool-value">{sequence.name}</span>
+          <span className="tool-sep" />
+          {/* The shape being worked in, named. A sequence's resolution is the
+              one setting that changes what the whole panel looks like, and it
+              was readable nowhere. */}
+          <span className="tool-label">Frame</span>
+          <span className="tool-value tool-value--dim" title={`${frame.width}×${frame.height}`}>
+            {aspectLabel(frame.width, frame.height)}
+          </span>
           <span className="tool-sep" />
           <span className="tool-label">Source</span>
           <span className="tool-value tool-value--dim">
@@ -638,8 +889,29 @@ export function ViewerPanel() {
         </>
       }
     >
-      <div className="viewer-stage">
-        <div className="viewer-frame">
+      {/*
+        The stage is always here — it is what the wheel and the middle button
+        are listened to on, and what gets measured for Fit. The *frame* is not:
+        an empty sequence has no shape to show, and a black 16:9 box standing
+        in for one is a lie about what you are working on, which was the whole
+        complaint. Nothing to show, nothing drawn.
+      */}
+      <div
+        className="viewer-stage"
+        ref={stageRef}
+        onPointerDown={beginPan}
+        onAuxClick={(event) => event.preventDefault()}
+      >
+        {hasFrame && (
+        <div
+          className="viewer-frame"
+          style={{
+            width: `${Math.round(frame.width * scale)}px`,
+            height: `${Math.round(frame.height * scale)}px`,
+            transform: `translate(calc(-50% + ${Math.round(pan.x)}px), calc(-50% + ${Math.round(pan.y)}px))`,
+          }}
+          data-aspect={aspectLabel(frame.width, frame.height)}
+        >
           <div className="viewer-frame-inner">
             {playable && clip ? (
               playable.kind === 'image' ? (
@@ -676,12 +948,14 @@ export function ViewerPanel() {
                 </>
               )
             ) : (
-              <span className="viewer-placeholder">
-                {clip ? 'media offline' : duration > 0 ? 'no clip at the playhead' : 'empty sequence'}
-              </span>
+              /* Only an actual problem gets words. A gap between clips is
+                 black, the way a gap is black everywhere else — saying "no
+                 clip at the playhead" over it is narrating the obvious. */
+              clip && <span className="viewer-placeholder">media offline</span>
             )}
           </div>
         </div>
+        )}
       </div>
 
       <div className="viewer-transport">
@@ -710,6 +984,74 @@ export function ViewerPanel() {
           <div className="transport-playhead" style={{ left: `${progress * 100}%` }} />
         </div>
         <span className="tc tc--dim">{formatTimecode(duration, sequence.settings.frameRate)}</span>
+      </div>
+
+      <div className="viewer-controls">
+        <button
+          className="viewer-chip"
+          onClick={fit}
+          disabled={!hasFrame}
+          title="Fit the frame to the panel, and put it back in the middle"
+        >
+          Fit
+        </button>
+        <select
+          className="viewer-select"
+          value={zoom === 'fit' ? 'fit' : String(zoom)}
+          disabled={!hasFrame}
+          title="Zoom"
+          aria-label="Zoom level"
+          onChange={(event) => {
+            const value = event.target.value
+            if (value === 'fit') return fit()
+            applyZoom(Number(value), { x: 0, y: 0 })
+          }}
+        >
+          <option value="fit">Fit</option>
+          {zoomOptions.map((level) => (
+            <option key={level} value={String(level)}>
+              {Math.round(level * 100)}%
+            </option>
+          ))}
+        </select>
+
+        <span className="viewer-controls-gap" />
+
+        {/* Two menus rather than one, because stopped and running are
+            different jobs — see `resolution` above. */}
+        <span className="tool-label">Playback</span>
+        <select
+          className="viewer-select"
+          value={String(prefs.playbackResolution)}
+          title="How much of the sequence's resolution to composite while playing"
+          aria-label="Playback resolution"
+          onChange={(event) =>
+            recordView({ viewer: { ...prefs, playbackResolution: Number(event.target.value) } })
+          }
+        >
+          {RESOLUTIONS.map((option) => (
+            <option key={option.label} value={String(option.value)}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+
+        <span className="tool-label">Paused</span>
+        <select
+          className="viewer-select"
+          value={String(prefs.pausedResolution)}
+          title="How much of the sequence's resolution to composite when stopped on a frame"
+          aria-label="Paused resolution"
+          onChange={(event) =>
+            recordView({ viewer: { ...prefs, pausedResolution: Number(event.target.value) } })
+          }
+        >
+          {RESOLUTIONS.map((option) => (
+            <option key={option.label} value={String(option.value)}>
+              {option.label}
+            </option>
+          ))}
+        </select>
       </div>
     </PanelFrame>
   )

@@ -232,23 +232,30 @@ kbd {
 
 /* ── Viewer ────────────────────────────────────────────────── */
 
+/* The stage is the window you look through: it clips, and the frame moves
+   inside it. `overflow: hidden` is what makes a zoomed-in picture stay in the
+   panel instead of spilling over the timeline. */
 .viewer-stage {
   position: absolute;
-  inset: 0 0 34px 0;
-  display: grid;
-  place-items: center;
-  padding: 14px;
+  inset: 0 0 62px 0;
+  overflow: hidden;
   background: #08090c;
 }
+
+/* Positioned rather than laid out, because its size is a zoom level and its
+   offset is a pan — neither of which is anything a grid can express. The
+   aspect ratio is NOT set here: it comes from the sequence's own width and
+   height, inline. A fixed 16/9 in this file was why a vertical sequence was
+   previewed in a landscape box. */
 .viewer-frame {
-  width: min(100%, calc((100% - 0px)));
-  max-width: 100%;
-  max-height: 100%;
-  aspect-ratio: 16 / 9;
+  position: absolute;
+  left: 50%;
+  top: 50%;
   border: 1px solid var(--flux-border);
   background: #000;
-  display: grid;
-  place-items: center;
+  /* Cheap to composite and, more to the point, it stops the browser
+     resampling the frame on every pan. */
+  will-change: transform;
 }
 .viewer-frame-inner {
   display: grid;
@@ -258,14 +265,64 @@ kbd {
   overflow: hidden;
 }
 
-/* Fits the frame without cropping, whatever the source's aspect ratio is. */
+/* The canvas already has the sequence's shape, so this is exact for it.
+   `contain` is for the fallback element, where a clip whose shape differs
+   from the sequence's is letterboxed rather than stretched. */
 .viewer-media {
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   display: block;
   background: #000;
+}
+
+/* ── the viewer's second row: zoom, and how many pixels to spend ── */
+
+.viewer-controls {
+  position: absolute;
+  inset: auto 0 34px 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-top: 1px solid var(--flux-border);
+  background: var(--flux-bg-panel);
+  font-size: var(--flux-text-sm);
+}
+.viewer-controls-gap {
+  flex: 1;
+}
+.viewer-chip {
+  padding: 1px 10px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font: inherit;
+  cursor: pointer;
+}
+.viewer-chip:hover:not(:disabled) {
+  border-color: var(--flux-accent);
+  color: var(--flux-accent);
+}
+.viewer-chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.viewer-select {
+  padding: 1px 4px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font: inherit;
+  font-family: var(--flux-font-mono);
+  cursor: pointer;
+}
+.viewer-select:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .viewer-placeholder {
   color: var(--flux-text-faint);

@@ -12,6 +12,12 @@
  * is simply read at save time and written with whatever else is being saved.
  */
 
+import {
+  DEFAULT_PAUSED_RESOLUTION,
+  DEFAULT_PLAYBACK_RESOLUTION,
+  RESOLUTIONS,
+} from './viewer'
+
 export type BrowserLocation = { type: 'project' } | { type: 'folder'; path: string }
 
 export interface ViewState {
@@ -35,6 +41,18 @@ export interface ViewState {
   browser: {
     location: BrowserLocation
   }
+  /**
+   * The Viewer's two resolution preferences — see kernel/viewer.ts.
+   *
+   * Here rather than in SequenceSettings because they are about this machine
+   * keeping up, not about the work: the same project on a faster computer
+   * wants a different answer, and the render never reads them at all. Optional
+   * so a project saved before they existed opens with the defaults.
+   */
+  viewer?: {
+    playbackResolution: number
+    pausedResolution: number
+  }
 }
 
 export function defaultView(): ViewState {
@@ -42,7 +60,16 @@ export function defaultView(): ViewState {
     workspace: 'edit',
     timeline: { zoom: 0 },
     browser: { location: { type: 'project' } },
+    viewer: {
+      playbackResolution: DEFAULT_PLAYBACK_RESOLUTION,
+      pausedResolution: DEFAULT_PAUSED_RESOLUTION,
+    },
   }
+}
+
+/** A stored resolution, or the default if it is not one this app offers. */
+function oneOf(value: unknown, fallback: number): number {
+  return RESOLUTIONS.some((r) => r.value === value) ? (value as number) : fallback
 }
 
 let view: ViewState = defaultView()
@@ -70,6 +97,7 @@ export function recordView(patch: Partial<ViewState>): void {
     workspace: patch.workspace ?? view.workspace,
     timeline: { ...view.timeline, ...patch.timeline },
     browser: { ...view.browser, ...patch.browser },
+    viewer: { ...view.viewer, ...patch.viewer } as ViewState['viewer'],
   }
   // Panels report on every render pass; without this, a no-op would still wake
   // every subscriber and the timeline would re-render on its own report.
@@ -93,6 +121,18 @@ export function setView(next: Partial<ViewState> | null | undefined): void {
         next?.browser?.location?.type === 'folder' && next.browser.location.path
           ? { type: 'folder', path: next.browser.location.path }
           : { type: 'project' },
+    },
+    /*
+     * Read back rather than dropped.
+     *
+     * A preference that is written on every save and silently reset on every
+     * open is worse than one that was never stored: it looks like it works
+     * until the next time the project is opened. `oneOf` keeps a hand-edited
+     * .flux from putting a resolution in here that nothing can render.
+     */
+    viewer: {
+      playbackResolution: oneOf(next?.viewer?.playbackResolution, base.viewer!.playbackResolution),
+      pausedResolution: oneOf(next?.viewer?.pausedResolution, base.viewer!.pausedResolution),
     },
   }
   emit()
