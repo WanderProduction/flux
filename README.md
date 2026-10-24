@@ -164,6 +164,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Copy, paste, duplicate** | `Ctrl C` / `Ctrl V` at the playhead, or `Alt` drag to leave a copy behind. |
 | **Selection** | Click, click-again, click-away, rubber band, `Shift` range by track and time, `Ctrl` one at a time. |
 | **Keyboard edit** | `S` takes what the playhead is on; `Alt` and the arrows walk it, swap it, and lift it between tracks. |
+| **Viewer** | The frame is the sequence's shape — 9:16, 1:1, 4:5, anything. Wheel zooms, middle-drag pans, `Fit` resets. |
+| **Preview resolution** | `Playback` and `Paused`, Full to 1/16, so a heavy stack plays without the paused frame going soft. |
 | **Tools** | A strip of them: select, razor and stretch work; the rest say what they will do. |
 | **Ripple delete** | `Shift W` takes a clip — or a selected gap — out and closes the hole. |
 | **Trim to playhead** | `Q` and `E` take an edge exactly to the playhead. |
@@ -1823,6 +1825,49 @@ Not yet, and each is a real absence rather than an oversight: **no per-clip tran
 scale, rotation or opacity), **no blend modes**, and **no effects**. A layer covers what is under it
 wherever it has pixels. Compositing several sources is the machinery those need; they are the next
 thing it makes possible, not something it already does.
+
+#### The frame, and looking at it
+
+The Viewer's frame is **the sequence's shape**, and nothing else's. 9:16, 1:1, 4:5, 5:4, 16:9 or
+anything custom — it comes from the sequence's own width and height, so a vertical cut is previewed
+vertically and a landscape clip dropped into it is letterboxed rather than the frame changing to
+suit it. The toolbar names the ratio it worked out: `FRAME 9:16`.
+
+That sounds like it was always true, and it was not: the ratio was a constant in the stylesheet.
+A vertical sequence was previewed in a landscape box, which reads as a scaling bug rather than a
+frame one and sends you looking in entirely the wrong place.
+
+**An empty sequence draws no frame at all.** Not a black rectangle with "empty sequence" written
+across it — a box standing in for a shape nothing has chosen yet is a claim about the work that
+is not true. The frame appears when there is something in the sequence and keeps its shape from
+then on, gaps included. Gaps are black, and nothing is written over them, because a gap is black
+everywhere else too.
+
+**The wheel zooms towards the cursor**, the **middle button drags**, and **Fit** puts it back. Zoom
+towards the centre instead and pointing at the corner of a shot and zooming in takes the thing you
+were pointing at off the side of the panel. There are no key bindings for these: the obvious letters
+already reach the Tools, and silently taking one would be a worse trade than a trip through the
+palette (`viewer.fit`, `viewer.zoomIn`, `viewer.zoomOut`).
+
+#### Preview resolution, and why there are two of them
+
+`Playback` and `Paused`, each **Full**, **1/2**, **1/4**, **1/8** or **1/16**, exactly as Premiere
+splits them.
+
+What it buys is **fewer pixels to composite**, and that is all it buys. The canvas the stack is
+drawn into shrinks; the element on screen does not, so the browser scales the result back up and the
+only visible difference is a softer picture. At 1/4 the composite is a sixteenth of the area. It
+does **not** make the decoders do less work — a decoded frame arrives at its coded size whatever
+this says — so it pays off on stacks of layers and on big frames rather than on one small clip.
+
+Two settings rather than one because stopped and running are different jobs. Dropping frames while
+playing is a cost you choose; a soft picture on the frame you have stopped on *to judge focus* is
+not one anyone would choose. So the default pair is 1/2 while playing and Full when stopped, and the
+canvas swaps size on every play and pause.
+
+They ride in the project's view state, which means they never mark the document dirty — the same
+reason zooming the timeline does not. A preference about whether *this machine* keeps up has no
+business being an edit to the work, and the render never reads them at all.
 
 #### When the decoder will not start
 

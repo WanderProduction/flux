@@ -338,11 +338,21 @@ try {
        sequence.clearSequence();
        await new Promise(r => setTimeout(r, 300));
        return { time: playback.getTime(), playing: playback.isPlaying(),
+                frame: !!document.querySelector('.viewer-frame'),
                 placeholder: document.querySelector('.viewer-placeholder')?.textContent };`,
     )
     assert.equal(state.time, 0, 'the playhead should be back at the start')
     assert.equal(state.playing, false)
-    assert.equal(state.placeholder, 'empty sequence', 'and the viewer should say so')
+    /*
+     * And the frame goes with it.
+     *
+     * This used to assert the words "empty sequence" over a black 16:9 box.
+     * The box was a fiction twice over — it was there when there was nothing
+     * to show, and it was 16:9 whatever shape the sequence actually was. An
+     * empty sequence now draws no frame at all.
+     */
+    assert.equal(state.frame, false, 'an empty sequence should draw no frame')
+    assert.equal(state.placeholder, undefined, 'and should say nothing over it')
   })
 
   // ── a real clip, not a four-second fixture ────────────────────
@@ -1237,11 +1247,22 @@ try {
        await new Promise(r => setTimeout(r, 1200));
        const clips = sequence.getSequence().clips.map(c => c.kind + ':' + c.trackId);
        return { clips, via: window.__picture().via,
+                frame: !!document.querySelector('.viewer-frame'),
                 placeholder: !!document.querySelector('.viewer-placeholder') };`,
     )
     assert.deepEqual(state.clips, ['audio:A1'], 'setup: expected one audio clip')
     assert.equal(state.via, 'none', `the viewer drew a picture via ${state.via}`)
-    assert.equal(state.placeholder, true, 'and it should say there is nothing to show')
+    /*
+     * A black frame, and no words over it.
+     *
+     * The sequence has content — it is a minute of sound — so it has a shape,
+     * and the shape is what gets shown. Which is also what every other editor
+     * does with an audio-only sequence. "Nothing to show" is said by the
+     * toolbar reading Source: none, where it belongs; printing it across the
+     * picture is narrating a gap, and gaps are black everywhere else.
+     */
+    assert.equal(state.frame, true, 'a sequence with sound in it still has a frame')
+    assert.equal(state.placeholder, false, 'and nothing should be written across it')
   })
 
   // ── layers, looked at ─────────────────────────────────────────
@@ -2432,6 +2453,362 @@ try {
     assert.equal(state.label, 'element')
     assert.ok(state.lit > 0, 'and it should still be showing a picture')
   })
+
+  // ── the frame, and how much of it is worth drawing ────────────
+  //
+  // At the end of the suite, and restoring what it changed, because these move
+  // the sequence's resolution and the viewer's preferences — both of which
+  // everything above reads.
+
+  /** Sets up one landscape clip and reports the viewer's geometry. */
+  const VIEWER = `
+    const frame = document.querySelector('.viewer-frame');
+    const stage = document.querySelector('.viewer-stage');
+    const canvas = document.querySelector('canvas.viewer-media');
+    return {
+      frame: frame && {
+        w: Math.round(frame.getBoundingClientRect().width),
+        h: Math.round(frame.getBoundingClientRect().height),
+        aspect: frame.dataset.aspect,
+      },
+      stage: stage && {
+        w: Math.round(stage.getBoundingClientRect().width),
+        h: Math.round(stage.getBoundingClientRect().height),
+      },
+      canvas: canvas && { w: canvas.width, h: canvas.height },
+    };`
+
+  await evaluate(
+    cdp,
+    `const { importPipeline, assets, sequence, playback, view } = window.__fluxDev;
+     const added = await importPipeline.importFiles(
+       [{ path: ${dir} + '\\\\clipA.mp4', kind: 'video' }], 'link');
+     const asset = added[0] ?? assets.getAssets().find(a => a.name === 'clipA.mp4');
+     const probed = await assets.ensureProbed(asset.id);
+     sequence.setSequence(null);
+     sequence.setSequenceSize(1920, 1080);
+     sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+     view.recordView({ viewer: { playbackResolution: 0.5, pausedResolution: 1 } });
+     playback.pause();
+     playback.seek(0.5);
+     await new Promise(r => setTimeout(r, 1200));
+     return true;`,
+  )
+
+  await check('the frame takes its shape from the sequence, not from the clip', async () => {
+    /*
+     * The clip is 16:9 and the sequence is made 9:16 underneath it.
+     *
+     * This is the bug the whole thing started from: the frame's aspect ratio
+     * was a constant in the stylesheet, so a vertical sequence was previewed
+     * in a landscape box and the picture inside it was the wrong shape in a
+     * way that looked like a scaling bug rather than a frame one.
+     */
+    const landscape = await evaluate(cdp, VIEWER)
+    assert.equal(landscape.frame.aspect, '16:9', 'a 1920×1080 sequence is 16:9')
+
+    const portrait = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequenceSize(1080, 1920);
+       await new Promise(r => setTimeout(r, 700));
+       ${VIEWER}`,
+    )
+    assert.equal(portrait.frame.aspect, '9:16', 'a 1080×1920 sequence is 9:16')
+    assert.ok(
+      portrait.frame.h > portrait.frame.w,
+      `the frame is ${portrait.frame.w}×${portrait.frame.h}, which is not portrait`,
+    )
+
+    const square = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequenceSize(1080, 1080);
+       await new Promise(r => setTimeout(r, 700));
+       ${VIEWER}`,
+    )
+    assert.equal(square.frame.aspect, '1:1')
+    assert.ok(
+      Math.abs(square.frame.w - square.frame.h) <= 1,
+      `a square sequence drew ${square.frame.w}×${square.frame.h}`,
+    )
+  })
+
+  await check('Fit puts the whole frame inside the panel, and touching one edge', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { sequence, commands } = window.__fluxDev;
+       sequence.setSequenceSize(1920, 1080);
+       await new Promise(r => setTimeout(r, 400));
+       await commands.run('viewer.fit');
+       await new Promise(r => setTimeout(r, 400));
+       ${VIEWER}`,
+    )
+    // Inside, on both axes — otherwise "fit" is cropping.
+    assert.ok(
+      state.frame.w <= state.stage.w + 1 && state.frame.h <= state.stage.h + 1,
+      `${state.frame.w}×${state.frame.h} does not fit in ${state.stage.w}×${state.stage.h}`,
+    )
+    // And touching, on one — otherwise it is merely small, and a viewer that
+    // fits by shrinking to nothing would pass the test above.
+    assert.ok(
+      Math.abs(state.frame.w - state.stage.w) <= 2 || Math.abs(state.frame.h - state.stage.h) <= 2,
+      `${state.frame.w}×${state.frame.h} touches neither edge of ${state.stage.w}×${state.stage.h}`,
+    )
+  })
+
+  await check('zooming in overflows the panel, and Fit brings it back', async () => {
+    const fitted = await evaluate(cdp, VIEWER)
+
+    const zoomed = await evaluate(
+      cdp,
+      `const { commands } = window.__fluxDev;
+       await commands.run('viewer.zoomIn');
+       await commands.run('viewer.zoomIn');
+       await new Promise(r => setTimeout(r, 400));
+       ${VIEWER}`,
+    )
+    /*
+     * Two steps, not one.
+     *
+     * The refs the zoom reads are refreshed during render, so a second command
+     * arriving before React had re-rendered used to read the scale from before
+     * the first and compute the same step again — holding a zoom key moved one
+     * level and then stopped. Two calls have to land two levels apart.
+     */
+    assert.ok(
+      zoomed.frame.w > fitted.frame.w * 1.9,
+      `two zoom-ins took the frame from ${fitted.frame.w}px to ${zoomed.frame.w}px, which is not two levels`,
+    )
+
+    const back = await evaluate(
+      cdp,
+      `const { commands } = window.__fluxDev;
+       await commands.run('viewer.fit');
+       await new Promise(r => setTimeout(r, 400));
+       ${VIEWER}`,
+    )
+    assert.equal(back.frame.w, fitted.frame.w, 'Fit did not return the frame to where it was')
+  })
+
+  /** The stage's position on screen, for aiming real input events at it. */
+  const stageRect = () =>
+    evaluate(
+      cdp,
+      `const s = document.querySelector('.viewer-stage').getBoundingClientRect();
+       return { x: s.left, y: s.top, w: s.width, h: s.height };`,
+    )
+
+  await check('the wheel zooms, towards the cursor rather than the middle', async () => {
+    /*
+     * Driven with real wheel events rather than by calling the handler.
+     *
+     * React attaches `wheel` at the root as a *passive* listener, so a
+     * synthetic `onWheel` cannot preventDefault and the panel scrolls
+     * underneath the zoom. The listener here is a native one registered with
+     * `passive: false` — a fact about how it is attached, which only a real
+     * event can check.
+     */
+    await evaluate(
+      cdp,
+      `await window.__fluxDev.commands.run('viewer.fit');
+       await new Promise(r => setTimeout(r, 300));
+       return true;`,
+    )
+    const before = await evaluate(cdp, VIEWER)
+    const rect = await stageRect()
+
+    // Up and left of the middle, so the direction the picture moves is a
+    // signed answer rather than a coin flip.
+    const x = Math.round(rect.x + rect.w * 0.25)
+    const y = Math.round(rect.y + rect.h * 0.25)
+    for (let i = 0; i < 3; i++) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x,
+        y,
+        deltaX: 0,
+        deltaY: -120,
+        pointerType: 'mouse',
+      })
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    const after = await evaluate(
+      cdp,
+      `const f = document.querySelector('.viewer-frame').getBoundingClientRect();
+       const s = document.querySelector('.viewer-stage').getBoundingClientRect();
+       return { w: Math.round(f.width),
+                cx: Math.round(f.left + f.width / 2 - (s.left + s.width / 2)),
+                cy: Math.round(f.top + f.height / 2 - (s.top + s.height / 2)) };`,
+    )
+    assert.ok(after.w > before.frame.w * 1.2, `the wheel took ${before.frame.w}px to ${after.w}px`)
+    /*
+     * Zooming towards a point above and to the left of centre has to push the
+     * frame's centre down and to the right — that is what keeps the thing
+     * under the cursor under the cursor. Zooming around the middle instead
+     * leaves the centre at zero, which is the bug this catches: you point at a
+     * corner, zoom, and what you were looking at leaves the panel.
+     */
+    assert.ok(
+      after.cx > 20 && after.cy > 20,
+      `the frame centre went to (${after.cx}, ${after.cy}) — it zoomed around the middle`,
+    )
+  })
+
+  await check('the middle button drags the picture', async () => {
+    const rect = await stageRect()
+    const x = Math.round(rect.x + rect.w / 2)
+    const y = Math.round(rect.y + rect.h / 2)
+    const centre = `const f = document.querySelector('.viewer-frame').getBoundingClientRect();
+       const s = document.querySelector('.viewer-stage').getBoundingClientRect();
+       return { cx: Math.round(f.left + f.width / 2 - (s.left + s.width / 2)),
+                cy: Math.round(f.top + f.height / 2 - (s.top + s.height / 2)) };`
+
+    const before = await evaluate(cdp, centre)
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button: 'middle',
+      buttons: 4,
+      clickCount: 1,
+      pointerType: 'mouse',
+    })
+    for (const step of [20, 40, 60]) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: x + step,
+        y: y + Math.round((step * 2) / 3),
+        button: 'middle',
+        buttons: 4,
+        pointerType: 'mouse',
+      })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: x + 60,
+      y: y + 40,
+      button: 'middle',
+      buttons: 0,
+      clickCount: 1,
+      pointerType: 'mouse',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    const after = await evaluate(cdp, centre)
+    // The picture follows the pointer exactly: a drag is not a scroll with a
+    // rate of its own, it is the thing moving with your hand.
+    assert.equal(after.cx - before.cx, 60, 'the picture did not follow the drag horizontally')
+    assert.equal(after.cy - before.cy, 40, 'the picture did not follow the drag vertically')
+  })
+
+  await check('the preview resolution decides how many pixels are composited', async () => {
+    /*
+     * The canvas is the thing that shrinks, and the frame is the thing that
+     * does not. That split is the whole feature: fewer pixels to composite and
+     * to hand the compositor, laid out at the same size on screen, so the only
+     * visible difference is a softer picture.
+     */
+    const quarter = await evaluate(
+      cdp,
+      `const { view } = window.__fluxDev;
+       view.recordView({ viewer: { playbackResolution: 0.5, pausedResolution: 0.25 } });
+       await new Promise(r => setTimeout(r, 800));
+       ${VIEWER}`,
+    )
+    assert.equal(quarter.canvas.w, 480, 'a quarter of 1920')
+    assert.equal(quarter.canvas.h, 270, 'a quarter of 1080')
+
+    const full = await evaluate(
+      cdp,
+      `const { view } = window.__fluxDev;
+       view.recordView({ viewer: { playbackResolution: 0.5, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 800));
+       ${VIEWER}`,
+    )
+    assert.equal(full.canvas.w, 1920)
+    assert.equal(full.canvas.h, 1080)
+    assert.equal(full.frame.w, quarter.frame.w, 'the frame on screen must not change size with it')
+  })
+
+  await check('playing and pausing swap between the two resolutions', async () => {
+    /*
+     * The reason there are two settings at all. Dropping frames while playing
+     * is a cost you choose; a soft picture on the frame you stopped on to
+     * judge focus is not one anybody chooses.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { playback, view } = window.__fluxDev;
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       playback.seek(0.5);
+       await new Promise(r => setTimeout(r, 600));
+       const paused = document.querySelector('canvas.viewer-media').width;
+       playback.play();
+       await new Promise(r => setTimeout(r, 900));
+       const playing = document.querySelector('canvas.viewer-media').width;
+       playback.pause();
+       await new Promise(r => setTimeout(r, 700));
+       const after = document.querySelector('canvas.viewer-media').width;
+       return { paused, playing, after };`,
+    )
+    assert.equal(state.paused, 1920, 'stopped on a frame, it should composite at full size')
+    assert.equal(state.playing, 480, 'and at a quarter while running')
+    assert.equal(state.after, 1920, 'and back to full when it stops again')
+  })
+
+  await check('the two resolutions survive being saved and opened again', async () => {
+    /*
+     * A preference written on every save and silently reset on every open is
+     * worse than one that was never stored: it looks like it works until the
+     * next time the project is opened, and by then nobody connects the two.
+     *
+     * `setView` rebuilds its state field by field rather than spreading what
+     * it was given — which is the right instinct for something that parses a
+     * file a human may have edited, and exactly the way a new field gets
+     * forgotten. Hence this.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { view } = window.__fluxDev;
+       view.recordView({ viewer: { playbackResolution: 0.125, pausedResolution: 0.5 } });
+       const saved = JSON.parse(JSON.stringify(view.getView()));
+       view.resetView();
+       const afterReset = view.getView().viewer;
+       view.setView(saved);
+       const afterLoad = view.getView().viewer;
+       view.setView({ ...saved, viewer: { playbackResolution: 7, pausedResolution: 'x' } });
+       const afterJunk = view.getView().viewer;
+       return { afterReset, afterLoad, afterJunk };`,
+    )
+    assert.deepEqual(
+      state.afterLoad,
+      { playbackResolution: 0.125, pausedResolution: 0.5 },
+      'the viewer preferences did not come back from a saved view',
+    )
+    assert.deepEqual(state.afterReset, { playbackResolution: 0.5, pausedResolution: 1 })
+    // A hand-edited .flux must not be able to ask for a resolution that does
+    // not exist: 7× the sequence size is a canvas nothing can allocate.
+    assert.deepEqual(
+      state.afterJunk,
+      { playbackResolution: 0.5, pausedResolution: 1 },
+      'a nonsense resolution in the document was taken at face value',
+    )
+  })
+
+  // Put the viewer back the way the rest of the suite expects to find it.
+  await evaluate(
+    cdp,
+    `const { view, sequence, commands } = window.__fluxDev;
+     view.recordView({ viewer: { playbackResolution: 0.5, pausedResolution: 1 } });
+     sequence.setSequenceSize(1920, 1080);
+     await commands.run('viewer.fit');
+     await new Promise(r => setTimeout(r, 300));
+     return true;`,
+  )
 
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
