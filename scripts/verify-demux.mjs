@@ -732,9 +732,27 @@ try {
 
   await check('the cache keeps what is used and drops what is not', async () => {
     const pruneDir = path.join(tmp, 'prune-cache')
+
+    /*
+     * Deliberately uneven entry sizes.
+     *
+     * An entry stores its identity token as text — `size:mtimeMs` — so an
+     * mtime with a longer decimal part makes a longer entry. A filesystem with
+     * nanosecond timestamps produces that spread by itself; Windows hands six
+     * files copied in a burst one coarse timestamp and makes them all equal,
+     * which is how a budget that assumed equal sizes passed here for months
+     * and failed on Linux.
+     *
+     * Setting the mtimes explicitly means every platform exercises the uneven
+     * case, so the assumption cannot quietly come back.
+     */
+    const second = Math.floor(Date.now() / 1000) - 3600
+    const fractions = [0, 0.0761946, 0.1, 0.1234567, 0.5, 0.25]
+
     const files = []
     for (let i = 0; i < 6; i++) {
       const file = await subject(`prune-${i}.mp4`)
+      await fs.utimes(file, second + fractions[i], second + fractions[i])
       const token = await sourceToken(file)
       await writeDerived(pruneDir, file, INDEX, token, encoded)
       files.push({ file, token })
@@ -763,11 +781,35 @@ try {
       assert.ok(stat.mtimeMs > old + 60_000, `${path.basename(file)} was not marked as used`)
     }
 
-    const entrySize = (await fs.stat(entryPath(pruneDir, files[0].file, INDEX))).size
-    const result = await pruneCache(pruneDir, entrySize * 2 + 1)
+    /*
+     * A budget of exactly the two entries that have to survive.
+     *
+     * Not `one entry × 2`, which is what this used to say and which assumes
+     * every entry is the same size. They are not. An entry carries its
+     * identity token as text — `size:mtimeMs` — and `mtimeMs` is a float whose
+     * decimal part is as long as the filesystem's precision makes it. On
+     * Windows the six copies land on one coarse timestamp and every entry
+     * comes out the same length, so the assumption held locally and on the
+     * Windows runner. On Linux, nanosecond timestamps give each copy a
+     * different fraction and the entries differ by a few bytes.
+     *
+     * Then a budget measured from the *first* entry is a few bytes short of
+     * holding the first two, the second is dropped to make room, and a smaller
+     * day-old entry is kept in its place — still two kept and four removed, so
+     * only the final assertion notices. Which is exactly how it failed: once,
+     * on Linux, reading `prune-1.mp4 was dropped`.
+     *
+     * Summing the survivors is also a tighter statement of the rule: with
+     * room for precisely those two, anything else kept would be a real fault
+     * rather than slack in the budget.
+     */
+    const sizeOf = async ({ file }) => (await fs.stat(entryPath(pruneDir, file, INDEX))).size
+    const budget = (await Promise.all(kept.map(sizeOf))).reduce((a, b) => a + b, 0)
+
+    const result = await pruneCache(pruneDir, budget)
     assert.equal(result.kept, 2, `kept ${result.kept}`)
     assert.equal(result.removed, 4, `removed ${result.removed}`)
-    assert.ok(result.bytes <= entrySize * 2 + 1, `held ${result.bytes} bytes`)
+    assert.ok(result.bytes <= budget, `held ${result.bytes} bytes against a budget of ${budget}`)
 
     for (const { file, token } of kept) {
       assert.ok(await readDerived(pruneDir, file, INDEX, token), `${path.basename(file)} was dropped`)
