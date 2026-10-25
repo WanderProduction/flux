@@ -46,6 +46,16 @@ import { trackFor, type VideoTrack } from './indexCache'
  */
 const LOOKAHEAD_FRAMES = 8
 
+/**
+ * The furthest the wait below will widen its window when a decoder is holding
+ * everything back.
+ *
+ * Four windows is well past anything measured and still a bounded amount of
+ * reading, so a frame that genuinely cannot be decoded costs a little extra
+ * I/O rather than the rest of the file.
+ */
+const MAX_FEED_AHEAD = LOOKAHEAD_FRAMES * 4
+
 /** Never ask for more than this in one range request. */
 const MAX_FETCH_BYTES = 8 << 20
 
@@ -306,10 +316,10 @@ export class VideoSource {
    * the end of every batch makes the next batch — which starts with delta
    * frames — fail outright with "a key frame is required after flush()".
    */
-  private async feed(time: number): Promise<void> {
+  private async feed(time: number, ahead: number = LOOKAHEAD_FRAMES): Promise<void> {
     const track = this.track
     const mine = this.generation
-    const wanted = Math.min(sampleAt(track, time) + LOOKAHEAD_FRAMES, track.count - 1)
+    const wanted = Math.min(sampleAt(track, time) + ahead, track.count - 1)
 
     while (
       !this.closed &&
@@ -515,6 +525,29 @@ export class VideoSource {
      * what pushes the target itself out of the decoder without a flush.
      */
     const deadline = performance.now() + FRAME_TIMEOUT_MS
+    /*
+     * How far past the target this wait is willing to submit.
+     *
+     * A decoder emits nothing until enough chunks are in flight, and how many
+     * is a property of the decoder and the stream rather than something we can
+     * know: measured here as 14 for a 1080p camera clip against 2 for a 360p
+     * fixture. With the window fixed at 8 — above every fixture, below real
+     * footage — `feed` submitted its eight, stopped, and this loop then waited
+     * without ever offering more. The decoder was waiting on us and we were
+     * waiting on it, with a five second timer on the deadlock: a black viewer
+     * with the sound playing on, and a picture that appeared only while the
+     * playhead was dragged, each drag submitting a few chunks more.
+     *
+     * Widening here rather than raising LOOKAHEAD_FRAMES is deliberate. That
+     * constant also decides how many decoded frames are held and how far the
+     * playhead may drift before the decoder is restarted; raising it decodes a
+     * second of video ahead on every call, which costs far more than the rare
+     * starvation it would avoid.
+     */
+    let ahead = LOOKAHEAD_FRAMES
+    /** The flush below is worth doing once; a second asks a decoder that is
+        already waiting for a keyframe to produce frames it will not touch. */
+    let flushed = false
     while (!this.closed && !this.failed) {
       const frame = this.pick(time)
       if (frame) {
@@ -527,18 +560,53 @@ export class VideoSource {
       const arrived = new Promise<void>((resolve) => this.waiters.push(resolve))
       await Promise.race([arrived, new Promise((r) => setTimeout(r, 60))])
 
-      // Everything that could be submitted has been, and the decoder is still
-      // holding frames back. This is what flush is actually for.
-      if (!this.feeding && this.next < 0 && !this.pick(time)) {
+      // Still nothing, and there is more of the file to offer: widen and
+      // submit again rather than waiting on a decoder that is waiting on us.
+      // `next < 0` is end of file — that belongs to the flush below, not here.
+      if (!this.feeding && this.next >= 0 && ahead < MAX_FEED_AHEAD && !this.pick(time)) {
+        ahead = Math.min(ahead + LOOKAHEAD_FRAMES, MAX_FEED_AHEAD)
+        this.feeding = this.feed(time, ahead).finally(() => {
+          this.feeding = null
+        })
+      }
+
+      /*
+       * Everything that could be submitted has been, and the decoder is still
+       * holding frames back. This is what flush is actually for.
+       *
+       * Started once and *not awaited*. Frames come out during a flush, and
+       * this loop is already watching for them every sixty milliseconds —
+       * while awaiting it means the deadline above cannot run, so a flush that
+       * does not settle takes the whole call with it. That is not theoretical:
+       * seeking into the last seconds of a clip reaches here, and the flush
+       * hung indefinitely, leaving the source marked failed for the seek after
+       * it. `next` is already -1 by then — feed sets it when it submits the
+       * last sample — so there is nothing to put back afterwards.
+       *
+       * Reaching this at all is new. The window used to stop short of the end
+       * of the file on anything long, so the last samples were never submitted
+       * and this branch never ran.
+       */
+      if (!flushed && !this.feeding && this.next < 0 && !this.pick(time)) {
+        flushed = true
         const decoder = this.decoder
         if (decoder && decoder.state === 'configured') {
-          await decoder.flush().catch(() => {
-            this.failed = true
+          /*
+           * The rejection counts only if this decoder is still the one in use.
+           *
+           * An unawaited flush outlives the call that started it, and the next
+           * seek throws the decoder away and builds another. The old flush
+           * then rejects — correctly, it was abandoned — and blaming the
+           * source for that marked it failed just as the new decoder was
+           * about to work. Measured as a seek that returned nothing with
+           * `failed` set, immediately after a seek to the end of the clip
+           * had succeeded.
+           */
+          const mine = this.generation
+          void decoder.flush().catch(() => {
+            if (this.decoder === decoder && this.generation === mine) this.failed = true
           })
-          // The flush emptied it, so anything further needs a keyframe again.
-          this.next = -1
         }
-        break
       }
     }
 
