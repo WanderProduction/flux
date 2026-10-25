@@ -18,6 +18,7 @@ import { ToolsPanel } from './ToolsPanel'
 import { BatchPanel } from './BatchPanel'
 import { RenderPanel } from './RenderPanel'
 import { ExportListPanel } from './ExportListPanel'
+import { EffectControlsPanel } from './EffectControlsPanel'
 
 export function registerBuiltinPanels() {
   panels.registerAll([
@@ -56,6 +57,12 @@ export function registerBuiltinPanels() {
       title: 'Render',
       description: 'Encode settings, and the queue of clips waiting to be written',
       component: RenderPanel,
+    },
+    {
+      id: 'effects',
+      title: 'Effect Controls',
+      description: 'What the selected clip does to its picture and its sound',
+      component: EffectControlsPanel,
     },
     {
       id: 'exportList',

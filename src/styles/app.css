@@ -3192,3 +3192,114 @@ kbd {
 .render-drop:hover {
   color: var(--flux-warn);
 }
+
+/* ── Effect Controls ─────────────────────────────────────────── */
+
+.ec-body {
+  padding: 8px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Capped, because the panel can be docked very wide and a label pinned to
+     one edge with its field at the other is a row you have to track across. */
+  max-width: 460px;
+}
+.ec-empty,
+.ec-note {
+  padding: 14px;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  font-family: var(--flux-font-mono);
+}
+
+.ec-group {
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-panel);
+}
+/* A section that has been moved off its defaults is worth finding at a glance
+   — it is the answer to "why does this shot look different". */
+.ec-group--touched {
+  border-color: var(--flux-accent);
+}
+.ec-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--flux-border);
+}
+.ec-disclose {
+  border: 0;
+  background: none;
+  color: var(--flux-text);
+  font: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+  padding: 0;
+}
+.ec-reset {
+  border: 0;
+  background: none;
+  color: var(--flux-text-faint);
+  font: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.ec-reset:hover {
+  color: var(--flux-accent);
+}
+.ec-group-body {
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ec-row,
+.ec-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--flux-text-sm);
+}
+.ec-label {
+  color: var(--flux-text-dim);
+  white-space: nowrap;
+}
+.ec-pair {
+  display: flex;
+  gap: 4px;
+}
+.ec-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Monospace and right-aligned, because these are read in columns and compared
+   against each other far more often than they are read one at a time. */
+.ec-input input {
+  width: 68px;
+  padding: 1px 4px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-sm);
+  text-align: right;
+}
+.ec-input input:focus {
+  outline: none;
+  border-color: var(--flux-accent);
+}
+.ec-suffix {
+  color: var(--flux-text-faint);
+  font-family: var(--flux-font-mono);
+  width: 18px;
+}
+.ec-check input {
+  accent-color: var(--flux-accent);
+}

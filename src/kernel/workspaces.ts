@@ -48,6 +48,20 @@ function buildEdit(api: DockviewApi) {
     title: 'Content Browser',
     position: { referencePanel: 'viewer', direction: 'right' },
   })
+  /*
+   * Tabbed with the Content Browser rather than given a column of its own.
+   *
+   * Both answer "what am I working with", only one is wanted at a time, and
+   * the editing workspace has no width to spare beside the viewer. Premiere
+   * does the same thing — Effect Controls shares its frame with the Source
+   * monitor and the project bin.
+   */
+  api.addPanel({
+    id: 'effects',
+    component: 'effects',
+    title: 'Effect Controls',
+    position: { referencePanel: 'content', direction: 'within' },
+  })
   api.addPanel({
     id: 'timeline',
     component: 'timeline',

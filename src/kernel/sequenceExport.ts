@@ -38,7 +38,8 @@
 
 import { getAsset } from './assets'
 import { trackLevel } from './media/mixer'
-import { getSequence, isTrackVisible, renderRange, type SequenceState } from './sequence'
+import { getSequence, isTrackVisible, renderRange, type Clip, type SequenceState } from './sequence'
+import { isAudioTouched, isTransformed } from './clipEffects'
 import type { SkippedClip } from './batchExport'
 import type { ResolvedOutput } from './renderSettings'
 import { safeFolderName } from '../../shared/projectNaming.js'
@@ -280,6 +281,47 @@ export function planSequence(
       const share =
         clip.sourceDuration > 0 ? Math.min(1, covered / clip.sourceDuration) : 1
       sourceBytes += Math.round((asset.size ?? 0) * share)
+    }
+  }
+
+  /*
+   * A clip with a transform on it is refused rather than rendered flat.
+   *
+   * The Viewer honours position, scale, rotation, opacity, crop and skew; the
+   * ffmpeg graph does not yet — it is one `scale`, one `pad` and one `overlay`
+   * per clip, and nothing in it has anywhere to put an anchor point. Rendering
+   * anyway would write a file that does not match the picture it was checked
+   * against, and quietly: a 60% scale would simply not be there, and the only
+   * way to find out would be to watch the output.
+   *
+   * That is the one thing this pipeline refuses to do. Every rule in it comes
+   * back to the output being the sequence — frame rates are never silently
+   * conformed, every encode is verified against its source — so a transform it
+   * cannot express has to stop it rather than be dropped on the floor. Named
+   * clip by clip, because "something is transformed" sends someone hunting
+   * through a timeline for it.
+   */
+  const transformed = [...video, ...audio]
+    .map((cut) => sequence.clips.find((clip) => clip.id === cut.id))
+    .filter((clip): clip is Clip => Boolean(clip))
+    .filter(
+      (clip) =>
+        isTransformed(clip.effects?.transform, {
+          width: sequence.settings.width,
+          height: sequence.settings.height,
+        }) || isAudioTouched(clip.effects?.audio),
+    )
+  if (transformed.length > 0) {
+    const names = transformed
+      .map((clip) => getAsset(clip.assetId)?.name ?? clip.id)
+      .filter((name, at, all) => all.indexOf(name) === at)
+    return {
+      job: null,
+      skipped,
+      reason:
+        `the render cannot draw clip effects yet, and ${names.length === 1 ? 'one clip has' : `${names.length} clips have`} them: ` +
+        `${names.slice(0, 4).join(', ')}${names.length > 4 ? ' and others' : ''}. ` +
+        'Reset them in Effect Controls, or render a sequence without them.',
     }
   }
 
