@@ -33,6 +33,33 @@ const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 const { check, report } = createChecker()
 const cdp = await attach()
 
+/*
+ * A window of a known size, for the whole run.
+ *
+ * Nearly every check below reaches for a clip at a screen point, and where
+ * that point lands depends on how wide the panels are — which depends on the
+ * window, which dockview then lays out differently as it narrows. The dev app
+ * remembers its size between runs, so the suite inherited whatever shape it
+ * was last left in.
+ *
+ * Measured: at 1080x1849 the lanes were 236 pixels wide, a clip at 8s sat past
+ * the right-hand edge, and the point the press aimed at landed on the Content
+ * Browser's rail instead of the timeline. The error read "no clip on V1 at
+ * 8s", about a clip that was plainly there.
+ *
+ * 1600x950 is the size FLUX opens at when it has no history, so this is the
+ * shape the layout was designed around rather than a number picked to make
+ * the checks pass. Cleared at the end, because the override outlives the
+ * harness otherwise and the next person to open the app finds it stuck.
+ */
+await cdp.send('Emulation.setDeviceMetricsOverride', {
+  width: 1600,
+  height: 950,
+  deviceScaleFactor: 1,
+  mobile: false,
+})
+await new Promise((resolve) => setTimeout(resolve, 400))
+
 /**
  * Page-side helper: performs a full drag from a Content Browser card onto a
  * timeline lane, at a given time in seconds.
@@ -2741,6 +2768,25 @@ try {
      window.__pressClipAt = (trackId, atSeconds, mods = {}) => {
        const lane = window.__laneOf(trackId);
        const zoom = window.__fluxDev.view.getView().timeline.zoom || 60;
+       /*
+        * Bring the moment into view before reaching for it.
+        *
+        * The press lands at a screen point, and a point outside the panel
+        * cannot be hit at all - elementFromPoint answers null and this threw
+        * "no clip at 8s" for a clip that was plainly there, just scrolled off
+        * the right-hand edge. How much of a timeline is visible depends on how
+        * wide the panel happens to be, which is a fact about the workspace
+        * rather than about the edit, and no check here is about that.
+        */
+       const scroller = window.__lanes();
+       if (scroller) {
+         const target = atSeconds * zoom;
+         const edge = 24;
+         if (target < scroller.scrollLeft + edge ||
+             target > scroller.scrollLeft + scroller.clientWidth - edge) {
+           scroller.scrollLeft = Math.max(0, target - scroller.clientWidth / 2);
+         }
+       }
        const box = lane.getBoundingClientRect();
        const at = { clientX: box.left + atSeconds * zoom, clientY: box.top + box.height / 2 };
        const el = document.elementFromPoint(at.clientX, at.clientY)?.closest('.clip');
@@ -3822,7 +3868,18 @@ try {
              .find(one => lane.contains(one));
            const box = lane.getBoundingClientRect();
            const at = { clientX: box.left + atSeconds * 30, clientY: box.top + box.height / 2 };
-           const target = document.elementFromPoint(at.clientX, at.clientY).closest('.clip') ?? el;
+           /*
+            * elementFromPoint answers null for a point outside the viewport,
+            * and the fallback was guarding the wrong thing: the "?? el" catches
+            * a click that landed on no clip, not a lookup that landed nowhere
+            * at all. A point past the right-hand edge threw here - and threw
+            * before the 'v' below, which is what puts the Select tool back.
+            * The Razor then stayed in hand for the rest of the suite, and the
+            * eight checks after this one failed for want of a pointer that
+            * selects.
+            */
+           const hit = document.elementFromPoint(at.clientX, at.clientY);
+           const target = hit?.closest('.clip') ?? el;
            target.dispatchEvent(new PointerEvent('pointerdown',
              { bubbles: true, cancelable: true, button: 0, pointerId: 98, ...at, ...mods }));
            window.dispatchEvent(new PointerEvent('pointerup',
@@ -5737,6 +5794,9 @@ try {
     assert.deepEqual(cdp.consoleErrors, [])
   })
 } finally {
+  await cdp
+    .send('Emulation.clearDeviceMetricsOverride')
+    .catch(() => {})
   cdp.close()
 }
 
