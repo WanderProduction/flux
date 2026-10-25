@@ -515,14 +515,23 @@ try {
     assert.deepEqual(types, ['application/x-flux-files'])
   })
 
-  await check('dropping an un-imported file asks how to import it', async () => {
-    // The question has to reach the Timeline. It has no dialog of its own, so
-    // this is really a check that the import pipeline is shared rather than
-    // duplicated inside the Content Browser.
+  await check('dropping an un-imported file imports it by linking, and places it', async () => {
+    /*
+     * There is no question any more.
+     *
+     * Copy-or-link is built and unwired — see `importFiles`. It is a decision
+     * about a project, made once when the project is made, not a dialog in
+     * front of every drop; asking on every import trains people to dismiss it
+     * without reading. Until there is a settings page to put it on, an import
+     * links, and the four checks that used to drive the dialog are this one.
+     *
+     * The dialog itself, the remembered answer and `importByCopy` are all
+     * still there, so what this stops testing is reachable again the moment
+     * something calls `ask`.
+     */
     const state = await evaluate(
       cdp,
-      `const { importMode, sequence, assets } = window.__fluxDev;
-       importMode.setImportMode('ask');
+      `const { sequence, assets } = window.__fluxDev;
        sequence.clearSequence();
        assets.removeAssets(assets.getAssets()
          .filter(a => a.name === 'shot_B.mp4').map(a => a.id));
@@ -537,104 +546,26 @@ try {
        lane.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
        lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
 
-       for (let i = 0; i < 60 && !document.querySelector('.dialog'); i++)
-         await new Promise(r => setTimeout(r, 100));
-       return { dialog: !!document.querySelector('.dialog'),
-                clips: sequence.getSequence().clips.length };`,
-    )
-    assert.equal(state.dialog, true, 'the copy-or-link question should be on screen')
-    assert.equal(state.clips, 0, 'nothing is placed until the question is answered')
-  })
-
-  await check('answering it imports the file and places the clip', async () => {
-    const state = await evaluate(
-      cdp,
-      `const { sequence, assets } = window.__fluxDev;
-       const link = [...document.querySelectorAll('.dialog button')]
-         .find(b => /leave the files|origin|link/i.test(b.textContent));
-       if (!link) throw new Error('no link choice in the dialog');
-       link.click();
-
-       // Two separate waits, reported separately. The import is immediate; the
-       // clip needs the asset's duration, which is a real decode and can be
-       // slow behind whatever else has been decoding. Collapsing them into one
-       // timeout makes a slow probe look like a failed import.
-       const found = (n) => assets.getAssets().find(a => a.name === n);
-       for (let i = 0; i < 100 && !found('shot_B.mp4'); i++)
-         await new Promise(r => setTimeout(r, 100));
-       const asset = found('shot_B.mp4');
-
-       for (let i = 0; i < 200 && sequence.getSequence().clips.length === 0; i++)
-         await new Promise(r => setTimeout(r, 100));
-       const clip = sequence.getSequence().clips[0];
-
-       return { imported: !!asset, name: asset?.name, inProject: asset?.inProject ?? false,
-                placed: !!clip, sameAsset: clip ? clip.assetId === asset?.id : null,
-                duration: clip ? Math.round(clip.duration * 100) / 100 : null,
-                dialogGone: !document.querySelector('.dialog') };`,
-    )
-    assert.equal(state.imported, true, 'the dropped file should now be a project asset')
-    assert.equal(state.name, 'shot_B.mp4')
-    assert.equal(state.inProject, false, 'Origin leaves the file where it was')
-    assert.equal(state.placed, true, 'and the drop should have placed a clip')
-    assert.equal(state.sameAsset, true, 'the clip should play the file that was dropped')
-    assert.ok(state.duration > 0, 'the clip should be as long as the media, not a guess')
-    assert.equal(state.dialogGone, true)
-  })
-
-  await check('cancelling the question imports nothing and places nothing', async () => {
-    const state = await evaluate(
-      cdp,
-      `const { sequence, assets, importMode } = window.__fluxDev;
-       importMode.setImportMode('ask');
-       sequence.clearSequence();
-       const before = assets.getAssets().length;
-
-       const card = [...document.querySelectorAll('.card')]
-         .find(c => c.querySelector('.card-name')?.textContent === 'render.webm');
-       const lane = document.querySelectorAll('.tl-lane')[1];
-       const dt = new DataTransfer();
-       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
-       const rect = lane.getBoundingClientRect();
-       lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
-       for (let i = 0; i < 60 && !document.querySelector('.dialog'); i++)
-         await new Promise(r => setTimeout(r, 100));
-
-       document.querySelector('.dialog').dispatchEvent(
-         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-       await new Promise(r => setTimeout(r, 800));
-       return { before, after: assets.getAssets().length,
-                clips: sequence.getSequence().clips.length,
-                dialogGone: !document.querySelector('.dialog') };`,
-    )
-    assert.equal(state.dialogGone, true, 'Escape should dismiss the question')
-    assert.equal(state.after, state.before, 'cancelling must import nothing')
-    assert.equal(state.clips, 0, 'and place nothing')
-  })
-
-  await check('a drop with a remembered preference skips the question', async () => {
-    const state = await evaluate(
-      cdp,
-      `const { sequence, assets, importMode } = window.__fluxDev;
-       importMode.setImportMode('link');
-       sequence.clearSequence();
-
-       const card = [...document.querySelectorAll('.card')]
-         .find(c => c.querySelector('.card-name')?.textContent === 'render.webm');
-       const lane = document.querySelectorAll('.tl-lane')[1];
-       const dt = new DataTransfer();
-       card.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
-       const rect = lane.getBoundingClientRect();
-       lane.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, clientX: rect.left }));
        for (let i = 0; i < 80 && sequence.getSequence().clips.length === 0; i++)
          await new Promise(r => setTimeout(r, 100));
-       return { dialog: !!document.querySelector('.dialog'),
-                clips: sequence.getSequence().clips.length,
-                names: assets.getAssets().map(a => a.name).sort() };`,
+       await new Promise(r => setTimeout(r, 300));
+
+       const asset = assets.getAssets().find(a => a.name === 'shot_B.mp4');
+       const out = {
+         dialog: !!document.querySelector('.dialog'),
+         clips: sequence.getSequence().clips.length,
+         inProject: asset ? Boolean(asset.inProject) : null,
+       };
+       // Put the timeline back. The four checks this replaced ended with an
+       // empty one, and the checks after it are written against that.
+       sequence.clearSequence();
+       await new Promise(r => setTimeout(r, 200));
+       return out;`,
     )
-    assert.equal(state.dialog, false, 'a settled preference must not ask again')
-    assert.equal(state.clips, 1)
-    assert.ok(state.names.includes('render.webm'))
+    assert.equal(state.dialog, false, 'nothing should be asked')
+    assert.ok(state.clips > 0, 'the drop should have placed the clip')
+    // Linked, not copied: the asset still points at where the file already is.
+    assert.equal(state.inProject, false, 'the file should not have been copied into the project')
   })
 
   await check('a drag carrying nothing FLUX understands is refused', async () => {

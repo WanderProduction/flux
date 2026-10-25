@@ -2100,19 +2100,32 @@ export function rippleDeleteClips(ids: string[]): number {
 }
 
 /**
- * Closes a gap: everything after it on that track falls back into it.
+ * Closes a gap: everything after it on that track falls back into it — and
+ * everything linked to what moved comes with it.
  *
- * One track, because a gap is on one track. The same rule as a ripple delete
- * without the delete.
+ * A gap is on one track, and for a long time so was the answer. That is a
+ * sync error waiting to happen: closing a hole on V1 pulled every picture
+ * after it two seconds earlier and left every sound where it was, so a cut
+ * that looked tidy had drifted out of sync by the time anyone played it. The
+ * halves of a shot move together everywhere else — dragging one drags the
+ * other, deleting one deletes the other — and there is no reason a ripple
+ * should be the exception.
+ *
+ * Expanded through links rather than applied to every track, because tracks
+ * are not the unit. Two unrelated clips sitting on A2 have nothing to do with
+ * a gap on V1 and must not be dragged about by it.
  */
 export function closeGap(gap: Gap): boolean {
   const length = gap.end - gap.start
   if (!(length > EPS)) return false
 
+  const after = sequence.clips
+    .filter((clip) => clip.trackId === gap.trackId && clip.start >= gap.end - EPS)
+    .map((clip) => clip.id)
+  const moving = new Set(withLinked(after))
+
   const clips = sequence.clips.map((clip) =>
-    clip.trackId === gap.trackId && clip.start >= gap.end - EPS
-      ? { ...clip, start: snapToFrame(clip.start - length) }
-      : clip,
+    moving.has(clip.id) ? { ...clip, start: snapToFrame(clip.start - length) } : clip,
   )
   if (clips.every((clip, i) => clip === sequence.clips[i])) return false
 

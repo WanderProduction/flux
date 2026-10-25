@@ -53,8 +53,8 @@ function buildEdit(api: DockviewApi) {
    *
    * Both answer "what am I working with", only one is wanted at a time, and
    * the editing workspace has no width to spare beside the viewer. Premiere
-   * does the same thing — Effect Controls shares its frame with the Source
-   * monitor and the project bin.
+   * does the same — Effect Controls shares its frame with the Source monitor
+   * and the project bin.
    */
   api.addPanel({
     id: 'effects',

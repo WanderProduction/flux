@@ -15,7 +15,7 @@
  */
 
 import { importAssets, type Asset } from './assets'
-import { getImportMode, setImportMode, type ImportMode } from './importMode'
+import { type ImportMode } from './importMode'
 import { copyIntoImports, getProject } from './project'
 import type { MediaKind } from './fsBridge'
 
@@ -76,7 +76,19 @@ function setStatus(patch: Partial<ImportStatus>) {
   emit()
 }
 
-function ask(entries: ImportEntry[]): Promise<ImportChoice | null> {
+/**
+ * Puts the copy-or-link question on screen and waits for an answer.
+ *
+ * Exported and currently called by nothing. That is deliberate rather than
+ * forgotten: the question belongs with a project's settings, asked once, and
+ * there is no settings page to put it on yet — so imports link, and this is
+ * the hook the setting will use when there is somewhere to put it. Deleting
+ * it would mean writing the dialog, the pending-request handshake and the
+ * remembered answer all over again.
+ *
+ * See `importFiles` for why it is not reached today.
+ */
+export function ask(entries: ImportEntry[]): Promise<ImportChoice | null> {
   // A second question while one is on screen would replace the first and leave
   // its caller waiting forever, so the newcomer is refused instead.
   if (request) return Promise.resolve(null)
@@ -148,17 +160,22 @@ export async function importFiles(
 ): Promise<Asset[]> {
   if (entries.length === 0) return []
 
-  // Without a project there is nowhere to copy to, so linking is the only
-  // option available.
+  /*
+   * Copying into the project is built and deliberately not reachable yet.
+   *
+   * The machinery below is complete — `importByCopy`, the choice dialog, the
+   * remembered answer — and the question it asks is the wrong one to ask now.
+   * It belongs with the rest of a project's settings, as a decision made once
+   * for a project rather than a dialog in front of every drop, and there is no
+   * settings page to put it on. Asking on every import in the meantime trains
+   * people to dismiss it.
+   *
+   * So an import links, and the only way to copy is for a caller to say so
+   * outright. Left wired to `forced` rather than deleted, because the path
+   * that will use it later is this one.
+   */
   const canCopy = Boolean(getProject())
-  let mode: ImportMode = forced ?? (canCopy ? getImportMode() : 'link')
-
-  if (mode === 'ask') {
-    const choice = await ask(entries)
-    if (!choice) return []
-    mode = choice.mode
-    if (choice.remember) setImportMode(choice.mode)
-  }
+  let mode: ImportMode = forced ?? 'link'
 
   if (mode === 'copy' && canCopy) return importByCopy(entries)
   return importAssets(entries)

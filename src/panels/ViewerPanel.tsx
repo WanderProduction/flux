@@ -858,6 +858,9 @@ export function ViewerPanel() {
     (event: React.PointerEvent) => {
       if (duration <= 0) return
       event.preventDefault()
+      // The same as the timeline ruler: a scrub takes the playhead, so the
+      // clock has to let go of it.
+      pause()
       scrubTo(event.clientX)
       const onMove = (move: PointerEvent) => scrubTo(move.clientX)
       const onUp = () => {

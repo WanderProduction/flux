@@ -218,6 +218,18 @@ keeps what you typed.
 `project_files` is the part FLUX owns — the document, and whatever bookkeeping comes later.
 `imports` and `exports` are yours.
 
+> **Importing links; it does not copy — for now.** Dropping media on the timeline or the browser
+> adds it where it already lives, and `imports/` stays empty unless you put something there
+> yourself.
+>
+> Copying into the project, the way Unreal does it, is **built and deliberately unwired**:
+> `importByCopy`, the copy-or-link dialog and the remembered answer are all still in
+> `kernel/importPipeline.ts`, and `ask` is exported for whatever reaches them next. What is
+> missing is the right place to ask. It is a decision about a *project* — made once, when the
+> project is made — not a dialog in front of every drop, and asking on every import trains people
+> to dismiss it without reading. **Planned as a project setting**, once there is a settings page to
+> put it on.
+
 **Project state lives in the project folder, not in app data.** Opening a different project shows a
 different timeline, and a project folder copied to another machine brings its contents with it.
 Workspace layouts, the keymap and the recents list stay app-scoped, because those describe the
