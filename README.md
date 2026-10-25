@@ -915,6 +915,50 @@ Drag the ruler, or the playhead itself — it carries a narrow handle down the l
 line is otherwise inert, because it lies over every lane and one that swallowed clicks would make
 the clip underneath it unselectable at exactly the time you are looking at.
 
+#### Only the blocks near the viewport exist
+
+Dropping a shoot folder puts a hundred clips on the timeline, and with their sound that is well
+over two hundred blocks. Every block used to be in the DOM, which is cheap, and every block asked
+for its own thumbnail decode and its own waveform build, which is not. A hundred and sixteen files
+dropped at once started a hundred and sixteen end-to-end audio decodes in the same tick, for parts
+of a sequence nobody was looking at.
+
+So a block is drawn only when its span is within a screen of the visible one. This is not about
+the cost of drawing — positioning a `div` is nothing — it is about **what a block asks for when it
+mounts**. A block that does not exist decodes nothing.
+
+| dropping 116 clips | before | after |
+|---|---|---|
+| blocks in the DOM | 232 | 4 |
+| waveforms built | 116 | 2 |
+
+Measured on `E:\FOOTAGE\AG GROUPS\REELS` with a cold media cache, in a 404px-wide lane; a wider
+lane draws more, which is the point — the number follows the window, not the sequence.
+
+> **The margin is a screen either side, and the thing being drawn is still drawn while dragged.**
+> A block that vanished when it crossed the edge of the viewport would be a drag that threw the
+> clip away, so anything being dragged or trimmed is drawn wherever it currently is rather than
+> wherever the sequence says it is.
+
+Losing a block is the failure mode that would not announce itself — a clip you cannot click is
+indistinguishable from a clip that is not there — so `verify:timeline` scrolls a 120-clip sequence
+to three positions and, at each, asks the kernel which clips cover the visible span and the DOM
+whether they are there. Blocks carry `data-clip-id` for exactly that question: once a lane has
+scrolled, a left offset no longer identifies a clip.
+
+#### Waveforms wait their turn, and give up when nobody is asking
+
+Thumbnails have had a limit since the beginning, with a note saying that kicking off a hundred
+video decodes when a folder opens will hitch the whole window. Building a waveform is the more
+expensive of the two — the audio is decoded end to end — and it had no limit at all. Now **two**
+run at once, fewer than the three thumbnails allow, because a waveform decode runs flat out for its
+whole length where a thumbnail is one seek and one frame.
+
+A job that is still waiting is also **dropped** when the last block asking for it goes away —
+scrolled past, deleted, or its audio removed. A job already running is left to finish, since it is
+most of the way through by definition and the result is worth keeping. That is the difference
+between clearing a long timeline being cheap and being merely eventual.
+
 #### Sound on the timeline
 
 A file with audio lands as **two clips** — the picture on a video track, the sound on an audio

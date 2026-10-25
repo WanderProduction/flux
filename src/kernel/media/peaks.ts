@@ -180,18 +180,102 @@ function hasAudioDecoder(): boolean {
 }
 
 /**
+ * Waveforms built at once.
+ *
+ * Thumbnails have had a limit since the beginning, with a note saying that
+ * kicking off a hundred video decodes when a folder opens will hitch the whole
+ * window. Building a waveform is the *more* expensive of the two — the audio is
+ * decoded end to end — and it had no limit at all, so dropping a shoot folder
+ * started a hundred and sixteen of them in the same tick.
+ *
+ * Two rather than three: a waveform decode runs flat out for its whole length,
+ * where a thumbnail is one seek and one frame, and the point of the limit is to
+ * leave the main thread enough room to stay answerable.
+ */
+const CONCURRENCY = 2
+
+let active = 0
+
+interface Waiting {
+  /** How many clips are asking. A file on the timeline three times counts three. */
+  wanted: number
+  promise: Promise<PeaksResult>
+  settle: (result: PeaksResult) => void
+}
+
+/** Asked for, not started. Insertion order is the running order. */
+const waiting = new Map<string, Waiting>()
+
+/**
  * Peaks for a file: memory, then disk, then the decoder.
  *
  * Concurrent callers share one job — a timeline with the same file on it three
- * times must not decode its audio three times.
+ * times must not decode its audio three times — and a job waits its turn rather
+ * than starting the moment it is asked for.
  */
 export function peaksFor(path: string): Promise<PeaksResult> {
   const existing = inflight.get(path)
   if (existing) return existing
 
-  const work = resolve(path).finally(() => inflight.delete(path))
+  const held = waiting.get(path)
+  if (held) {
+    held.wanted += 1
+    return held.promise
+  }
+
+  if (active < CONCURRENCY) return begin(path)
+
+  let settle!: (result: PeaksResult) => void
+  const promise = new Promise<PeaksResult>((resolveWith) => {
+    settle = resolveWith
+  })
+  waiting.set(path, { wanted: 1, promise, settle })
+  return promise
+}
+
+/**
+ * Says a caller no longer needs a waveform it asked for.
+ *
+ * Delete the audio of a clip and its block goes; the waveform it had queued is
+ * then work for something nobody can see. A job that has already started is
+ * left to finish — it is most of the way through by definition and the result
+ * is worth keeping — but one still waiting is dropped, which is what makes
+ * clearing a long timeline cheap instead of merely eventual.
+ */
+export function abandonPeaks(path: string): void {
+  const held = waiting.get(path)
+  if (!held) return
+  held.wanted -= 1
+  if (held.wanted > 0) return
+  waiting.delete(path)
+  held.settle({ ok: false, reason: 'no longer needed' })
+}
+
+/** Jobs asked for and not yet started. For the harnesses. */
+export function peaksWaiting(): number {
+  return waiting.size
+}
+
+function begin(path: string): Promise<PeaksResult> {
+  active += 1
+  const work = resolve(path)
+    .catch((err): PeaksResult => ({ ok: false, reason: String(err?.message ?? err) }))
+    .finally(() => {
+      inflight.delete(path)
+      active -= 1
+      pump()
+    })
   inflight.set(path, work)
   return work
+}
+
+/** Starts whatever is waiting, up to the limit. */
+function pump(): void {
+  while (active < CONCURRENCY && waiting.size > 0) {
+    const [path, entry] = waiting.entries().next().value as [string, Waiting]
+    waiting.delete(path)
+    void begin(path).then(entry.settle)
+  }
 }
 
 async function resolve(path: string): Promise<PeaksResult> {
