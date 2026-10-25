@@ -2470,7 +2470,16 @@ media in `~/flux-media-test`. One command builds the lot:
 npm run fixtures
 ```
 
-They clear the project's asset list and sequence so runs are repeatable.
+They clear the project's asset list and sequence so runs are repeatable, through one shared
+`resetProject` in `scripts/cdp.mjs` — and it **saves** the cleared state rather than only
+clearing it in memory.
+
+> **A reset that does not reach the document is not a reset.** Changing the asset list marks the
+> project dirty; nothing autosaves it. `verify:app` used to clear the list by hand instead, and
+> the first check that closed and reopened the project loaded the previous suite's assets straight
+> back in — so two checks comparing against an exact list failed, but only when `verify:timeline`
+> had run first and left its footage in the `.flux` file. Run alone the suite was green, which is
+> the worst shape a broken check can take.
 
 Not one of these is a nice file. Each is shaped around one thing that is hard to get right and
 silent when it is wrong, so a suite reading them is reading a trap rather than a sample —

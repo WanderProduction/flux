@@ -21,7 +21,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 
-import { ensureProject } from './cdp.mjs'
+import { ensureProject, resetProject } from './cdp.mjs'
 
 /*
  * This suite talks to the DevTools endpoint itself rather than through
@@ -168,33 +168,23 @@ try {
   // dialog cannot appear mid-suite; the copy path is checked in verify-project.
   await ensureProject(cdp, VERIFY_PROJECT)
   /*
-   * And in the Edit workspace, which everything below assumes. There is more
-   * than one workspace now, so a project can be saved sitting in Export —
-   * where there is no Content Browser — and `ensureProject` alone no longer
-   * guarantees one is on screen.
+   * Then back to a known project, through the same reset every other suite
+   * uses. This suite used to clear the asset store by hand and write the
+   * cleared list through `saveStore`, which did nothing for two reasons:
+   * assets are not installation state, so they are not in that store at all,
+   * and `saveStore` takes two arguments — the `project` scope it was passed
+   * was dropped on the floor. The clear held in memory and never reached the
+   * document, so the reopen in "the kept layout is what comes back" loaded
+   * the previous suite's assets straight back in and two checks below
+   * compared against a list that still had verify:timeline's footage in it.
+   *
+   * resetProject saves the cleared state, so the document and memory agree
+   * however many times the project is closed and opened after this. It also
+   * puts the app in the Edit workspace, which everything below assumes: a
+   * project can be saved sitting in Export, where there is no Content
+   * Browser, and `ensureProject` alone does not guarantee one is on screen.
    */
-  await evaluate(
-    cdp,
-    `const { commands } = window.__fluxDev;
-     await commands.run('workspace.switch.edit');
-     await new Promise(r => setTimeout(r, 500));
-     return true;`,
-  )
-
-  // Start from an empty project so the run is repeatable. This clears the
-  // real asset store — fine for a dev fixture app, and the header says so.
-  await evaluate(
-    cdp,
-    `const { assets, store } = window.__fluxDev;
-     for (let i = 0; i < 60 && !assets.isLoaded(); i++) await new Promise(r => setTimeout(r, 250));
-     if (!assets.isLoaded()) throw new Error('asset store never finished loading');
-     assets.removeAssets(assets.getAssets().map(a => a.id));
-     // Write through: removeAssets skips the save when nothing was in memory,
-     // which would leave a previous suite's state on disk to reappear later.
-     await store.saveStore('assets', [], 'project');
-     await store.flushStores();
-     return true;`,
-  )
+  await resetProject(cdp)
 
   await check('preload bridge exposes the filesystem API', async () => {
     const api = await evaluate(cdp, `return Object.keys(window.flux?.fs ?? {}).sort();`)
