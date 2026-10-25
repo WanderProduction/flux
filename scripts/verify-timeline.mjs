@@ -632,13 +632,54 @@ try {
   )
 
   await check('the timeline has room to scroll in both directions', async () => {
-    // The checks below are meaningless against content that fits: a scroll that
-    // cannot move looks exactly like a handler that does not work.
+    /*
+     * The overflow is *built here*, not inherited.
+     *
+     * The checks below are meaningless against content that fits: a scroll
+     * that cannot move looks exactly like a handler that does not work. This
+     * used to assert that condition and leave creating it to whatever ran
+     * before — so whether the group passed depended on how many tracks the
+     * rest of the suite happened to have left lying about, and on whether the
+     * project had been saved with them. Run twice against the same build it
+     * reported six failures and then thirteen.
+     *
+     * Tracks are added until the lanes genuinely overflow, and `__addedTracks`
+     * remembers them so the teardown below can put the timeline back. Bounded,
+     * because a loop that cannot reach its condition must stop rather than
+     * add tracks for ever.
+     */
     const box = await evaluate(
       cdp,
-      `const l = window.__lanes();
+      `const { sequence } = window.__fluxDev;
+       /*
+        * Start from the four tracks a sequence is born with.
+        *
+        * Cleaning up only what this check added was not enough: the tracks
+        * are saved with the project, so a second run opened one that already
+        * overflowed, added nothing, had nothing to remove — and the teardown
+        * then failed on the leftovers from the run before. A group that is
+        * idempotent has to normalise what it inherits, not just tidy what it
+        * creates.
+        */
+       const keep = new Set(['V2', 'V1', 'A1', 'A2']);
+       for (const t of sequence.getSequence().tracks) {
+         if (!keep.has(t.id)) sequence.removeTrack(t.id);
+       }
+       await new Promise(r => setTimeout(r, 150));
+       window.__addedTracks = [];
+       const lanes = () => window.__lanes();
+       for (let i = 0; i < 40; i++) {
+         const l = lanes();
+         if (l.scrollHeight > l.clientHeight && l.scrollWidth > l.clientWidth) break;
+         const made = sequence.addTrack('video');
+         if (made) window.__addedTracks.push(made.id);
+         await new Promise(r => setTimeout(r, 40));
+       }
+       await new Promise(r => setTimeout(r, 200));
+       const l = lanes();
        return { scrollW: l.scrollWidth, clientW: l.clientWidth,
-                scrollH: l.scrollHeight, clientH: l.clientHeight };`,
+                scrollH: l.scrollHeight, clientH: l.clientHeight,
+                added: window.__addedTracks.length };`,
     )
     assert.ok(box.scrollW > box.clientW, `no horizontal overflow: ${JSON.stringify(box)}`)
     assert.ok(box.scrollH > box.clientH, `no vertical overflow: ${JSON.stringify(box)}`)
@@ -723,6 +764,27 @@ try {
     )
     assert.ok(state.top > 0, 'the timeline should be scrolled down for this to mean anything')
     assert.equal(state.offset, 0, 'a timeline you cannot read the time off is not a timeline')
+  })
+
+  await check('the tracks added for scrolling are taken away again', async () => {
+    /*
+     * The group above needed a tall timeline; nothing after it does.
+     *
+     * Leaving them would be the same fault in the other direction — the next
+     * check inheriting a shape it did not ask for — and that is what made this
+     * suite's results depend on how many times it had been run.
+     */
+    const left = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       for (const id of window.__addedTracks ?? []) sequence.removeTrack(id);
+       window.__addedTracks = [];
+       await new Promise(r => setTimeout(r, 200));
+       const l = window.__lanes();
+       l.scrollTop = 0; l.scrollLeft = 0;
+       return sequence.getSequence().tracks.map(t => t.id);`,
+    )
+    assert.deepEqual(left, ['V2', 'V1', 'A1', 'A2'], `the timeline was left as ${left}`)
   })
 
   await check('Alt and scroll zooms', async () => {
