@@ -135,6 +135,22 @@ const cdp = connect(target.webSocketDebuggerUrl)
 await cdp.ready
 await cdp.send('Runtime.enable')
 
+/*
+ * A window of a known size, for the same reason verify-timeline pins one.
+ *
+ * The dev app remembers its size between runs, dockview lays the panels out
+ * differently as it narrows, and anything that reaches for an element by
+ * where it is on screen then depends on the shape the app was last left in.
+ * 1600x950 is what FLUX opens at with no history.
+ */
+await cdp.send('Emulation.setDeviceMetricsOverride', {
+  width: 1600,
+  height: 950,
+  deviceScaleFactor: 1,
+  mobile: false,
+})
+await new Promise((resolve) => setTimeout(resolve, 400))
+
 const dir = JSON.stringify(MEDIA_DIR)
 const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
@@ -893,6 +909,9 @@ try {
     assert.deepEqual(cdp.consoleErrors, [])
   })
 } finally {
+  // Cleared, or it outlives the harness and the next person to open the app
+  // finds the window stuck at this size.
+  await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {})
   cdp.close()
 }
 
