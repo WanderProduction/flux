@@ -946,7 +946,7 @@ to three positions and, at each, asks the kernel which clips cover the visible s
 whether they are there. Blocks carry `data-clip-id` for exactly that question: once a lane has
 scrolled, a left offset no longer identifies a clip.
 
-#### Waveforms wait their turn, and give up when nobody is asking
+#### Derived work waits its turn, and gives up when nobody is asking
 
 Thumbnails have had a limit since the beginning, with a note saying that kicking off a hundred
 video decodes when a folder opens will hitch the whole window. Building a waveform is the more
@@ -958,6 +958,18 @@ A job that is still waiting is also **dropped** when the last block asking for i
 scrolled past, deleted, or its audio removed. A job already running is left to finish, since it is
 most of the way through by definition and the result is worth keeping. That is the difference
 between clearing a long timeline being cheap and being merely eventual.
+
+**Thumbnails work the same way**, and for the same reason one step removed: a bin of four hundred
+files asks for far more than anyone scrolls to. A queued decode now waits under its own path rather
+than behind an anonymous slot, so it can be found again and forgotten. A decode already running is
+left alone — it holds a `<video>` and a decoder, and tearing those down mid-seek is how this
+module used to leak them.
+
+> **A dropped request is not a file without a thumbnail.** It settles as "no answer" and is
+> deliberately *not* cached: remembering a null would leave the file permanently blank the next time
+> it scrolled into view. `verify:app` asks for six at once, drops the three that are waiting, and
+> checks all three of those things — that they settle, that the queue empties, and that nothing was
+> remembered about them.
 
 #### Sound on the timeline
 

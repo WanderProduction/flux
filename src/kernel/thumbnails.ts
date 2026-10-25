@@ -11,7 +11,11 @@
  *     video decodes when a folder opens will hitch the whole window;
  *   - every decode has a deadline, because a malformed or unsupported file can
  *     leave a <video> waiting on an event that never fires, and one of those
- *     would otherwise occupy a queue slot forever.
+ *     would otherwise occupy a queue slot forever;
+ *   - a decode still waiting is dropped when the last card or block asking for
+ *     it goes away. Scrolling a long bin or a long timeline asks for far more
+ *     than it ever looks at, and finishing all of it is work for things that
+ *     left the screen a minute ago.
  */
 
 import type { MediaKind } from './fsBridge'
@@ -27,21 +31,18 @@ const cache = new Map<string, string | null>()
 const inflight = new Map<string, Promise<string | null>>()
 
 let active = 0
-const pending: Array<() => void> = []
 
-function acquire(): Promise<void> {
-  if (active < CONCURRENCY) {
-    active++
-    return Promise.resolve()
-  }
-  return new Promise((resolve) => pending.push(resolve))
+interface Waiting {
+  /** How many cards or blocks are asking. The same file twice counts twice. */
+  wanted: number
+  promise: Promise<string | null>
+  settle: (value: string | null) => void
+  kind: MediaKind
+  url: string
 }
 
-function release() {
-  const next = pending.shift()
-  if (next) next()
-  else active--
-}
+/** Asked for, not started. Insertion order is the running order. */
+const waiting = new Map<string, Waiting>()
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -134,6 +135,9 @@ export function cachedThumbnail(filePath: string): string | null | undefined {
  * unsupported codec inside a supported container, a truncated download, a
  * permissions problem. Callers render a placeholder for null; it is a normal
  * outcome, not an error.
+ *
+ * A request that cannot start yet waits under its own path rather than behind
+ * an anonymous resolver, so `abandonThumbnail` can find it again.
  */
 export function requestThumbnail(
   filePath: string,
@@ -143,11 +147,55 @@ export function requestThumbnail(
   const cached = cache.get(filePath)
   if (cached !== undefined) return Promise.resolve(cached)
 
-  const existing = inflight.get(filePath)
-  if (existing) return existing
+  const running = inflight.get(filePath)
+  if (running) return running
 
+  const held = waiting.get(filePath)
+  if (held) {
+    held.wanted += 1
+    return held.promise
+  }
+
+  if (active < CONCURRENCY) return begin(filePath, kind, url)
+
+  let settle!: (value: string | null) => void
+  const promise = new Promise<string | null>((resolveWith) => {
+    settle = resolveWith
+  })
+  waiting.set(filePath, { wanted: 1, promise, settle, kind, url })
+  return promise
+}
+
+/**
+ * Says a card or block no longer needs a thumbnail it asked for.
+ *
+ * Scroll a bin of four hundred files, or a timeline of a hundred clips, and
+ * most of what was asked for belongs to something that has since left the
+ * screen. A decode already running is left alone — it holds a `<video>` and a
+ * decoder, and tearing those down mid-seek is how this module used to leak
+ * them — but one still waiting is simply forgotten.
+ *
+ * The result is **not** cached. Nothing was decided about the file, and
+ * remembering a null here would leave it permanently blank the next time it
+ * came into view.
+ */
+export function abandonThumbnail(filePath: string): void {
+  const held = waiting.get(filePath)
+  if (!held) return
+  held.wanted -= 1
+  if (held.wanted > 0) return
+  waiting.delete(filePath)
+  held.settle(null)
+}
+
+/** Decodes asked for and not yet started. For the harnesses. */
+export function thumbnailsWaiting(): number {
+  return waiting.size
+}
+
+function begin(filePath: string, kind: MediaKind, url: string): Promise<string | null> {
+  active += 1
   const job = (async () => {
-    await acquire()
     try {
       const thumbnail = kind === 'video' ? await videoThumbnail(url) : await imageThumbnail(url)
       cache.set(filePath, thumbnail)
@@ -157,13 +205,23 @@ export function requestThumbnail(
       cache.set(filePath, null)
       return null
     } finally {
-      release()
+      active -= 1
       inflight.delete(filePath)
+      pump()
     }
   })()
 
   inflight.set(filePath, job)
   return job
+}
+
+/** Starts whatever is waiting, up to the limit. */
+function pump(): void {
+  while (active < CONCURRENCY && waiting.size > 0) {
+    const [filePath, entry] = waiting.entries().next().value as [string, Waiting]
+    waiting.delete(filePath)
+    void begin(filePath, entry.kind, entry.url).then(entry.settle)
+  }
 }
 
 /** Forget a path's cached result so the next request decodes it again. */

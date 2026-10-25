@@ -892,6 +892,54 @@ try {
     )
   })
 
+  /*
+   * Scrolling a long bin asks for far more than it ever looks at, so a queued
+   * decode has to be droppable. Checked here rather than inferred: the queue is
+   * the one place where "it is only waiting" and "it is already running" look
+   * identical from outside, and the difference is the whole point.
+   */
+  await check('a queued thumbnail is dropped when nothing is asking for it', async () => {
+    const result = await evaluate(
+      cdp,
+      `const { thumbnails } = window.__fluxDev;
+       const names = ['clipA.mp4', 'shot_B.mp4', 'long_take.mp4', 'rotated.mp4',
+                      'layer_red.mp4', 'layer_blue.mp4'];
+       const paths = names.map(n => ${dir} + '/' + n);
+
+       // From scratch: a cached result never reaches the queue at all.
+       for (const p of paths) thumbnails.invalidateThumbnail(p);
+
+       const jobs = paths.map(p => thumbnails.requestThumbnail(p, 'video', window.flux.fs.assetUrl(p)));
+       // Three run at once, so asking for six leaves three waiting.
+       const queued = thumbnails.thumbnailsWaiting();
+
+       const dropped = paths.slice(3);
+       for (const p of dropped) thumbnails.abandonThumbnail(p);
+       const left = thumbnails.thumbnailsWaiting();
+
+       // The dropped ones settle rather than hanging, and settle as "no answer"
+       // rather than as "this file has no thumbnail".
+       const settled = await Promise.all(jobs.slice(3));
+       const remembered = dropped.map(p => thumbnails.cachedThumbnail(p));
+
+       return {
+         queued,
+         left,
+         settled: settled.map(v => v === null),
+         remembered: remembered.map(v => v === undefined),
+       };`,
+    )
+
+    assert.ok(result.queued > 0, 'asking for six at once should leave some waiting')
+    assert.equal(result.left, 0, `${result.left} jobs were still queued after being dropped`)
+    assert.deepEqual(result.settled, [true, true, true], 'a dropped request must still settle')
+    assert.deepEqual(
+      result.remembered,
+      [true, true, true],
+      'a dropped request must not be remembered as a file with no thumbnail',
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     // "no thumbnail for …" is an expected console.warn for the deliberately
     // corrupt fixture and arrives as a warning, not an error, so it is absent
