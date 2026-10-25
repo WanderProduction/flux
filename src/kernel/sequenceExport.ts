@@ -39,7 +39,13 @@
 import { getAsset } from './assets'
 import { trackLevel } from './media/mixer'
 import { getSequence, isTrackVisible, renderRange, type Clip, type SequenceState } from './sequence'
-import { isAudioTouched, isTransformed } from './clipEffects'
+import {
+  isTransformed,
+  renderPlacement,
+  resolveAudio,
+  resolveTransform,
+  MIN_LEVEL_DB,
+} from './clipEffects'
 import type { SkippedClip } from './batchExport'
 import type { ResolvedOutput } from './renderSettings'
 import { safeFolderName } from '../../shared/projectNaming.js'
@@ -56,8 +62,19 @@ export interface SequenceCut {
   /** Seconds into the source where it begins. */
   offset: number
   speed: number
-  /** Linear multiplier. Audio only, and only ever from `trackLevel`. */
+  /** Linear multiplier. Audio only: the track's level and the clip's own. */
   gain?: number
+  /** -1 hard left to +1 hard right. Audio only, absent when centred. */
+  pan?: number
+  /**
+   * Where the picture goes in the frame, when the clip has been moved.
+   *
+   * Absent on an untouched clip, and the graph then does what it always did —
+   * scale to fit, pad, overlay at the origin. Worked out in whole pixels by
+   * `renderPlacement` rather than left to ffmpeg, because its filters each do
+   * one thing and have to be told exactly how big and exactly where.
+   */
+  placement?: ReturnType<typeof renderPlacement>
 }
 
 /**
@@ -262,7 +279,19 @@ export function planSequence(
       }
 
       if (track.kind === 'audio') {
-        audio.push({ ...cut, gain })
+        /*
+         * The clip's own level and mute ride on the same number as the
+         * track's, because they end up in the same `volume` filter and
+         * multiplying them here keeps one answer to "how loud is this".
+         */
+        const own = resolveAudio(clip.effects?.audio)
+        const quiet = own.mute || own.level <= MIN_LEVEL_DB
+        const level = quiet ? 0 : 10 ** (own.level / 20)
+        audio.push({
+          ...cut,
+          gain: gain * level,
+          ...(own.pan !== 0 ? { pan: own.pan / 100 } : {}),
+        })
         /*
          * Counted on the picture only. An audio clip is the other half of a
          * linked pair — the same file, the same range — so counting both would
@@ -277,7 +306,27 @@ export function planSequence(
         continue
       }
 
-      video.push(cut)
+      /*
+       * A picture that has been moved carries where it goes; one that has not
+       * carries nothing, so an untouched sequence renders through exactly the
+       * graph it always did.
+       */
+      const frame = { width: sequence.settings.width, height: sequence.settings.height }
+      const moved = isTransformed(clip.effects?.transform, frame)
+      const picture =
+        asset.width && asset.height ? { width: asset.width, height: asset.height } : null
+      video.push(
+        moved && picture
+          ? {
+              ...cut,
+              placement: renderPlacement(
+                resolveTransform(clip.effects?.transform, frame),
+                picture,
+                frame,
+              ),
+            }
+          : cut,
+      )
       const share =
         clip.sourceDuration > 0 ? Math.min(1, covered / clip.sourceDuration) : 1
       sourceBytes += Math.round((asset.size ?? 0) * share)
@@ -285,43 +334,36 @@ export function planSequence(
   }
 
   /*
-   * A clip with a transform on it is refused rather than rendered flat.
+   * Skew, and only skew, is still refused.
    *
-   * The Viewer honours position, scale, rotation, opacity, crop and skew; the
-   * ffmpeg graph does not yet — it is one `scale`, one `pad` and one `overlay`
-   * per clip, and nothing in it has anywhere to put an anchor point. Rendering
-   * anyway would write a file that does not match the picture it was checked
-   * against, and quietly: a 60% scale would simply not be there, and the only
-   * way to find out would be to watch the output.
+   * Everything else a clip can do now has a filter behind it — the picture is
+   * scaled, cropped, turned, faded and placed, and the sound carries its own
+   * level and balance. Shear does not: ffmpeg has no filter for it, and the
+   * nearest thing, `perspective`, is a different picture from the one the
+   * canvas draws. Approximating it would mean an export that *nearly* matches
+   * what was approved, which is worse than one that says it cannot.
    *
-   * That is the one thing this pipeline refuses to do. Every rule in it comes
-   * back to the output being the sequence — frame rates are never silently
-   * conformed, every encode is verified against its source — so a transform it
-   * cannot express has to stop it rather than be dropped on the floor. Named
-   * clip by clip, because "something is transformed" sends someone hunting
+   * Named clip by clip, because "something is skewed" sends someone hunting
    * through a timeline for it.
    */
-  const transformed = [...video, ...audio]
+  const skewed = [...video]
     .map((cut) => sequence.clips.find((clip) => clip.id === cut.id))
     .filter((clip): clip is Clip => Boolean(clip))
-    .filter(
-      (clip) =>
-        isTransformed(clip.effects?.transform, {
-          width: sequence.settings.width,
-          height: sequence.settings.height,
-        }) || isAudioTouched(clip.effects?.audio),
-    )
-  if (transformed.length > 0) {
-    const names = transformed
+    .filter((clip) => {
+      const skew = clip.effects?.transform?.skew
+      return Boolean(skew && (skew.x || skew.y))
+    })
+  if (skewed.length > 0) {
+    const names = skewed
       .map((clip) => getAsset(clip.assetId)?.name ?? clip.id)
       .filter((name, at, all) => all.indexOf(name) === at)
     return {
       job: null,
       skipped,
       reason:
-        `the render cannot draw clip effects yet, and ${names.length === 1 ? 'one clip has' : `${names.length} clips have`} them: ` +
+        `the render cannot draw skew, and ${names.length === 1 ? 'one clip has' : `${names.length} clips have`} it: ` +
         `${names.slice(0, 4).join(', ')}${names.length > 4 ? ' and others' : ''}. ` +
-        'Reset them in Effect Controls, or render a sequence without them.',
+        'Set Skew back to 0 in Effect Controls to render this sequence.',
     }
   }
 

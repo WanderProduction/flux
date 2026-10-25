@@ -262,3 +262,96 @@ export function transformOf(t: Transform): [number, number, number, number, numb
 
   return [a, b, c, d, t.position.x, t.position.y]
 }
+
+/**
+ * Where a clip lands in the rendered frame, in whole pixels.
+ *
+ * The same arithmetic the compositor does with a canvas matrix, worked out as
+ * numbers instead — because ffmpeg has no matrix. Its filters each do one
+ * thing to a picture and the graph has to be told exactly how big and exactly
+ * where, so the maths happens here, once, where it can be checked without
+ * running an encode.
+ *
+ * It mirrors `drawClip` step for step: scale the whole picture, take the crop
+ * out of it, turn it, and put its centre where the transform says. Reading the
+ * canvas version alongside this one is the only way to be sure they agree, and
+ * they have to — the preview is what someone approves and the render is what
+ * they get.
+ *
+ * `source` is the picture's **displayed** size, which is what an asset records
+ * and what ffmpeg hands back after applying the file's own rotation on decode.
+ * So neither side has to think about the display matrix here.
+ *
+ * Skew is absent on purpose: ffmpeg has no shear filter, and faking one with
+ * `perspective` would be a different picture from the canvas's. It is refused
+ * by the export instead of being approximated.
+ */
+export function renderPlacement(t: Transform, source: Size, frame: Size) {
+  const fit = Math.min(frame.width / source.width, frame.height / source.height)
+  const fullWidth = source.width * fit
+  const fullHeight = source.height * fit
+
+  const scaleY = t.scale / 100
+  const scaleX = (t.uniform ? t.scale : t.scaleWidth) / 100
+
+  // The whole picture at its scaled size, before anything is taken off it.
+  const scaledWidth = fullWidth * scaleX
+  const scaledHeight = fullHeight * scaleY
+
+  const left = Math.min(100, Math.max(0, t.crop.left)) / 100
+  const right = Math.min(100, Math.max(0, t.crop.right)) / 100
+  const top = Math.min(100, Math.max(0, t.crop.top)) / 100
+  const bottom = Math.min(100, Math.max(0, t.crop.bottom)) / 100
+
+  const keptWidth = Math.max(0, scaledWidth * (1 - left - right))
+  const keptHeight = Math.max(0, scaledHeight * (1 - top - bottom))
+
+  /*
+   * Where the kept piece sits relative to the picture's own centre.
+   *
+   * Cropping takes edges off; it does not re-centre what is left. An equal
+   * crop on both sides leaves the middle where it was, and a crop on one side
+   * moves the remainder by half of what was taken.
+   */
+  const cropCentreX = (fullWidth * (left - right)) / 2
+  const cropCentreY = (fullHeight * (top - bottom)) / 2
+
+  // The anchor, in the picture's own space rather than the frame's.
+  const anchorX = t.anchor.x - frame.width / 2
+  const anchorY = t.anchor.y - frame.height / 2
+
+  const offsetX = (cropCentreX - anchorX) * scaleX
+  const offsetY = (cropCentreY - anchorY) * scaleY
+
+  const radians = (t.rotation * Math.PI) / 180
+  const cos = Math.cos(radians)
+  const sin = Math.sin(radians)
+
+  const centreX = t.position.x + (cos * offsetX - sin * offsetY)
+  const centreY = t.position.y + (sin * offsetX + cos * offsetY)
+
+  // Turning a rectangle grows the box that holds it.
+  const spanX = Math.abs(keptWidth * cos) + Math.abs(keptHeight * sin)
+  const spanY = Math.abs(keptWidth * sin) + Math.abs(keptHeight * cos)
+
+  return {
+    /** What to scale the whole picture to, before cropping. Even: yuv420 needs it. */
+    scaleWidth: even(scaledWidth),
+    scaleHeight: even(scaledHeight),
+    /** The rectangle to keep, in that scaled picture. */
+    cropWidth: even(keptWidth),
+    cropHeight: even(keptHeight),
+    cropX: Math.round(scaledWidth * left),
+    cropY: Math.round(scaledHeight * top),
+    rotation: t.rotation,
+    opacity: t.opacity / 100,
+    /** Top left of the turned box, which is what `overlay` is given. */
+    x: Math.round(centreX - spanX / 2),
+    y: Math.round(centreY - spanY / 2),
+  }
+}
+
+/** Rounded to an even number, and never below 2: yuv420 has no odd sizes. */
+function even(value: number): number {
+  return Math.max(2, Math.round(value / 2) * 2)
+}

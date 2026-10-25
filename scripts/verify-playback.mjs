@@ -3042,38 +3042,51 @@ try {
     assert.equal(state.back, state.plain, 'and clearing the crop restores it')
   })
 
-  await check('the render refuses a clip it cannot draw, and says which', async () => {
+  await check('a scaled clip renders, and a skewed one is refused by name', async () => {
     /*
-     * The Viewer honours these parameters and the ffmpeg graph does not yet.
-     * Rendering anyway would write a file that does not match the picture it
-     * was checked against — quietly, since a missing scale looks like nothing
-     * at all. Refusing is the only honest answer until the graph can express
-     * them, and it has to name the clip, or someone is left hunting a timeline
-     * for whichever one it meant.
+     * The graph draws the transform now — scaled, cropped, turned, faded and
+     * placed — so a moved clip is no longer a reason to refuse a render.
+     *
+     * Skew still is. ffmpeg has no shear filter, and the nearest thing,
+     * `perspective`, is a different picture from the one the canvas draws.
+     * Approximating it would mean an export that *nearly* matches what was
+     * approved, which is worse than one that says plainly it cannot — this
+     * pipeline's whole argument is that the output is the sequence.
      */
     const state = await evaluate(cdp, AREA_SETUP + `
       const { sequenceExport } = window.__fluxDev;
-      const before = sequenceExport.planSequence('C:/tmp');
-      sequence.setClipEffects(clip.id, { transform: { scale: 60 } });
+      sequence.setClipEffects(clip.id, { transform: { scale: 60, rotation: 12 } });
       await new Promise(r => setTimeout(r, 400));
-      const during = sequenceExport.planSequence('C:/tmp');
+      const moved = sequenceExport.planSequence('C:/tmp');
+      sequence.setClipEffects(clip.id, { transform: { skew: { x: 10, y: 0 } } });
+      await new Promise(r => setTimeout(r, 400));
+      const sheared = sequenceExport.planSequence('C:/tmp');
       sequence.clearClipEffects(clip.id);
       await new Promise(r => setTimeout(r, 400));
-      const after = sequenceExport.planSequence('C:/tmp');
+      const plain = sequenceExport.planSequence('C:/tmp');
       return {
-        before: { job: !!before.job, reason: before.reason ?? null },
-        during: { job: !!during.job, reason: during.reason ?? null },
-        after: { job: !!after.job, reason: after.reason ?? null },
+        moved: { job: !!moved.job, reason: moved.reason ?? null,
+                 placed: !!moved.job && !!moved.job.video[0].placement },
+        sheared: { job: !!sheared.job, reason: sheared.reason ?? null },
+        plain: { job: !!plain.job, placed: !!plain.job && !!plain.job.video[0].placement },
       };`)
 
-    assert.equal(state.before.job, true, 'an untouched sequence should render')
-    assert.equal(state.during.job, false, 'a transformed one must not')
+    assert.ok(!state.error, state.error)
+    assert.equal(state.moved.job, true, `a scaled clip should render: ${state.moved.reason}`)
+    assert.equal(state.moved.placed, true, 'and the cut should carry where it goes')
+
+    assert.equal(state.sheared.job, false, 'a skewed clip must still be refused')
     assert.match(
-      state.during.reason ?? '',
-      /clipA.mp4/,
-      `the refusal should name the clip, it said: ${state.during.reason}`,
+      state.sheared.reason ?? '',
+      /skew/i,
+      `the refusal should say what it cannot draw, it said: ${state.sheared.reason}`,
     )
-    assert.equal(state.after.job, true, 'and resetting it should let the render through again')
+    assert.match(state.sheared.reason ?? '', /clipA.mp4/, 'and name the clip')
+
+    // An untouched clip carries nothing, so it renders through exactly the
+    // graph it always did — which is what keeps the archive path unchanged.
+    assert.equal(state.plain.job, true)
+    assert.equal(state.plain.placed, false, 'an untouched clip should carry no placement')
   })
 
   // Put the viewer back the way the rest of the suite expects to find it.
