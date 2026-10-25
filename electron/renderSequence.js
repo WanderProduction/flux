@@ -229,7 +229,25 @@ export async function encodeSequence({ job, onProgress, onWarning, signal, optio
   for (const warning of checked.warnings) onWarning?.(warning)
   const ready = checked.job
 
-  await fs.mkdir(path.dirname(job.output), { recursive: true })
+  /*
+   * The output's folder, and the first place a malformed job shows itself.
+   *
+   * A row queued before an output folder was chosen carries a name with no
+   * folder on it — "/DSCF1907.mp4" — whose dirname is the drive root, and
+   * Windows refuses to create that. Reported rather than thrown: an exception
+   * escaping here is what froze a whole batch at "running" with no ffmpeg
+   * anywhere and nothing in the log to say why.
+   */
+  const outputDir = path.dirname(job.output)
+  try {
+    await fs.mkdir(outputDir, { recursive: true })
+  } catch (err) {
+    return {
+      ok: false,
+      stage: 'output',
+      error: `could not make the output folder ${outputDir}: ${err.message}`,
+    }
+  }
 
   // Beside the target rather than in the system temp directory, so the rename
   // is within one filesystem and therefore atomic.

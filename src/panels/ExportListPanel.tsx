@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { PanelFrame } from './PanelFrame'
+import { JobProgress, RenderProgress } from './RenderProgress'
 import { AssetThumb } from './AssetThumb'
 import {
   clear,
@@ -154,6 +155,8 @@ export function ExportListPanel() {
               <p className="batch-error">No output folder has been chosen yet.</p>
             )}
 
+            <RenderProgress rendering={rendering} />
+
             <dl className="batch-facts">
               <div>
                 <dt>Done</dt>
@@ -242,6 +245,7 @@ function ExportCard({ job, rendering }: { job: QueuedJob; rendering: boolean }) 
           {formatDuration(job.duration)}
           {detail && ` · ${detail}`}
         </span>
+        <JobProgress progress={job.progress} />
         <span className="export-card-status">
           {job.status === 'done' && job.ratio
             ? job.ratio >= 1

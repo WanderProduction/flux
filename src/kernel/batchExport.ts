@@ -130,7 +130,7 @@ function stemOf(name: string): string {
   return dot > 0 ? name.slice(0, dot) : name
 }
 
-function join(dir: string, name: string): string {
+export function join(dir: string, name: string): string {
   const separator = dir.includes('\\') ? '\\' : '/'
   return dir.endsWith(separator) ? `${dir}${name}` : `${dir}${separator}${name}`
 }

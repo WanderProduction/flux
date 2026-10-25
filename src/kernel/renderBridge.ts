@@ -64,6 +64,8 @@ export type QueueEvent = {
   id?: string
   status?: string
   message?: string
+  /** 0..1 for the job named by `id`, on a 'progress' event. */
+  progress?: number
   state: QueueState
 }
 
