@@ -2750,6 +2750,56 @@ kbd {
 .batch-bad {
   color: var(--flux-warn);
 }
+
+/* How far a batch has got. See panels/RenderProgress.tsx for what it measures. */
+.render-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.render-progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--flux-bg-active);
+  overflow: hidden;
+}
+.render-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--flux-accent);
+  /*
+   * Eased, because the fill advances in jumps: ffmpeg reports a time roughly
+   * twice a second and a bar that teleports reads as a glitch rather than as
+   * work being done. Width only, so nothing here can move the layout.
+   */
+  transition: width 220ms ease-out;
+}
+.render-progress-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+.render-progress-percent {
+  font-family: var(--flux-font-mono);
+  color: var(--flux-text);
+}
+
+/* One clip's own bar, on its row. */
+.job-progress {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--flux-bg-active);
+  overflow: hidden;
+}
+.job-progress-fill {
+  height: 100%;
+  background: var(--flux-accent-dim);
+  transition: width 220ms ease-out;
+}
 .batch-note {
   margin: 0;
   font-size: var(--flux-text-sm);
@@ -3125,6 +3175,7 @@ kbd {
   overflow-y: auto;
 }
 .render-row {
+  position: relative;
   display: grid;
   /* Name takes the slack; everything else is intrinsic, so a long filename
      truncates rather than pushing the status off the end. */
@@ -3134,6 +3185,13 @@ kbd {
   padding: 5px 9px;
   border-bottom: 1px solid var(--flux-border);
   font-size: var(--flux-text-sm);
+}
+.render-row .job-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  border-radius: 0;
+  background: transparent;
 }
 .render-row:last-child {
   border-bottom: none;

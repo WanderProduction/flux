@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { PanelFrame } from './PanelFrame'
+import { JobProgress, RenderProgress } from './RenderProgress'
 import {
   add,
   clear,
@@ -720,7 +721,9 @@ export function RenderPanel() {
                         ? `${job.ratio >= 1 ? `${job.ratio.toFixed(1)}× smaller` : `${(1 / job.ratio).toFixed(1)}× larger`}`
                         : job.status === 'failed'
                           ? (job.error ?? 'failed')
-                          : job.status}
+                          : job.status === 'running' && job.progress !== undefined
+                            ? `${Math.round(job.progress * 100)}%`
+                            : job.status}
                     </span>
                     {!rendering && (
                       <button
@@ -731,6 +734,13 @@ export function RenderPanel() {
                         ×
                       </button>
                     )}
+                    {/*
+                      Along the bottom edge of the row rather than in a column
+                      of its own: the grid above is five intrinsic columns and
+                      a bar wants the whole width, which is exactly what an
+                      absolutely positioned child of the row gets.
+                    */}
+                    <JobProgress progress={job.progress} />
                   </div>
                 ))}
               </div>
@@ -760,6 +770,8 @@ export function RenderPanel() {
                   </button>
                 )}
               </div>
+
+              <RenderProgress rendering={rendering} />
 
               <dl className="batch-facts">
                 <div>

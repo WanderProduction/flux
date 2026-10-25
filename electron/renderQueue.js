@@ -237,7 +237,23 @@ export class RenderQueue {
           if (this.controller.signal.aborted) return
           const index = next++
           if (index >= this.jobs.length) return
-          await this.runOne(this.jobs[index])
+          const job = this.jobs[index]
+          /*
+           * A job that throws takes only itself down.
+           *
+           * Without this the rejection travels out of the worker, out of the
+           * Promise.all below and out of run() — whose caller has already
+           * handed a queue to the UI. Every row then keeps the status it held
+           * at that instant, so the ones that were encoding read "running" for
+           * ever, nothing reaches the log, and a batch looks busy while no
+           * process exists. A stuck queue is worse than a failed one: a
+           * failure names the clip and the reason.
+           */
+          try {
+            await this.runOne(job)
+          } catch (err) {
+            await this.failJob(job, { ok: false, stage: 'crashed', error: err.message })
+          }
         }
       },
     )
@@ -281,8 +297,19 @@ export class RenderQueue {
       signal: this.controller.signal,
       options: this.options,
       onProgress: ({ seconds }) => {
-        this.progress.set(job.id, Math.min(seconds, job.duration))
-        this.emit({ type: 'progress', id: job.id })
+        const reached = Math.min(seconds, job.duration)
+        this.progress.set(job.id, reached)
+        /*
+         * The fraction travels with the event so a row can draw its own bar.
+         * The totals in `state` cover the batch; this is the one clip, and
+         * "which of the two running clips is nearly done" is a question the
+         * batch totals cannot answer.
+         */
+        this.emit({
+          type: 'progress',
+          id: job.id,
+          progress: job.duration > 0 ? reached / job.duration : 0,
+        })
       },
     })
 
@@ -327,13 +354,27 @@ export class RenderQueue {
       return
     }
 
+    await this.failJob(job, result)
+  }
+
+  /**
+   * Marks one job failed, tells the UI, and writes its row to the log.
+   *
+   * Shared by the ordinary failure path and the crash guard in run(), so a job
+   * that threw is recorded exactly like one that returned a failure. The log is
+   * the thing that makes a failure findable later, and a crash is the kind of
+   * failure most worth finding.
+   */
+  async failJob(job, result) {
+    this.progress.delete(job.id)
+    this.results.set(job.id, result)
     this.status.set(job.id, 'failed')
     this.emit({ type: 'job', id: job.id, status: 'failed', result })
     await this.appendLog([
       new Date().toISOString(), `failed-${result.stage}`,
       job.source, job.sourceBytes,
       result.kept ?? job.output, result.facts?.bytes ?? '',
-      '', job.offset.toFixed(3), job.duration.toFixed(3),
+      '', job.offset?.toFixed(3) ?? '', job.duration?.toFixed(3) ?? '',
       result.facts?.duration?.toFixed(3) ?? '',
       '', result.facts?.frameRate?.toFixed(3) ?? '',
       result.facts?.frames ?? '', '', 'no',
@@ -378,8 +419,19 @@ export class RenderQueue {
       options: this.options,
       onWarning: (message) => this.emit({ type: 'warning', message }),
       onProgress: ({ seconds }) => {
-        this.progress.set(job.id, Math.min(seconds, job.duration))
-        this.emit({ type: 'progress', id: job.id })
+        const reached = Math.min(seconds, job.duration)
+        this.progress.set(job.id, reached)
+        /*
+         * The fraction travels with the event so a row can draw its own bar.
+         * The totals in `state` cover the batch; this is the one clip, and
+         * "which of the two running clips is nearly done" is a question the
+         * batch totals cannot answer.
+         */
+        this.emit({
+          type: 'progress',
+          id: job.id,
+          progress: job.duration > 0 ? reached / job.duration : 0,
+        })
       },
     })
 

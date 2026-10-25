@@ -39,9 +39,15 @@ import { getAsset } from './assets'
 import { getSequence, type Clip, type SequenceState } from './sequence'
 import { getSelection } from './selection'
 import { getRenderSettings, resolveOutput } from './renderSettings'
-import { planExport, type ExportJob, type SkippedClip } from './batchExport'
+import { join, planExport, type ExportJob, type SkippedClip } from './batchExport'
 import { isSequenceJob, planSequence, type SequenceJob } from './sequenceExport'
-import { onRenderEvent, startRender, cancelRender, type QueueEvent } from './renderBridge'
+import {
+  onRenderEvent,
+  startRender,
+  cancelRender,
+  type QueueEvent,
+  type QueueState,
+} from './renderBridge'
 
 export type JobStatus = 'waiting' | 'running' | 'done' | 'skipped' | 'failed' | 'cancelled'
 
@@ -90,6 +96,16 @@ export interface QueueSummary {
 
 let jobs: QueuedJob[] = []
 let running = false
+/**
+ * The batch totals from the run in flight, or null when nothing is running.
+ *
+ * Every event the main process sends carries them — seconds encoded, seconds
+ * in total, the rate and an estimate of what is left — and until now the
+ * renderer threw them away and counted rows instead. Rows are the wrong unit:
+ * these clips run from two seconds to two minutes, so "4 of 9" can mean a
+ * tenth of the work or nine tenths.
+ */
+let live: QueueState | null = null
 let persist: ((jobs: QueuedJob[]) => void) | null = null
 const listeners = new Set<() => void>()
 
@@ -109,6 +125,11 @@ export function getQueue(): readonly QueuedJob[] {
 
 export function isRendering(): boolean {
   return running
+}
+
+/** The batch totals while a render is in flight, or null. */
+export function getRenderState(): QueueState | null {
+  return live
 }
 
 /**
@@ -276,6 +297,36 @@ export function retry(ids?: Iterable<string>): number {
   return touched
 }
 
+/** True when a path carries no folder at all — "DSCF1907.mp4" or "/DSCF1907.mp4". */
+function rootless(output: string): boolean {
+  const cut = Math.max(output.lastIndexOf('/'), output.lastIndexOf('\\'))
+  return output.slice(0, cut + 1).replace(/[\\/]+$/, '') === ''
+}
+
+/**
+ * Gives this run's folder to rows that were queued before one was chosen.
+ *
+ * A row is a snapshot, where it is going included: add it with folder A, change
+ * the setting to B, and it still renders into A. That is deliberate, and this
+ * does not break it — a row with **no** folder is the one case where there is
+ * nothing to preserve. The planner had nothing to join a name onto and produced
+ * a bare "/DSCF1907.mp4", whose folder is the drive root; the encoder cannot
+ * create that, and before the queue learned to fail a job rather than itself,
+ * nine rows sat at "running" with no ffmpeg running and an empty folder.
+ *
+ * Queueing a list and then picking where it goes is an ordinary way to work, so
+ * the answer is to fill the folder in at Start rather than to refuse the list.
+ */
+function fillInMissingFolder(outDir: string): number {
+  let filled = 0
+  jobs = jobs.map((job) => {
+    if (job.status !== 'waiting' || !rootless(job.output)) return job
+    filled += 1
+    return { ...job, output: join(outDir, job.output.replace(/^[\\/]+/, '')) }
+  })
+  return filled
+}
+
 /**
  * Hands every waiting job to the main process and follows it.
  *
@@ -289,6 +340,8 @@ export async function start(): Promise<{ ok: boolean; error?: string }> {
   if (running) return { ok: false, error: 'a render is already running' }
   const settings = getRenderSettings()
   if (!settings.outDir) return { ok: false, error: 'no output folder has been chosen' }
+
+  if (fillInMissingFolder(settings.outDir) > 0) emit()
 
   const waiting = jobs.filter((job) => job.status === 'waiting')
   if (waiting.length === 0) return { ok: false, error: 'nothing in the queue is waiting' }
@@ -327,6 +380,13 @@ export async function start(): Promise<{ ok: boolean; error?: string }> {
   } finally {
     stop()
     running = false
+    /*
+     * The totals go with the run. Left behind they would have the panel draw a
+     * finished bar over a queue someone has since added to, which reads as
+     * progress on work that has not started.
+     */
+    live = null
+    jobs = jobs.map((job) => (job.progress === undefined ? job : { ...job, progress: undefined }))
     emit()
   }
 }
@@ -338,6 +398,7 @@ export async function stop(): Promise<boolean> {
 
 /** Folds one event from the main process into the rows. */
 function applyEvent(event: QueueEvent): void {
+  if (event.state) live = event.state
   if (!event.id) {
     // A state-only event. The rows have not changed, but the totals have.
     listeners.forEach((listener) => listener())
@@ -348,6 +409,10 @@ function applyEvent(event: QueueEvent): void {
 
   const job = jobs[index]
   const next: QueuedJob = { ...job }
+
+  if (event.type === 'progress' && typeof event.progress === 'number') {
+    next.progress = Math.min(1, Math.max(0, event.progress))
+  }
 
   if (event.type === 'job' && event.status) {
     next.status = event.status as JobStatus

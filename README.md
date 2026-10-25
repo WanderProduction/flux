@@ -1249,6 +1249,40 @@ why re-adding a clip **replaces** its row rather than making a second one. Press
 something people do when they are not sure it worked, and the result should be the same queue,
 not the same clip rendered twice to the same filename.
 
+#### A row with nowhere to go gets this run's folder
+
+The snapshot above includes where the file lands, which is why changing the output folder does not
+move rows already queued. A row added *before* any folder was chosen is the one case with nothing
+to preserve: the planner had nothing to join a filename onto, so the row carried a bare
+`/DSCF1907.mp4`, whose folder is the drive root. Start fills those in from the folder this run is
+using, because building a list and then deciding where it goes is an ordinary way to work.
+
+> **This was found the hard way, and the way it failed is the part worth keeping.** Nine clips sat
+> at "running" for twenty minutes with no ffmpeg process anywhere, an empty output folder and
+> nothing in the log. Windows refuses to create a drive root, that rejection escaped the worker,
+> and `Promise.all` took the whole queue down *after* the UI had been handed its rows — so every
+> row kept the status it held at that instant and the batch looked busy for ever.
+>
+> Two fixes, and the second matters more than the first. A job that throws is now **failed**, with
+> its reason, like any other failure: `could not make the output folder /: EPERM`. A stuck queue is
+> worse than a failed one, because a failure names the clip and says why.
+
+#### How far along it is, in footage rather than rows
+
+`4 of 9` is the number a queue is tempted to show and the one that cannot be trusted here: these
+clips run from three seconds to two minutes, so four rows out of nine can be a tenth of the work or
+nine tenths of it. The bar measures seconds of footage encoded against seconds to encode, and the
+estimate beside it comes from footage per second of wall clock — the same numbers the main process
+has always computed and the renderer used to throw away.
+
+The estimate is **absent** rather than wild for the first couple of seconds: it reads *working out
+how long* until there is enough rate to divide by. A figure that swings from four minutes to forty
+seconds while someone watches teaches them not to believe the next one.
+
+Each running row carries its own thin bar as well, because the batch total cannot answer "which of
+the two in flight is nearly done" — and when one very long clip is all that is left, the row's bar
+is the only thing on screen that moves.
+
 #### What is a choice, and what is a finding
 
 Most of the encode is not a choice. The codec, the rate control, the pixel format and the `hvc1`
