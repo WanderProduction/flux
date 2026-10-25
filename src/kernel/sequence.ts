@@ -887,13 +887,32 @@ export function addClip({
   linkId,
 }: NewClip): Clip | null {
   const track = sequence.tracks.find((t) => t.id === trackId)
-  if (!track || duration <= 0) return null
+  if (!track) return null
+
+  /*
+   * `duration <= 0` was the whole check, and NaN walks straight past it:
+   * every comparison with NaN is false, so a clip with no length at all was
+   * accepted as having a perfectly good one.
+   *
+   * What that costs is not a strange clip, it is a strange *timeline*. The
+   * length feeds the content width, the ruler, the layout of every lane — and
+   * `Math.max(NaN, 600)` is NaN, so one bad clip made React paint a width of
+   * NaN and say so in the console. The message named the stylesheet rather
+   * than the clip, which is why it went unattributed through four releases.
+   *
+   * It arrives from an asset probed before its dimensions are known: a caller
+   * passes `probed.duration` and gets `undefined`. Refused here rather than
+   * repaired, because a clip whose length nobody knows is not an edit anyone
+   * meant to make.
+   */
+  if (!Number.isFinite(duration) || duration <= 0) return null
 
   const clip: Clip = {
     id: nextId('c'),
     assetId,
     trackId,
-    start: findFreeStart(trackId, start, duration),
+    // Same reasoning: a start that is not a number lands the clip nowhere.
+    start: findFreeStart(trackId, Number.isFinite(start) ? start : 0, duration),
     duration,
     offset: Math.max(0, offset ?? 0),
     speed: speed && speed > 0 ? speed : 1,
