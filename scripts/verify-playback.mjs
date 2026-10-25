@@ -2799,6 +2799,56 @@ try {
     )
   })
 
+  await check('a decoder wanting more than one window of input is given it', async () => {
+    /*
+     * The bug that made the viewer black on real footage.
+     *
+     * A decoder emits nothing until enough chunks are in flight, and how many
+     * belongs to the decoder and the stream: 14 for a 1080p camera clip here
+     * against 2 for clipA. The window was 8 — above every fixture, below real
+     * footage — so `feed` submitted its eight, stopped, and `frameFor` then
+     * waited without ever offering more. The decoder waited on us, we waited
+     * on it, and a five second timer ended it. The sound played on and the
+     * picture appeared only while the playhead was dragged, each drag
+     * submitting a few chunks more.
+     *
+     * No fixture reproduces that depth — a 1080p clip out of x264 wants 3 —
+     * so this does not try to. It starves the *first* submission down to one
+     * chunk, below any decoder's pipeline, and asks whether a frame still
+     * arrives. With the old wait it cannot: nothing would ever be submitted
+     * again. That is the mechanism rather than the symptom, and it holds
+     * whatever a given machine's decoder happens to want.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const opened = await videoSource.VideoSource.open(${LONG});
+       if (!opened.ok) return { error: opened.reason };
+       const src = opened.source;
+
+       const realFeed = src.feed.bind(src);
+       let calls = 0;
+       src.feed = (time, ahead) => realFeed(time, calls++ === 0 ? 1 : ahead);
+
+       const began = performance.now();
+       const frame = await src.frameFor(0);
+       const out = { got: !!frame, ms: Math.round(performance.now() - began), calls };
+       src.close();
+       return out;`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(
+      state.got,
+      `no frame arrived after ${state.ms}ms and ${state.calls} submissions — ` +
+        'the wait is not feeding the decoder',
+    )
+    assert.ok(state.calls > 1, 'only one submission was made, so nothing topped the decoder up')
+    // Comfortably inside FRAME_TIMEOUT_MS: a frame that arrives only because
+    // the timeout expired is not this working.
+    assert.ok(state.ms < 2000, `the frame took ${state.ms}ms, which is the deadlock timing out`)
+  })
+
   await check('a turned clip is drawn the right way up, not merely the right shape', async () => {
     /*
      * The check that was missing, and the reason a real bug shipped.
