@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { assetUrl, hasFilesystem, type MediaKind } from '../kernel/fsBridge'
-import { cachedThumbnail, requestThumbnail } from '../kernel/thumbnails'
+import { abandonThumbnail, cachedThumbnail, requestThumbnail } from '../kernel/thumbnails'
 
 /**
  * A file's thumbnail, decoding it through the shared queue if it is not cached.
@@ -44,6 +44,10 @@ export function useThumbnail(
 
     return () => {
       cancelled = true
+      // The card scrolled away or the block left the drawn window. If the
+      // decode has not started, nothing should start it for something that is
+      // no longer on screen.
+      abandonThumbnail(path)
     }
   }, [path, kind, enabled])
 
