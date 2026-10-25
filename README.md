@@ -165,6 +165,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Selection** | Click, click-again, click-away, rubber band, `Shift` range by track and time, `Ctrl` one at a time. |
 | **Keyboard edit** | `S` takes what the playhead is on; `Alt` and the arrows walk it, swap it, and lift it between tracks. |
 | **Viewer** | The frame is the sequence's shape — 9:16, 1:1, 4:5, anything. Wheel zooms, middle-drag pans, `Fit` resets. |
+| **Effect Controls** | Position, anchor, scale, rotation, opacity, crop, skew; level, mute and balance for the sound. |
 | **Preview resolution** | `Playback` and `Paused`, Full to 1/16, so a heavy stack plays without the paused frame going soft. |
 | **Tools** | A strip of them: select, razor and stretch work; the rest say what they will do. |
 | **Ripple delete** | `Shift W` takes a clip — or a selected gap — out and closes the hole. |
@@ -1821,10 +1822,12 @@ Sources are kept across changes to the stack rather than reopened. Reopening a l
 moved would restart its decoder, and restarting a decoder means finding a keyframe and running up to
 the playhead again — the one genuinely expensive thing in the pipeline.
 
-Not yet, and each is a real absence rather than an oversight: **no per-clip transform** (no position,
-scale, rotation or opacity), **no blend modes**, and **no effects**. A layer covers what is under it
-wherever it has pixels. Compositing several sources is the machinery those need; they are the next
-thing it makes possible, not something it already does.
+A clip now carries a transform of its own — position, anchor, scale, rotation, opacity, crop and
+skew — which the compositor applies after turning the picture upright. See
+[Effect Controls](#effect-controls) for what the parameters mean and where they are not yet honoured.
+
+Still absent, and each a real absence rather than an oversight: **no blend modes** and **no
+effects**. A layer covers what is under it wherever it has pixels.
 
 #### The frame, and looking at it
 
@@ -1868,6 +1871,68 @@ canvas swaps size on every play and pause.
 They ride in the project's view state, which means they never mark the document dirty — the same
 reason zooming the timeline does not. A preference about whether *this machine* keeps up has no
 business being an edit to the work, and the render never reads them at all.
+
+### Effect Controls
+
+What the selected clip does to its own picture and its own sound: **Position**, **Anchor Point**,
+**Scale** (uniform or not), **Rotation**, **Opacity**, **Crop** on each edge, **Skew**, and for the
+sound **Level**, **Mute** and **Balance**. The names and the units are Premiere's, because someone
+arriving from it will type 50 into Scale and expect half.
+
+It follows the **selection**, not the playhead. The playhead is where you are looking and the
+selection is what you are working on, and they are usually different — scrubbing to check a cut
+elsewhere must not swap the parameters out from under a hand halfway through typing a number.
+
+Selecting a clip selects everything linked to it, so picking up a shot hands the panel both halves:
+Motion, Opacity and Crop belong to the picture, Level and Balance to the sound. Several clips at
+once shows nothing rather than guessing what a field should say when two clips disagree.
+
+#### Nothing is stored until it is touched
+
+`effects` is absent on a clip until a parameter actually moves off its default, and the defaults are
+*resolved against the frame* rather than written down.
+
+Both halves of that matter. A clip carrying `rotation: 0` is claiming someone decided not to rotate
+it, and a document should be a record of decisions. More concretely: the defaults for Position and
+Anchor Point are **the centre of the frame**, so writing them down would pin them to the sequence
+size they were written at — resize a 1080×1920 sequence to 1080×1080 afterwards and every clip would
+still be anchored at y=960, half of them hanging off the bottom.
+
+It also means an untouched clip has to composite byte-identically to one from before any of this
+existed, which is checked rather than assumed.
+
+#### What 100% means here
+
+The size FLUX already drew the clip at — scaled to fit the frame, centred. **Not** the source's own
+pixel size, which is what Premiere's 100% means.
+
+Deliberate: taking 100% to mean native pixels would make every 4K clip in a 1080 sequence overflow
+the frame the moment this shipped, which is a change to every existing project rather than a new
+feature. For the common case the two agree anyway, since a sequence takes its size from the first
+clip dropped on it.
+
+#### Crop is a clip path, not a source rectangle
+
+The crop happens in the picture's **displayed** orientation, so its edges are the edges you see
+whatever way the file was coded. Taking a source rectangle instead would need the crop mapped back
+through the file's rotation, and a left crop on a sideways clip would come off the top.
+
+#### The render refuses what it cannot draw
+
+The Viewer honours all of this. **The ffmpeg graph does not yet** — it is one `scale`, one `pad` and
+one `overlay` per clip, and nothing in it has anywhere to put an anchor point.
+
+So a sequence render with a transformed clip in it is **refused**, by name:
+
+> the render cannot draw clip effects yet, and one clip has them: DSCF1906.MOV. Reset them in Effect
+> Controls, or render a sequence without them.
+
+Rendering anyway would write a file that does not match the picture it was checked against, and
+quietly — a 60% scale would simply not be there, and the only way to find out would be to watch the
+output. That is the one thing this pipeline will not do: every rule in it comes back to the output
+being the sequence, so a transform it cannot express has to stop it rather than be dropped on the
+floor. Teaching the graph these transforms is the next piece of work, and until it lands the archive
+path is unaffected, because an untouched clip is not a transformed one.
 
 #### When the decoder will not start
 
@@ -1984,7 +2049,7 @@ FLUX now has 1, 2 and 3: a sample-table index, built on first sight of a file an
 after that; frames decoded into a buffer we own and composited into the sequence's frame; and audio
 as the master clock, with every audio clip under the playhead summed on one AudioContext. It has
 **none of 4, 5 or 6** — no preview render files, no proxies, no quality throttling — and item 2 is
-present only as layering: there are no effects and no per-clip transform to render.
+present as layering and a per-clip transform; there are still no effects.
 
 One difference from Premiere worth naming: Premiere indexes on *import*, which is what its
 conforming progress bar is doing. FLUX indexes on first sight of a file and keeps the result, which

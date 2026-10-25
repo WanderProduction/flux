@@ -42,6 +42,12 @@ import {
   type Point,
   type Zoom,
 } from '../kernel/viewer'
+import {
+  cropRect,
+  resolveTransform,
+  transformOf,
+  type Transform,
+} from '../kernel/clipEffects'
 import { PanelFrame } from './PanelFrame'
 
 /**
@@ -66,8 +72,10 @@ import { PanelFrame } from './PanelFrame'
  *
  * Each frame is scaled to fit that output, centred, keeping its aspect — so a
  * portrait clip over a landscape one shows the layer beneath it down each side.
- * There is no per-clip transform yet: no position, no scale, no opacity, and no
- * blending. A layer covers what is under it wherever it has pixels.
+ * Each clip then carries its own transform — position, anchor, scale, rotation,
+ * opacity, crop and skew, applied after the file's own rotation has put the
+ * picture upright. See kernel/clipEffects.ts. What is still missing is
+ * blending: a layer covers what is under it wherever it has pixels.
  *
  * **The element.** Anything else — webm, a container the demuxer will not
  * guess at, a build without WebCodecs — falls back to a plain `<video>`, which
@@ -138,83 +146,114 @@ export function clipAt(sequence: SequenceState, time: number): Clip | null {
   return layersAt(sequence, time).at(-1) ?? null
 }
 
-/** A frame scaled to fit `width` by `height`, centred, keeping its shape. */
-function fitted(frame: { displayWidth: number; displayHeight: number }, width: number, height: number) {
-  const scale = Math.min(width / frame.displayWidth, height / frame.displayHeight)
-  const w = frame.displayWidth * scale
-  const h = frame.displayHeight * scale
-  return { x: (width - w) / 2, y: (height - h) / 2, w, h }
-}
-
 /**
- * Draws a frame into the sequence's frame, turned upright and centred.
+ * Draws one clip into the sequence's frame, upright, cropped, transformed.
  *
- * A decoder hands back the picture exactly as it was coded, which for two in
- * five files in a camera library means lying on its side — the container's
- * display matrix is what says so, and nothing in WebCodecs applies it. The
- * element path never needed this because Chromium rotates for `<video>`
- * itself, which is precisely why the pipeline drawing these sideways went
- * unnoticed: the same clip looked right on its card and wrong on the canvas.
+ * Two rotations meet here and they are not the same thing. The **file's** is
+ * intrinsic: a decoder hands back the picture exactly as it was coded, which
+ * for two in five files in a camera library means lying on its side, and the
+ * container's display matrix is what says so. The **clip's** is a decision
+ * someone made in the panel. The file's is applied first, to put the picture
+ * up the right way, and everything a person set then applies to that upright
+ * picture — otherwise typing 90 into Rotation would mean something different
+ * for a phone clip than for a camera one.
  *
- * The fit is computed on the *displayed* shape rather than the coded one. Fit
- * first and rotate after and a vertical clip is scaled to fill a landscape box
- * and then turned, so it overflows the frame on one axis and leaves a gap on
- * the other.
+ * The file's rotation is negated because the conventions point opposite ways:
+ * `av_display_rotation_get` returns a counter-clockwise angle and canvas
+ * `rotate()` takes a clockwise one. A wrong quarter turn inside a frame box
+ * sized for the right one does not look sideways, it looks upside down, which
+ * reads as a camera problem rather than a FLUX one. Measured: ffmpeg's correct
+ * output for DSCF1908.MOV is pixel-identical to the coded frame through
+ * `transpose=2` at PSNR inf, where clockwise scores 15dB.
  *
- * Inside the rotated space the box's axes have swapped, so the frame is drawn
- * at the box's other dimensions — a 90-degree turn makes the box's height the
- * width to draw at. Getting that the wrong way round is a picture that is
- * upright and squashed, which reads as a bad aspect ratio rather than as a
- * rotation bug.
+ * ## What 100% scale means
+ *
+ * The size FLUX already drew the clip at: scaled to fit the frame, centred.
+ * **Not** the source's own pixel size, which is what Premiere's 100% means.
+ *
+ * Deliberate, and the reason is that untouched clips must composite exactly as
+ * they did before any of this existed — a sequence of them has to render
+ * identically to one from before there were parameters at all. Taking 100% to
+ * mean native pixels would make every 4K clip in a 1080 sequence overflow the
+ * moment this shipped. For the common case here the two agree anyway, since a
+ * sequence takes its size from the first clip dropped on it.
+ *
+ * ## Crop is a clip path, not a source rectangle
+ *
+ * Cropping in the *displayed* orientation means its edges are the edges
+ * someone sees, whatever way the file was coded. Taking a source rectangle
+ * instead would need the crop mapped back through the file's rotation, and a
+ * left crop on a sideways clip would come off the top. Clipping the
+ * destination before the rotation is applied avoids the mapping entirely.
  */
-function drawUpright(
+function drawClip(
   context: CanvasRenderingContext2D,
   frame: VideoFrame,
   width: number,
   height: number,
   rotation: number,
+  effects: Partial<Transform> | undefined,
 ) {
-  const quarter = rotation === 90 || rotation === 270
-  const box = fitted(
-    quarter
-      ? { displayWidth: frame.displayHeight, displayHeight: frame.displayWidth }
-      : frame,
-    width,
-    height,
-  )
+  const t = resolveTransform(effects, { width, height })
+  const alpha = t.opacity / 100
+  if (alpha <= 0) return
 
-  if (rotation === 0) {
-    context.drawImage(frame, box.x, box.y, box.w, box.h)
-    return
-  }
+  // The picture's shape once the file's own rotation has been honoured.
+  const quarter = rotation === 90 || rotation === 270
+  const shown = quarter
+    ? { width: frame.displayHeight, height: frame.displayWidth }
+    : { width: frame.displayWidth, height: frame.displayHeight }
+  if (!(shown.width > 0) || !(shown.height > 0)) return
+
+  const rect = cropRect(t.crop, shown)
+  if (rect.width <= 0 || rect.height <= 0) return
+
+  // Frame pixels per displayed pixel at 100%: the fit this panel always used.
+  const fit = Math.min(width / shown.width, height / shown.height)
+  const fullWidth = shown.width * fit
+  const fullHeight = shown.height * fit
 
   context.save()
-  context.translate(box.x + box.w / 2, box.y + box.h / 2)
+  context.globalAlpha = alpha
+
   /*
-   * Negative, because the two conventions here point opposite ways.
-   *
-   * `rotation` is what `av_display_rotation_get` returns, which is the angle
-   * the display matrix rotates the frame by **counter-clockwise**. Canvas
-   * `rotate()` takes a clockwise angle, since its y-axis points down. Passing
-   * one straight into the other turns every quarter-turn clip the wrong way —
-   * and a wrong quarter turn in a frame box sized for the *right* one does not
-   * look sideways, it looks **upside down**, which reads as a camera problem
-   * rather than a FLUX one.
-   *
-   * Measured rather than reasoned about: ffmpeg's own correct output for
-   * DSCF1908.MOV (matrix rotation 90) is pixel-identical to the coded frame
-   * put through `transpose=2` — counter-clockwise — at PSNR inf, where
-   * clockwise scores 15dB.
-   *
-   * This went unseen because nothing checked orientation. The fixtures are
-   * colour bars, where upside down is invisible, and verify:footage asserted
-   * the coded size, the rotation value and that the canvas was not black —
-   * none of which a 180-degree error changes.
+   * Position, scale, rotation and skew, composed once in kernel/clipEffects so
+   * every surface agrees what they mean together. After it, the origin is
+   * wherever `position` points and the axes carry the scale and the turn.
    */
-  context.rotate((-rotation * Math.PI) / 180)
-  const w = quarter ? box.h : box.w
-  const h = quarter ? box.w : box.h
-  context.drawImage(frame, -w / 2, -h / 2, w, h)
+  const m = transformOf(t)
+  context.setTransform(m[0], m[1], m[2], m[3], m[4], m[5])
+
+  /*
+   * Then back by the anchor, which moves the origin to the picture's centre.
+   *
+   * The anchor is given in sequence pixels and defaults to the centre of the
+   * frame, which is where an untouched picture's own centre sits — so the
+   * offset below is zero until someone moves it, and the picture is drawn
+   * about its middle exactly as before.
+   */
+  context.translate(-(t.anchor.x - width / 2), -(t.anchor.y - height / 2))
+
+  // The crop, in the picture's displayed orientation, before the file's own
+  // rotation turns the axes.
+  if (rect.width < shown.width || rect.height < shown.height) {
+    context.beginPath()
+    context.rect(
+      -fullWidth / 2 + rect.x * fit,
+      -fullHeight / 2 + rect.y * fit,
+      rect.width * fit,
+      rect.height * fit,
+    )
+    context.clip()
+  }
+
+  if (rotation !== 0) context.rotate((-rotation * Math.PI) / 180)
+  // Inside the rotated space the box's axes have swapped, so a quarter turn
+  // draws at the other dimension. Getting this the wrong way round is a
+  // picture that is upright and squashed, which reads as a bad aspect ratio.
+  const drawWidth = quarter ? fullHeight : fullWidth
+  const drawHeight = quarter ? fullWidth : fullHeight
+  context.drawImage(frame, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
   context.restore()
 }
 
@@ -423,7 +462,16 @@ export function ViewerPanel() {
    * frames from before the trim, because the ids had not changed.
    */
   const placement = layers
-    .map((layer) => `${layer.id}@${layer.start}+${layer.offset}x${layer.speed}`)
+    .map(
+      (layer) =>
+        // The effects belong in here for the same reason the trim does: they
+        // change what is drawn without changing which clips are drawn, and
+        // this string is what decides whether the drawing is renewed. Left
+        // out, moving Scale changed the document and nothing on screen — the
+        // panel worked, the picture did not, and the two disagreed silently.
+        `${layer.id}@${layer.start}+${layer.offset}x${layer.speed}` +
+        `:${JSON.stringify(layer.effects?.transform ?? null)}`,
+    )
     .join('|')
   const clip = layers.at(-1) ?? null
   const assetById = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets])
@@ -614,7 +662,7 @@ export function ViewerPanel() {
           // Per layer, because a stack can mix a vertical phone clip with a
           // landscape camera one and each has to be put up on its own terms.
           const rotation = sourcesRef.current.get(layers[index].id)?.info.rotation ?? 0
-          drawUpright(context, frame, width, height, rotation)
+          drawClip(context, frame, width, height, rotation, layers[index].effects?.transform)
           drawn += 1
           front = frame
         }

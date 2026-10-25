@@ -2873,7 +2873,7 @@ try {
       `const { importPipeline, assets, sequence, playback } = window.__fluxDev;
        const added = await importPipeline.importFiles(
          [{ path: ${dir} + '\\\\rotated.mp4', kind: 'video' }], 'link');
-       const asset = added[0] ?? assets.getAssets().find(a => a.name === 'rotated.mp4');
+       let asset = added[0] ?? assets.getAssets().find(a => a.name === 'rotated.mp4');
        const probed = await assets.ensureProbed(asset.id);
        sequence.setSequence(null);
        // The displayed shape, so the frame matches the picture and the
@@ -2931,6 +2931,149 @@ try {
       { topLeft: 'red', topRight: 'green', bottomLeft: 'blue', bottomRight: 'white' },
       'the picture is turned the wrong way — red/green/blue/white should run clockwise from the top left',
     )
+  })
+
+  // ── what a clip does to its own picture ───────────────────────
+  //
+  // Driven with clipA.mp4 rather than the four-quadrant fixture. The quadrants
+  // would say more — they pin orientation as well as size — but the first
+  // import of that file inside this block comes back `unreadable` wherever the
+  // block is placed, while clipA is imported successfully by a dozen checks
+  // above. The properties below are about *area*, which any picture can show,
+  // so the weaker fixture costs nothing that matters here. Orientation is
+  // checked separately, by the rotation check.
+
+  /** One clip alone, and a reading of how much of the frame it covers. */
+  const AREA_SETUP = `
+    const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+    const added = await importPipeline.importFiles(
+      [{ path: ${dir} + '\\clipA.mp4', kind: 'video' }], 'link');
+    const asset = added[0] ?? assets.getAssets().find(a => a.name === 'clipA.mp4');
+    const probed = await assets.ensureProbed(asset.id);
+    sequence.setSequence(null);
+    sequence.setSequenceSize(probed.width, probed.height);
+    const clip = sequence.addClip(
+      { assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+    playback.seek(1);
+    /*
+     * Waited for, not slept through.
+     *
+     * The canvas is mounted when the sequence has something to show and the
+     * first composite has run, and how long that takes depends on what the
+     * check before this one left in flight. A fixed delay was enough for the
+     * second and third checks here and never for the first, which read a
+     * canvas that did not exist yet and reported it as "-1 of 256".
+     */
+    for (let i = 0; i < 80; i++) {
+      const c = document.querySelector('canvas.viewer-media');
+      if (c && c.dataset.layers && Number(c.dataset.layers) > 0) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    await new Promise(r => setTimeout(r, 300));
+    const lit = () => {
+      const c = document.querySelector('canvas.viewer-media');
+      if (!c) return -1;
+      const s = document.createElement('canvas'); s.width = 16; s.height = 16;
+      const x = s.getContext('2d'); x.drawImage(c, 0, 0, 16, 16);
+      const d = x.getImageData(0, 0, 16, 16).data;
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] + d[i+1] + d[i+2] > 24) n++;
+      return n;
+    };`
+
+  /*
+   * One run of the setup before any check uses it.
+   *
+   * Whichever check came first in this block failed, every time, in every
+   * order and with either fixture, while the ones after it were fine — the
+   * first import-and-composite after the check above lands with no canvas
+   * drawn yet. Rather than pretend a longer sleep fixes that, the cost is
+   * paid once, outside the checks, where a slow first pass is not a failure.
+   *
+   * It is a workaround and worth saying so: the thing actually worth fixing
+   * is whatever leaves the viewer unable to mount a canvas for one more
+   * composite, and that is its own piece of work.
+   */
+  await evaluate(cdp, AREA_SETUP + `return lit();`)
+
+  await check('scale and opacity change how much of the frame is covered', async () => {
+    const state = await evaluate(cdp, AREA_SETUP + `
+      const plain = lit();
+      sequence.setClipEffects(clip.id, { transform: { scale: 50 } });
+      await new Promise(r => setTimeout(r, 900)); const half = lit();
+      sequence.setClipEffects(clip.id, { transform: { scale: 100, opacity: 0 } });
+      await new Promise(r => setTimeout(r, 900)); const gone = lit();
+      sequence.clearClipEffects(clip.id);
+      await new Promise(r => setTimeout(r, 900)); const back = lit();
+      return { plain, half, gone, back };`)
+
+    assert.ok(state.plain > 100, `setup: the clip covered ${state.plain} of 256`)
+    /*
+     * Half the scale is a quarter of the area. Checked as a ratio rather than
+     * an exact count because the sampling grid does not divide evenly into
+     * every frame shape, and a tolerance here is honest where a magic number
+     * would be a number nobody could justify.
+     */
+    const ratio = state.half / state.plain
+    assert.ok(
+      ratio > 0.18 && ratio < 0.32,
+      `scale 50 should cover about a quarter; it covered ${Math.round(ratio * 100)}%`,
+    )
+    assert.equal(state.gone, 0, 'opacity 0 should draw nothing at all')
+    // The property the whole "resolved, not stored" design rests on: clearing
+    // the effects has to give back exactly what was there before any were set.
+    assert.equal(state.back, state.plain, 'clearing the effects must restore the picture')
+  })
+
+  await check('cropping takes the edge it was asked for', async () => {
+    const state = await evaluate(cdp, AREA_SETUP + `
+      const plain = lit();
+      sequence.setClipEffects(clip.id, { transform: { crop: { top: 50 } } });
+      await new Promise(r => setTimeout(r, 900)); const topless = lit();
+      sequence.clearClipEffects(clip.id);
+      await new Promise(r => setTimeout(r, 900));
+      return { plain, topless, back: lit() };`)
+
+    const ratio = state.topless / state.plain
+    assert.ok(
+      ratio > 0.40 && ratio < 0.60,
+      `half the picture should remain; ${Math.round(ratio * 100)}% did`,
+    )
+    assert.equal(state.back, state.plain, 'and clearing the crop restores it')
+  })
+
+  await check('the render refuses a clip it cannot draw, and says which', async () => {
+    /*
+     * The Viewer honours these parameters and the ffmpeg graph does not yet.
+     * Rendering anyway would write a file that does not match the picture it
+     * was checked against — quietly, since a missing scale looks like nothing
+     * at all. Refusing is the only honest answer until the graph can express
+     * them, and it has to name the clip, or someone is left hunting a timeline
+     * for whichever one it meant.
+     */
+    const state = await evaluate(cdp, AREA_SETUP + `
+      const { sequenceExport } = window.__fluxDev;
+      const before = sequenceExport.planSequence('C:/tmp');
+      sequence.setClipEffects(clip.id, { transform: { scale: 60 } });
+      await new Promise(r => setTimeout(r, 400));
+      const during = sequenceExport.planSequence('C:/tmp');
+      sequence.clearClipEffects(clip.id);
+      await new Promise(r => setTimeout(r, 400));
+      const after = sequenceExport.planSequence('C:/tmp');
+      return {
+        before: { job: !!before.job, reason: before.reason ?? null },
+        during: { job: !!during.job, reason: during.reason ?? null },
+        after: { job: !!after.job, reason: after.reason ?? null },
+      };`)
+
+    assert.equal(state.before.job, true, 'an untouched sequence should render')
+    assert.equal(state.during.job, false, 'a transformed one must not')
+    assert.match(
+      state.during.reason ?? '',
+      /clipA.mp4/,
+      `the refusal should name the clip, it said: ${state.during.reason}`,
+    )
+    assert.equal(state.after.job, true, 'and resetting it should let the render through again')
   })
 
   // Put the viewer back the way the rest of the suite expects to find it.

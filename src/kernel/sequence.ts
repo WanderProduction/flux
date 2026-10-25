@@ -1,3 +1,4 @@
+import type { ClipEffects } from './clipEffects'
 import {
   defaultSettings,
   makeSettings,
@@ -119,6 +120,16 @@ export interface Clip {
    * picture is not an edit anyone means to make.
    */
   linkId?: string
+  /**
+   * What this clip does to its picture and its sound — see kernel/clipEffects.
+   *
+   * Absent until something is actually moved off its default, which is why it
+   * is optional rather than filled in: a clip carrying `rotation: 0` claims
+   * someone decided not to rotate it, and the defaults for position and anchor
+   * are the centre of *the frame*, so writing them down would pin them to
+   * whatever size the sequence happened to be at the time.
+   */
+  effects?: ClipEffects
 }
 
 /** Below this a track is off rather than quiet, which is what a fader bottom means. */
@@ -1445,6 +1456,45 @@ function updateTrack(trackId: string, change: (track: Track) => Track): boolean 
 }
 
 /** @param db decibels, 0 being unity. Clamped to the fader's range. */
+/**
+ * Changes some of a clip's effect parameters, leaving the rest alone.
+ *
+ * Merged two levels deep, so a panel can report the one field a hand moved
+ * without having to send back everything it is not touching — and without a
+ * stale copy of the rest overwriting a change that arrived in between.
+ */
+export function setClipEffects(id: string, patch: ClipEffects): boolean {
+  const clip = sequence.clips.find((c) => c.id === id)
+  if (!clip) return false
+
+  const effects: ClipEffects = {
+    transform: { ...clip.effects?.transform, ...patch.transform },
+    audio: { ...clip.effects?.audio, ...patch.audio },
+  }
+  sequence = {
+    ...sequence,
+    clips: sequence.clips.map((c) => (c.id === id ? { ...c, effects } : c)),
+  }
+  emit()
+  return true
+}
+
+/** Puts a clip back to no transform and no audio change at all. */
+export function clearClipEffects(id: string): boolean {
+  const clip = sequence.clips.find((c) => c.id === id)
+  if (!clip?.effects) return false
+  sequence = {
+    ...sequence,
+    clips: sequence.clips.map((c) => {
+      if (c.id !== id) return c
+      const { effects: _dropped, ...rest } = c
+      return rest
+    }),
+  }
+  emit()
+  return true
+}
+
 export function setTrackGain(trackId: string, db: number): boolean {
   return updateTrack(trackId, (track) => ({ ...track, gain: clampGain(db) }))
 }

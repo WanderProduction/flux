@@ -96,9 +96,19 @@ export function fitScale(frame: Size, stage: Size): number {
   return Math.min(stage.width / frame.width, stage.height / frame.height)
 }
 
-/** The scale actually in force, resolving `fit` against the stage. */
+/**
+ * The scale actually in force, resolving `fit` against the stage.
+ *
+ * A zoom that is not a finite number is not a zoom, and is treated as Fit.
+ * Without this one NaN is self-sustaining: the scale feeds the ref that the
+ * next zoom step reads, so a single bad value makes every later one NaN too,
+ * and the only visible symptom is the frame vanishing with
+ * "`NaN` is an invalid value for the `width` css style property" in the
+ * console — which names the stylesheet rather than the arithmetic.
+ */
 export function resolveZoom(zoom: Zoom, frame: Size, stage: Size): number {
-  return zoom === 'fit' ? fitScale(frame, stage) : zoom
+  if (zoom === 'fit' || !Number.isFinite(zoom)) return fitScale(frame, stage)
+  return zoom
 }
 
 /**
