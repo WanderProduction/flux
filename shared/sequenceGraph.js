@@ -156,14 +156,76 @@ function videoChain(input, cut, job) {
     ? `setpts=(PTS-STARTPTS)/${speed}+${s(cut.start)}/TB`
     : `setpts=PTS-STARTPTS+${s(cut.start)}/TB`
 
-  return (
-    `[${input}:v]${pts},` +
-    `fps=${job.frameRate},` +
-    `scale=${job.width}:${job.height}:force_original_aspect_ratio=decrease,` +
-    `format=yuva420p10le,` +
-    `pad=${job.width}:${job.height}:(ow-iw)/2:(oh-ih)/2:color=black@0,` +
-    `setsar=1[v${input}]`
-  )
+  const head = `[${input}:v]${pts},fps=${job.frameRate},`
+
+  /*
+   * An untouched clip takes the path it always took: scaled to fit, padded to
+   * the frame, overlaid at the origin. Not an optimisation — it is how a
+   * sequence that nobody has moved goes on rendering byte for byte as it did
+   * before any of this existed.
+   */
+  const place = cut.placement
+  if (!place) {
+    return (
+      head +
+      `scale=${job.width}:${job.height}:force_original_aspect_ratio=decrease,` +
+      `format=yuva420p10le,` +
+      `pad=${job.width}:${job.height}:(ow-iw)/2:(oh-ih)/2:color=black@0,` +
+      `setsar=1[v${input}]`
+    )
+  }
+
+  /*
+   * A moved clip is built up a filter at a time, in the order the canvas does
+   * it: the whole picture scaled, the crop taken out of what that produced,
+   * the result turned, then faded. Each step is skipped when it would do
+   * nothing, so a graph read by hand only mentions what someone actually set.
+   */
+  const steps = [`scale=${place.scaleWidth}:${place.scaleHeight}`]
+
+  if (
+    place.cropWidth !== place.scaleWidth ||
+    place.cropHeight !== place.scaleHeight ||
+    place.cropX !== 0 ||
+    place.cropY !== 0
+  ) {
+    steps.push(`crop=${place.cropWidth}:${place.cropHeight}:${place.cropX}:${place.cropY}`)
+  }
+
+  // Before the turn, because `rotate` needs somewhere to put the corners it
+  // creates and `c=none` only means transparent if there is an alpha channel.
+  steps.push('format=yuva420p10le')
+
+  if (place.rotation !== 0) {
+    /*
+     * Radians, and *not* negated.
+     *
+     * The transform is stored the way a person reads a dial, degrees
+     * clockwise, and ffmpeg's `rotate` turns clockwise for a positive angle
+     * too — so the two agree and nothing needs flipping. Measured rather than
+     * assumed, because the display matrix two files away uses the opposite
+     * convention and guessing from that one would have been wrong:
+     *
+     *   rotate=+PI/2 on red/green/blue/white  ->  TL:blue TR:red BL:white BR:green
+     *   canvas rotate(+90deg), same picture   ->  TL:blue TR:red BL:white BR:green
+     *
+     * A negated angle was tried first and moved the top right corner to the
+     * top left, which is the other way round.
+     *
+     * `rotw`/`roth` are the filter's own functions for the box a turned
+     * rectangle needs, so the size comes from the same arithmetic that draws
+     * it rather than from a second opinion computed here.
+     */
+    const radians = ((place.rotation * Math.PI) / 180).toFixed(6)
+    steps.push(`rotate=${radians}:ow=rotw(${radians}):oh=roth(${radians}):c=none`)
+  }
+
+  if (place.opacity < 1) {
+    steps.push(`colorchannelmixer=aa=${place.opacity.toFixed(4)}`)
+  }
+
+  steps.push('setsar=1')
+  return head + steps.join(',') + `[v${input}]`
 }
 
 /**
@@ -194,6 +256,19 @@ function audioChain(input, cut, job, audio) {
   // Unity is skipped rather than written as `volume=1`, so a graph read by hand
   // only mentions the tracks someone actually moved.
   if (Math.abs((cut.gain ?? 1) - 1) > 1e-6) steps.push(`volume=${cut.gain.toFixed(6)}`)
+  /*
+   * Balance, as a matrix rather than a `pan` preset.
+   *
+   * Turning a stereo clip to the left means quietening the right channel, not
+   * moving one into the other — a hard pan that folded the channels together
+   * would change what is in the mix rather than where it sits.
+   */
+  if (cut.pan) {
+    const pan = Math.max(-1, Math.min(1, cut.pan))
+    const left = (pan > 0 ? 1 - pan : 1).toFixed(6)
+    const right = (pan < 0 ? 1 + pan : 1).toFixed(6)
+    steps.push(`pan=stereo|c0=${left}*c0|c1=${right}*c1`)
+  }
   if (cut.start > 0) steps.push(`adelay=${Math.round(cut.start * 1000)}:all=1`)
   return `${steps.join(',')}[a${input}]`
 }
@@ -275,7 +350,7 @@ export function sequenceArgs(job, options = {}) {
     for (const cut of job.video) {
       const index = addInput(cut)
       chains.push(videoChain(index, cut, job))
-      videoLabels.push(`v${index}`)
+      videoLabels.push({ label: `v${index}`, cut })
     }
   }
 
@@ -293,9 +368,12 @@ export function sequenceArgs(job, options = {}) {
    * frame being held to the end of the file.
    */
   let under = 'b'
-  videoLabels.forEach((label, nth) => {
+  videoLabels.forEach(({ label, cut }, nth) => {
     const out = nth === videoLabels.length - 1 ? 'vout' : `x${nth}`
-    chains.push(`[${under}][${label}]overlay=0:0:eof_action=pass:format=yuv420p10[${out}]`)
+    // A clip that has not been moved is already the size of the frame and sits
+    // at the origin; one that has been carries where its top left goes.
+    const at = cut.placement ? `${cut.placement.x}:${cut.placement.y}` : '0:0'
+    chains.push(`[${under}][${label}]overlay=${at}:eof_action=pass:format=yuv420p10[${out}]`)
     under = out
   })
   // A sequence with no picture anywhere is black for its whole length, which is

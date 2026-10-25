@@ -1824,7 +1824,7 @@ the playhead again — the one genuinely expensive thing in the pipeline.
 
 A clip now carries a transform of its own — position, anchor, scale, rotation, opacity, crop and
 skew — which the compositor applies after turning the picture upright. See
-[Effect Controls](#effect-controls) for what the parameters mean and where they are not yet honoured.
+[Effect Controls](#effect-controls) for what the parameters mean. The render draws all of them except skew.
 
 Still absent, and each a real absence rather than an oversight: **no blend modes** and **no
 effects**. A layer covers what is under it wherever it has pixels.
@@ -1917,22 +1917,43 @@ The crop happens in the picture's **displayed** orientation, so its edges are th
 whatever way the file was coded. Taking a source rectangle instead would need the crop mapped back
 through the file's rotation, and a left crop on a sideways clip would come off the top.
 
-#### The render refuses what it cannot draw
+#### The render draws it too
 
-The Viewer honours all of this. **The ffmpeg graph does not yet** — it is one `scale`, one `pad` and
-one `overlay` per clip, and nothing in it has anywhere to put an anchor point.
+The ffmpeg graph builds a clip's filters in the same order the canvas does: scale the whole
+picture, take the crop out of what that produced, turn it, fade it, and overlay it where the
+transform says. The sound carries its own level, mute and balance alongside the track's.
 
-So a sequence render with a transformed clip in it is **refused**, by name:
+**An untouched clip takes the path it always took** — scale to fit, pad, overlay at the origin —
+and carries no placement at all. That is not an optimisation: it is what makes a sequence nobody
+has moved go on rendering exactly as it did before any of this existed.
 
-> the render cannot draw clip effects yet, and one clip has them: DSCF1906.MOV. Reset them in Effect
-> Controls, or render a sequence without them.
+The arithmetic lives in `renderPlacement`, in whole pixels, because ffmpeg has no matrix: its
+filters each do one thing and have to be told exactly how big and exactly where. Keeping it in one
+place beside the canvas version is the only way to be sure the two agree, and they must — the
+preview is what someone approves and the render is what they get.
 
-Rendering anyway would write a file that does not match the picture it was checked against, and
-quietly — a 60% scale would simply not be there, and the only way to find out would be to watch the
-output. That is the one thing this pipeline will not do: every rule in it comes back to the output
-being the sequence, so a transform it cannot express has to stop it rather than be dropped on the
-floor. Teaching the graph these transforms is the next piece of work, and until it lands the archive
-path is unaffected, because an untouched clip is not a transformed one.
+> **Rotation turns the same way in both, and that was measured rather than assumed.** The display
+> matrix two files away uses the *opposite* convention, so reasoning from it would have been wrong:
+>
+> | | top-left | top-right | bottom-left | bottom-right |
+> |---|---|---|---|---|
+> | `rotate=+PI/2` | blue | red | white | green |
+> | canvas `rotate(+90°)` | blue | red | white | green |
+>
+> A negated angle was tried first, and moved the top-right corner to the top left.
+
+Checked by rendering each case through the real graph and looking at the result: the plain clip
+fills the frame, 50% scale is half size and centred, 90° puts blue/red/white/green clockwise from
+the top left, and a 50% top crop leaves the lower half where it was.
+
+#### Skew is still refused
+
+ffmpeg has no shear filter. The nearest thing, `perspective`, draws a different picture from the
+one the canvas does, and approximating it would mean an export that *nearly* matches what was
+approved — which is worse than one that says plainly it cannot:
+
+> the render cannot draw skew, and one clip has it: DSCF1906.MOV. Set Skew back to 0 in Effect
+> Controls to render this sequence.
 
 #### When the decoder will not start
 
