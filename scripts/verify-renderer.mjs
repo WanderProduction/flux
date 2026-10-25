@@ -252,6 +252,9 @@ try {
       'pcm_twos.mov',
       'photo.png',
       'render.webm',
+      // Coded landscape with a matrix of 90, and four coloured quadrants, so
+      // that a clip drawn the wrong way up can be told from one drawn right.
+      'rotated.mp4',
       'shot_B.mp4',
       'still.jpg',
       'voice_over.mp4',

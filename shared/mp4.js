@@ -74,7 +74,7 @@
  * @property {Float64Array} pts presentation time, seconds
  * @property {Uint8Array} key 1 when the sample is a sync sample
  * @property {Int32Array} order sample indices sorted by presentation time
- * @property {number} rotation degrees clockwise the picture must be turned to
+ * @property {number} rotation degrees counter-clockwise the picture must be turned to
  *   be upright: 0, 90, 180 or 270. Read from the tkhd matrix. The width and
  *   height above stay as *coded* — the shape the decoder hands back — so a
  *   vertical clip is 1920x1080 with a rotation of 90, and anything that needs
@@ -513,7 +513,15 @@ function parseMdhd(view, body) {
 }
 
 /**
- * The display rotation a track carries, in degrees clockwise: 0, 90, 180, 270.
+ * The display rotation a track carries, in degrees **counter-clockwise**:
+ * 0, 90, 180, 270.
+ *
+ * Counter-clockwise because that is what `av_display_rotation_get` returns and
+ * what `ffprobe` prints, and agreeing with ffprobe is the only way to check
+ * this against anything. It is worth saying twice because this comment used to
+ * say *clockwise* — the formula was right and the sentence was wrong, and the
+ * one consumer that turns pixels believed the sentence. Every quarter-turn
+ * clip was drawn upside down.
  *
  * Cameras do not rotate pixels. A clip shot with the body turned on its side is
  * coded exactly as the sensor read it — 1920x1080 — and the container carries a

@@ -2799,6 +2799,90 @@ try {
     )
   })
 
+  await check('a turned clip is drawn the right way up, not merely the right shape', async () => {
+    /*
+     * The check that was missing, and the reason a real bug shipped.
+     *
+     * `rotated.mp4` is coded 320x180 with a matrix of 90 — a camera held on
+     * its side — and its upright picture has four differently coloured
+     * quadrants: red, green, blue, white, clockwise from the top left. Every
+     * other fixture is a test pattern, and a test pattern drawn upside down
+     * looks like itself.
+     *
+     * What used to be asserted about rotation was the coded size, the rotation
+     * value, and that the canvas was not black. A 180-degree error changes
+     * none of those, so the viewer turned every quarter-turn clip the wrong
+     * way — `av_display_rotation_get` returns a counter-clockwise angle and
+     * canvas `rotate()` takes a clockwise one — and the suite stayed green.
+     *
+     * Any wrong quarter turn moves at least two of these quadrants, and so
+     * does a mirror. There is nowhere for the bug to hide.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { importPipeline, assets, sequence, playback } = window.__fluxDev;
+       const added = await importPipeline.importFiles(
+         [{ path: ${dir} + '\\\\rotated.mp4', kind: 'video' }], 'link');
+       const asset = added[0] ?? assets.getAssets().find(a => a.name === 'rotated.mp4');
+       const probed = await assets.ensureProbed(asset.id);
+       sequence.setSequence(null);
+       // The displayed shape, so the frame matches the picture and the
+       // quadrants land on the quadrants.
+       sequence.setSequenceSize(probed.width, probed.height);
+       sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: probed.duration });
+       playback.pause();
+       playback.seek(1);
+       await new Promise(r => setTimeout(r, 1800));
+
+       const canvas = document.querySelector('canvas.viewer-media');
+       if (!canvas) return { error: 'no canvas' };
+
+       // Into a small canvas so each read is an average of its quadrant
+       // rather than one pixel that might sit on a seam.
+       const small = document.createElement('canvas');
+       small.width = 8; small.height = 8;
+       const ctx = small.getContext('2d');
+       ctx.drawImage(canvas, 0, 0, 8, 8);
+       const read = (x, y) => {
+         const d = ctx.getImageData(x, y, 1, 1).data;
+         return [d[0], d[1], d[2]];
+       };
+       const names = { red: [255,0,0], green: [0,128,0], blue: [0,0,255], white: [255,255,255] };
+       const nearest = (rgb) => Object.entries(names)
+         .map(([n, c]) => [n, (rgb[0]-c[0])**2 + (rgb[1]-c[1])**2 + (rgb[2]-c[2])**2])
+         .sort((a, b) => a[1] - b[1])[0][0];
+
+       return {
+         probed: { width: probed.width, height: probed.height },
+         rotation: (await window.__fluxDev.indexCache.trackFor(asset.path, 'video'))?.track?.rotation,
+         topLeft: nearest(read(2, 2)),
+         topRight: nearest(read(5, 2)),
+         bottomLeft: nearest(read(2, 5)),
+         bottomRight: nearest(read(5, 5)),
+       };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    // Portrait on screen, from a landscape file: the rotation reached the probe.
+    assert.deepEqual(
+      state.probed,
+      { width: 180, height: 320 },
+      'the asset should carry the displayed shape, not the coded one',
+    )
+    assert.equal(state.rotation, 90, 'the demuxer should read a matrix of 90')
+
+    assert.deepEqual(
+      {
+        topLeft: state.topLeft,
+        topRight: state.topRight,
+        bottomLeft: state.bottomLeft,
+        bottomRight: state.bottomRight,
+      },
+      { topLeft: 'red', topRight: 'green', bottomLeft: 'blue', bottomRight: 'white' },
+      'the picture is turned the wrong way — red/green/blue/white should run clockwise from the top left',
+    )
+  })
+
   // Put the viewer back the way the rest of the suite expects to find it.
   await evaluate(
     cdp,

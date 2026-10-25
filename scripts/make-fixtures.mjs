@@ -277,6 +277,76 @@ function corruptMp4() {
   return box
 }
 
+/**
+ * `rotated.mp4` — a clip whose orientation can actually be read off the screen.
+ *
+ * Every other fixture here is colour bars or a test pattern, and both are
+ * nearly symmetric: drawn upside down they look like themselves. That is not a
+ * hypothetical. The viewer turned every quarter-turn clip the wrong way for
+ * months — `av_display_rotation_get` returns a counter-clockwise angle and
+ * canvas `rotate()` takes a clockwise one — and nothing caught it, because the
+ * checks compared sizes and asked whether the canvas was black. A 180-degree
+ * error changes neither.
+ *
+ * So this one has **four differently coloured quadrants**, which pin the
+ * orientation exactly: any wrong quarter turn, and any mirroring, moves at
+ * least two of them.
+ *
+ * Built in two passes because the picture and the matrix are separate claims.
+ * The upright picture is 180x320 with red, green, blue and white quadrants
+ * clockwise from the top left; it is then turned a quarter clockwise and coded
+ * landscape, exactly as a camera held on its side records it. The second pass
+ * copies the stream untouched and writes `rotation: 90` into the track matrix,
+ * which says "turn this a quarter counter-clockwise to display it" and takes
+ * the picture back to where it started.
+ *
+ * `-display_rotation` is an *input* option and `-c copy` is what keeps this
+ * honest: nothing re-encodes, so the coded pixels in the file are provably the
+ * turned ones and the only thing the second pass adds is the matrix. The older
+ * spelling, `-metadata:s:v rotate=90`, writes nothing at all on ffmpeg 8.
+ */
+async function makeRotated() {
+  const name = 'rotated.mp4'
+  const out = path.join(DIR, name)
+  const coded = path.join(DIR, `.${name}.coded.tmp.mp4`)
+
+  // Upright: red top-left, green top-right, blue bottom-left, white bottom-right.
+  const quadrants = [
+    'drawbox=x=0:y=0:w=90:h=160:c=red@1:t=fill',
+    'drawbox=x=90:y=0:w=90:h=160:c=green@1:t=fill',
+    'drawbox=x=0:y=160:w=90:h=160:c=blue@1:t=fill',
+    'drawbox=x=90:y=160:w=90:h=160:c=white@1:t=fill',
+  ].join(',')
+
+  try {
+    await run(
+      FFMPEG,
+      [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', 'color=c=black:s=180x320:d=2:r=24',
+        // transpose=1 is a quarter clockwise: what the sensor would have read.
+        '-vf', `${quadrants},transpose=1`,
+        '-c:v', 'libx264', '-bf', '0', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+        '-b:v', '300k', '-g', '24', '-an',
+        coded,
+      ],
+      { maxBuffer: 8 << 20 },
+    )
+    await run(
+      FFMPEG,
+      ['-hide_banner', '-loglevel', 'error', '-y', '-display_rotation', '90', '-i', coded, '-c', 'copy', out],
+      { maxBuffer: 8 << 20 },
+    )
+    const { size } = await fs.stat(out)
+    console.log(`  ${name.padEnd(20)} ${size} bytes (coded 320x180, matrix 90)`)
+  } catch (err) {
+    console.error(`  FAILED ${name}: ${lastLine(err.stderr ?? err.message)}`)
+    process.exitCode = 1
+  } finally {
+    await fs.rm(coded, { force: true })
+  }
+}
+
 async function main() {
   try {
     const { stdout } = await run(FFMPEG, ['-hide_banner', '-version'])
@@ -304,6 +374,8 @@ async function main() {
       process.exitCode = 1
     }
   }
+
+  await makeRotated()
 
   await fs.writeFile(path.join(DIR, 'corrupt.mp4'), corruptMp4())
   console.log(`  ${'corrupt.mp4'.padEnd(20)} 24 bytes (ftyp only)`)
