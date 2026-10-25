@@ -19,6 +19,7 @@
  */
 
 import type { MediaKind } from './fsBridge'
+import { workEnded, workQueued, workStarted } from './mediaWork'
 
 const MAX_EDGE = 320
 const JPEG_QUALITY = 0.72
@@ -156,6 +157,7 @@ export function requestThumbnail(
     return held.promise
   }
 
+  workQueued('thumbnail', filePath)
   if (active < CONCURRENCY) return begin(filePath, kind, url)
 
   let settle!: (value: string | null) => void
@@ -185,6 +187,7 @@ export function abandonThumbnail(filePath: string): void {
   held.wanted -= 1
   if (held.wanted > 0) return
   waiting.delete(filePath)
+  workEnded('thumbnail', filePath, 'dropped', 'nothing was asking for it any more')
   held.settle(null)
 }
 
@@ -195,14 +198,17 @@ export function thumbnailsWaiting(): number {
 
 function begin(filePath: string, kind: MediaKind, url: string): Promise<string | null> {
   active += 1
+  workStarted('thumbnail', filePath)
   const job = (async () => {
     try {
       const thumbnail = kind === 'video' ? await videoThumbnail(url) : await imageThumbnail(url)
       cache.set(filePath, thumbnail)
+      workEnded('thumbnail', filePath, 'done')
       return thumbnail
     } catch (err) {
       console.warn(`[flux] no thumbnail for ${filePath}`, err)
       cache.set(filePath, null)
+      workEnded('thumbnail', filePath, 'failed', String((err as Error)?.message ?? err))
       return null
     } finally {
       active -= 1

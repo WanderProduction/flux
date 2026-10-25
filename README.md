@@ -915,6 +915,44 @@ Drag the ruler, or the playhead itself — it carries a narrow handle down the l
 line is otherwise inert, because it lies over every lane and one that swallowed clicks would make
 the clip underneath it unselectable at exactly the time you are looking at.
 
+#### The ring in the corner, and what is behind it
+
+Three queues make the things a timeline needs but a file does not contain: a waveform, a thumbnail
+and a frame index. Each is sensibly built and sensibly throttled, and all three were invisible. An
+app that is quietly busy is indistinguishable from an app that is slow for no reason — and that is
+the version people report, correctly, because without a way to look the only available conclusion
+is "it lags".
+
+So the top-right corner has a ring that fills as the work finishes, and clicking it opens a panel
+naming every file and which of the three queues it is in, with how long it has been there. The ring
+answers *is it nearly done*; the list answers *what is it actually doing*, which is the question
+underneath "why is it lagging".
+
+`kernel/mediaWork.ts` is a **notice board, not a scheduler**. Nothing in it starts, stops or orders
+any work, so a bug there can make the ring wrong but cannot make the app do less or more. The
+queues keep their own limits, and each reports queued, started and ended.
+
+> **The count is per burst**, where a burst is the work asked for since the last moment nothing was
+> pending. A ring that filled once and then sat at 100% for the rest of the session would be a
+> decoration; dropping a second folder starts it again from the beginning, which is what someone
+> watching it expects.
+
+Two details that are choices rather than accidents:
+
+- **Idle reads as full, not as empty.** An unfilled ring sitting there all session is a warning
+  nobody can clear.
+- **The ring turns while it is busy**, separately from filling. One very long file is a fraction
+  that does not move for twenty seconds, and a still ring reads as a hang where a turning one reads
+  as work.
+
+A failure says why *in its row* — `the file is not a video` — rather than only being a colour. The
+one question a status light must never answer with a colour is "what went wrong".
+
+> **It shows less than you might expect, and that is the lazy drawing working.** Since a block that
+> is off screen asks for nothing, dropping a hundred files no longer prepares a hundred files: it
+> prepares what you are looking at, and fills in as you scroll. The ring reports the work that is
+> genuinely happening rather than a total someone would like to watch count down.
+
 #### Only the blocks near the viewport exist
 
 Dropping a shoot folder puts a hundred clips on the timeline, and with their sound that is well
