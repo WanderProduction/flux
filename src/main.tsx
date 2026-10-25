@@ -12,6 +12,7 @@ import { registerToolCommands } from './kernel/tools'
 import * as assets from './kernel/assets'
 import * as sequence from './kernel/sequence'
 import * as thumbnails from './kernel/thumbnails'
+import * as mediaWork from './kernel/mediaWork'
 import { commands } from './kernel/commands'
 import { panels } from './kernel/panels'
 import * as store from './kernel/store'
@@ -74,6 +75,7 @@ if (import.meta.env.DEV) {
       assets,
       sequence,
       thumbnails,
+      mediaWork,
       commands,
       panels,
       store,

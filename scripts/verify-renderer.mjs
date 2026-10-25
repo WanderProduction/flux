@@ -940,6 +940,95 @@ try {
     )
   })
 
+  /*
+   * The ring is driven from the registry rather than from real decodes here,
+   * and deliberately: what is being checked is that a count becomes a drawn arc
+   * and a list of rows, which a real bulk drop would prove only incidentally and
+   * much more slowly. That the queues report at all is checked where they are.
+   */
+  await check('the ring fills as work finishes, and the peek names what is in flight', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { mediaWork } = window.__fluxDev;
+       const arc = () => {
+         const fill = document.querySelector('.work-ring-fill');
+         if (!fill) return null;
+         const whole = Number(fill.getAttribute('stroke-dasharray'));
+         const left = Number(fill.getAttribute('stroke-dashoffset'));
+         return Math.round(((whole - left) / whole) * 100);
+       };
+       const settle = () => new Promise(r => setTimeout(r, 120));
+
+       mediaWork.clearMediaWork();
+       await settle();
+       const idle = { arc: arc(), busy: !!document.querySelector('.work-ring-button--busy') };
+
+       // Four jobs across the three queues, so the panel has to name all of them.
+       mediaWork.workQueued('waveform', 'C:/take/one.mov');
+       mediaWork.workQueued('thumbnail', 'C:/take/two.mov');
+       mediaWork.workQueued('index', 'C:/take/three.mov');
+       mediaWork.workQueued('waveform', 'C:/take/four.mov');
+       mediaWork.workStarted('waveform', 'C:/take/one.mov');
+       await settle();
+       const started = {
+         arc: arc(),
+         busy: !!document.querySelector('.work-ring-button--busy'),
+         count: document.querySelector('.work-ring-count')?.textContent,
+       };
+
+       document.querySelector('.work-ring-button').click();
+       await settle();
+
+       mediaWork.workEnded('waveform', 'C:/take/one.mov', 'done');
+       mediaWork.workEnded('thumbnail', 'C:/take/two.mov', 'failed', 'the file is not a video');
+       await settle();
+
+       const rows = [...document.querySelectorAll('.work-row')].map(el => ({
+         name: el.querySelector('.work-row-name')?.textContent,
+         kind: el.querySelector('.work-row-kind')?.textContent,
+         state: el.querySelector('.work-row-state')?.textContent,
+       }));
+
+       const half = arc();
+
+       mediaWork.workEnded('index', 'C:/take/three.mov', 'done');
+       mediaWork.workEnded('waveform', 'C:/take/four.mov', 'dropped');
+       await settle();
+       const whenDone = { arc: arc(), busy: !!document.querySelector('.work-ring-button--busy') };
+
+       document.querySelector('.work-peek-close').click();
+       await settle();
+       const closed = !document.querySelector('.work-peek');
+
+       mediaWork.clearMediaWork();
+       return { idle, started, rows, half, whenDone, closed };`,
+    )
+
+    // Idle reads as finished rather than as empty: an unfilled ring sitting
+    // there all session would be a warning nobody can clear.
+    assert.equal(state.idle.arc, 100, 'an idle ring should be full')
+    assert.equal(state.idle.busy, false)
+
+    assert.equal(state.started.arc, 0, 'nothing finished yet, so no arc')
+    assert.equal(state.started.busy, true, 'four jobs in flight and the ring is not lit')
+    assert.equal(state.started.count, '4', `the badge read "${state.started.count}"`)
+
+    assert.equal(state.half, 50, 'two of four finished should be half an arc')
+
+    const named = state.rows.map((row) => `${row.name} ${row.kind}`)
+    assert.ok(named.includes('one.mov waveform'), `rows: ${named.join(', ')}`)
+    assert.ok(named.includes('two.mov thumbnail'), `rows: ${named.join(', ')}`)
+    assert.ok(named.includes('three.mov frame index'), `rows: ${named.join(', ')}`)
+
+    // A failure says why, in the row, rather than only being a colour.
+    const failed = state.rows.find((row) => row.name === 'two.mov')
+    assert.equal(failed?.state, 'the file is not a video')
+
+    assert.equal(state.whenDone.arc, 100)
+    assert.equal(state.whenDone.busy, false, 'the ring stayed lit with nothing left to do')
+    assert.equal(state.closed, true, 'the peek did not close')
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     // "no thumbnail for …" is an expected console.warn for the deliberately
     // corrupt fixture and arrives as a warning, not an error, so it is absent

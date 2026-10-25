@@ -13,6 +13,7 @@ import { getRenderSettings } from './kernel/renderSettings'
 import { add as addToQueue } from './kernel/renderQueue'
 import { CommandPalette } from './shell/CommandPalette'
 import { UpdateBadge } from './shell/UpdateBadge'
+import { MediaWorkRing } from './shell/MediaWorkRing'
 import { ImportChoiceHost } from './shell/ImportChoiceHost'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
 import {
@@ -373,6 +374,12 @@ function Workspace({ project }: { project: Project }) {
         <button className="palette-hint" onClick={() => setPaletteOpen(true)}>
           Run a command <kbd>Ctrl K</kbd>
         </button>
+
+        {/* Last in the bar, so it sits in the corner. What it reports belongs
+            to the whole app rather than to any panel — the queues it watches
+            go on running with every panel closed — which is why it lives here
+            and not in the Timeline. */}
+        <MediaWorkRing />
       </header>
 
       <main className="dock-host">

@@ -1,4 +1,5 @@
 import { readPcm } from './audioSource'
+import { workEnded, workQueued, workStarted } from '../mediaWork'
 import { assetUrl } from '../fsBridge'
 import { trackFor, type VideoTrack } from './indexCache'
 import {
@@ -223,6 +224,7 @@ export function peaksFor(path: string): Promise<PeaksResult> {
     return held.promise
   }
 
+  workQueued('waveform', path)
   if (active < CONCURRENCY) return begin(path)
 
   let settle!: (result: PeaksResult) => void
@@ -248,6 +250,7 @@ export function abandonPeaks(path: string): void {
   held.wanted -= 1
   if (held.wanted > 0) return
   waiting.delete(path)
+  workEnded('waveform', path, 'dropped', 'nothing was asking for it any more')
   held.settle({ ok: false, reason: 'no longer needed' })
 }
 
@@ -258,8 +261,13 @@ export function peaksWaiting(): number {
 
 function begin(path: string): Promise<PeaksResult> {
   active += 1
+  workStarted('waveform', path)
   const work = resolve(path)
     .catch((err): PeaksResult => ({ ok: false, reason: String(err?.message ?? err) }))
+    .then((result) => {
+      workEnded('waveform', path, result.ok ? 'done' : 'failed', result.ok ? undefined : result.reason)
+      return result
+    })
     .finally(() => {
       inflight.delete(path)
       active -= 1

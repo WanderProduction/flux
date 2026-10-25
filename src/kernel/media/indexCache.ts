@@ -1,4 +1,5 @@
 import { assetUrl } from '../fsBridge'
+import { workEnded, workQueued, workStarted } from '../mediaWork'
 import { displaySize, readAudioTrack, readVideoTrack } from '../../../shared/mp4.js'
 import { BYTES_PER_SAMPLE, decodeTrack, encodeTrack } from '../../../shared/mp4Index.js'
 
@@ -282,7 +283,20 @@ export function trackFor(path: string, kind: TrackKind = 'video'): Promise<Track
   const existing = inflight.get(key)
   if (existing) return existing
 
-  const work = resolve(path, kind, key).finally(() => inflight.delete(key))
+  /*
+   * Reported as one step rather than two. This queue has no waiting room — a
+   * demux is cheap enough that it runs when it is asked for — so queued and
+   * started are the same instant, and pretending otherwise would put rows in
+   * the panel that are never in the state they claim.
+   */
+  workQueued('index', path)
+  workStarted('index', path)
+  const work = resolve(path, kind, key)
+    .then((result) => {
+      workEnded('index', path, result.ok ? 'done' : 'failed', result.ok ? undefined : result.reason)
+      return result
+    })
+    .finally(() => inflight.delete(key))
   inflight.set(key, work)
   return work
 }
