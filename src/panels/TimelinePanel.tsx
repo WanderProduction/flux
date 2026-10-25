@@ -30,7 +30,7 @@ import {
   seek,
   subscribePlayback,
 } from '../kernel/playback'
-import { audioStateFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
+import { abandonPeaks, audioStateFor, cachedPeaks, peaksFor } from '../kernel/media/peaks'
 import { videoInfoFor } from '../kernel/media/indexCache'
 import { peakRange } from '../../shared/peaks.js'
 import {
@@ -547,6 +547,63 @@ export function TimelinePanel() {
 
   const duration = sequenceDuration()
   const contentWidth = Math.max((duration + 4) * zoom, 600)
+
+  /**
+   * The span of time on screen, in seconds, widened by a screen either side.
+   *
+   * Only blocks inside it are drawn. That is not a drawing optimisation — a
+   * block costs almost nothing to position — it is about what a block *asks
+   * for* when it mounts: its own thumbnail decode, and for sound, its own
+   * waveform build. Dropping a shoot folder put 232 blocks on the timeline and
+   * every one of them queued work for a part of the sequence nobody was
+   * looking at.
+   *
+   * A screen of margin on each side, so scrolling finds blocks already there
+   * rather than drawing them as they arrive, and null until the lane has been
+   * measured — before that, everything is drawn, because an empty timeline is
+   * a worse first impression than a slow one.
+   */
+  const [onScreen, setOnScreen] = useState<{ from: number; to: number } | null>(null)
+  useEffect(() => {
+    const lanes = lanesRef.current
+    if (!lanes) return
+    const read = () => {
+      const width = lanes.clientWidth
+      if (width <= 0) return
+      const from = (lanes.scrollLeft - width) / zoom
+      const to = (lanes.scrollLeft + width * 2) / zoom
+      setOnScreen((held) =>
+        held && Math.abs(held.from - from) < 1e-6 && Math.abs(held.to - to) < 1e-6
+          ? held
+          : { from, to },
+      )
+    }
+    read()
+    lanes.addEventListener('scroll', read, { passive: true })
+    const observer = new ResizeObserver(read)
+    observer.observe(lanes)
+    return () => {
+      lanes.removeEventListener('scroll', read)
+      observer.disconnect()
+    }
+  }, [zoom])
+
+  /**
+   * Whether a clip is worth drawing.
+   *
+   * Anything being dragged or trimmed is drawn wherever it is: the whole point
+   * of a drag is that the block has left where the sequence says it is, and a
+   * block that vanished when it crossed the edge of the viewport would be a
+   * drag that threw the clip away.
+   */
+  const drawn = useCallback(
+    (clip: Clip) => {
+      if (!onScreen) return true
+      if (drag?.ids.includes(clip.id) || trim?.ids.includes(clip.id)) return true
+      return clip.start < onScreen.to && clip.start + clip.duration > onScreen.from
+    },
+    [onScreen, drag, trim],
+  )
   // Recomputed from `sequence` so a mark set anywhere redraws the band here.
   const span = renderRange(sequence)
 
@@ -2423,7 +2480,7 @@ export function TimelinePanel() {
                 onPointerDown={(e) => beginMarquee(e, track)}
               >
                 {sequence.clips
-                  .filter((clip) => clip.trackId === track.id)
+                  .filter((clip) => clip.trackId === track.id && drawn(clip))
                   .map((clip) => {
                     const dragging = drag?.moved === true && drag.ids.includes(clip.id)
                     const copying = dragging && drag?.copying === true
@@ -2785,6 +2842,11 @@ function ClipBlock({
       className={`clip clip--${clip.kind}${state}${selected ? ' clip--selected' : ''}${
         dragging ? ' clip--dragging' : ''
       }${copying ? ' clip--copying' : ''}`}
+      // Named, because blocks are drawn only near the viewport now and a
+      // harness asking "is this clip on screen" cannot answer it from a left
+      // offset alone — two clips an hour apart sit at the same offset once the
+      // lane has scrolled.
+      data-clip-id={clip.id}
       style={{
         left: start * zoom,
         width,
@@ -2878,6 +2940,10 @@ function Waveform({
     })
     return () => {
       live = false
+      // The clip has gone — scrolled out of the drawn window, deleted, or its
+      // audio removed. If the build has not started yet, nothing should start
+      // it on behalf of a block that is no longer there.
+      abandonPeaks(path)
     }
   }, [path])
 

@@ -5790,6 +5790,79 @@ try {
     console.log(`       ${state.video} clips, abutting: ${state.names.slice(0, 3).join(', ')}…`)
   })
 
+  /*
+   * Drawing only what is near the viewport is the one optimisation here that
+   * can lose work silently: a block that is not in the DOM cannot be clicked,
+   * dragged or seen, and nothing else in this suite would notice a window that
+   * was computed a screen too narrow. So this scrolls a long sequence and, at
+   * each stop, asks the kernel which clips cover the visible span and the DOM
+   * whether they are there.
+   */
+  await check('a long timeline draws the clips you scroll to, and not the rest', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, view } = window.__fluxDev;
+       const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+       const probed = await assets.ensureProbed(a.id);
+
+       // Long enough that most of it is off screen at any moment: 120 copies of
+       // a four-second clip is eight minutes of timeline.
+       sequence.setSequence(null);
+       view.recordView({ timeline: { zoom: 60 } });
+       await new Promise(r => setTimeout(r, 300));
+       let cursor = 0;
+       for (let i = 0; i < 120; i++) {
+         sequence.addClip({ assetId: a.id, trackId: 'V1', start: cursor, duration: probed.duration });
+         cursor += probed.duration;
+       }
+       await new Promise(r => setTimeout(r, 700));
+
+       const lanes = document.querySelector('.tl-scroll');
+       const zoom = view.getView().timeline.zoom;
+       const stops = [];
+       for (const frac of [0, 0.5, 0.95]) {
+         lanes.scrollLeft = Math.max(
+           0,
+           Math.min(lanes.scrollWidth - lanes.clientWidth, cursor * frac * zoom),
+         );
+         lanes.dispatchEvent(new Event('scroll'));
+         await new Promise(r => setTimeout(r, 400));
+
+         const from = lanes.scrollLeft / zoom;
+         const to = (lanes.scrollLeft + lanes.clientWidth) / zoom;
+         const want = sequence.getSequence().clips
+           .filter(c => c.start < to && c.start + c.duration > from)
+           .map(c => c.id);
+         const drawn = new Set(
+           [...document.querySelectorAll('.tl-lane .clip')].map(e => e.dataset.clipId),
+         );
+         stops.push({
+           missing: want.filter(id => !drawn.has(id)).length,
+           wanted: want.length,
+           blocks: drawn.size,
+         });
+       }
+       return { clips: sequence.getSequence().clips.length, stops };`,
+    )
+
+    assert.equal(state.clips, 120, 'the sequence was not built')
+    for (const [index, stop] of state.stops.entries()) {
+      assert.ok(stop.wanted > 0, `stop ${index} had no clips on screen to check`)
+      assert.equal(
+        stop.missing,
+        0,
+        `stop ${index}: ${stop.missing} of ${stop.wanted} clips on screen were not drawn`,
+      )
+      assert.ok(
+        stop.blocks < state.clips,
+        `stop ${index} drew all ${stop.blocks} blocks — the window is not bounding anything`,
+      )
+    }
+    console.log(
+      `       ${state.clips} clips, ${state.stops.map(s => `${s.blocks} drawn`).join(' / ')}`,
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
