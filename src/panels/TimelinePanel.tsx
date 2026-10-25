@@ -26,6 +26,7 @@ import {
   shuttle,
   getTime,
   isPlaying,
+  pause,
   seek,
   subscribePlayback,
 } from '../kernel/playback'
@@ -456,6 +457,18 @@ export function TimelinePanel() {
     wasPlaying.current = playing
     if (!stopped || !autoSelect) return
 
+    /*
+     * Not done yet: stopping in a hole does not select the hole.
+     *
+     * It should — "what am I parked on" has an answer where there is no clip,
+     * and it is the thing you would then ripple out. An attempt that called
+     * `gapNear` here and set the gap broke two checks that had nothing to do
+     * with it ("the empty timeline after the last clip is not a gap", and a
+     * pair ripple), which says the gap a pause lands on is not simply the one
+     * the keyboard would pick. Reverted rather than left half-right, because
+     * a selection that is sometimes a gap and sometimes stale is worse than
+     * one that is honestly empty.
+     */
     const { front, ids } = atPlayhead(getTime())
     const chosen = new Set(ids)
     setSelected(chosen)
@@ -1332,6 +1345,16 @@ export function TimelinePanel() {
   const beginScrub = useCallback(
     (event: React.PointerEvent) => {
       event.preventDefault()
+      /*
+       * Taking hold of the playhead stops playback.
+       *
+       * Scrubbing while it runs is a fight: every drag is immediately undone
+       * by the clock, so the picture snaps back the instant the hand lets go
+       * and the frame you were looking for is gone. Every editor stops on
+       * scrub for the same reason. Pressing space again resumes from where
+       * you put it, which is the point of having moved it.
+       */
+      pause()
       seek(snapToFrame(timeAt(event.clientX)))
       const onMove = (move: PointerEvent) => seek(snapToFrame(timeAt(move.clientX)))
       const onUp = () => {
