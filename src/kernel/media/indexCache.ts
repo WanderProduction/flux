@@ -78,7 +78,7 @@ export interface VideoTrack {
   key: Uint8Array
   order: Int32Array
   /**
-   * Degrees clockwise the picture must be turned to be upright.
+   * Degrees counter-clockwise the picture must be turned to be upright.
    *
    * `width` and `height` above stay coded, so a vertically shot clip is
    * 1920x1080 with a rotation of 90. See displaySize() in shared/mp4.js.
@@ -230,7 +230,7 @@ export interface VideoInfo {
   /** Frames per second, from the sample table rather than a container field. */
   frameRate: number
   duration: number
-  /** Degrees clockwise the picture carries. 0 unless the file is turned. */
+  /** Degrees counter-clockwise the picture carries. 0 unless the file is turned. */
   rotation: number
 }
 

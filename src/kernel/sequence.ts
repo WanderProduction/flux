@@ -901,20 +901,82 @@ export function addClip({
 /**
  * Drops a file's picture and its sound as one linked pair.
  *
- * The audio goes on the first audio track that can take it at the same moment,
- * so a linked pair starts life in sync. If none can, a new audio track is made
- * for it — which is what every NLE does, and the only answer that keeps the
- * pair together. Sliding the sound along to the next free gap would put it out
- * of sync with its own picture, and dropping it would lose it silently.
+ * The other half goes on the first track of its kind that can take it at the
+ * same moment, so a linked pair starts life in sync. If none can, a new track
+ * is made for it — which is what every NLE does, and the only answer that keeps
+ * the pair together. Sliding one half along to the next free gap would put it
+ * out of sync with its own other half, and dropping it would lose it silently.
  *
- * `start` is honoured for the video; the audio follows it. Placing them
- * independently would let the two halves of one take land at different moments,
- * which is not a pair, it is a sync error waiting to be noticed.
+ * `trackId` may name a track of **either** kind, and whichever it names is the
+ * half that honours `start`; the other follows it. Placing them independently
+ * would let the two halves of one take land at different moments, which is not
+ * a pair, it is a sync error waiting to be noticed.
+ *
+ * Taking an audio track here is what makes a file dropped on A1 arrive whole.
+ * It used to land as its sound alone — defensible, and what the audio-only
+ * drag in Premiere does, but not what dragging a *file* onto the timeline
+ * means. The picture was silently discarded, and the sound that remained was
+ * linked to nothing, so it also had to be paired up by hand afterwards.
  */
+/**
+ * The lowest video track that is free across `start`, or a new one.
+ *
+ * Searched from the bottom because tracks are stored in the order they stack —
+ * `[V2, V1, A1, A2]` — so a plain `find` returns the *top* video track, and a
+ * picture dropped alongside its sound would climb to V2 while the same file
+ * dropped on a video track went to V1. Audio needs no equivalent: A1 is
+ * already the first audio track in that order.
+ */
+function lowestFreeVideoTrack(start: number, duration: number): Track {
+  const video = sequence.tracks.filter((track) => track.kind === 'video')
+  for (let i = video.length - 1; i >= 0; i--) {
+    if (findFreeStart(video[i].id, start, duration) === start) return video[i]
+  }
+  return addTrack('video')
+}
+
 export function addLinkedClips(
   { assetId, trackId, start, duration }: NewClip,
   withAudio: boolean,
 ): { video: Clip | null; audio: Clip | null } {
+  const target = sequence.tracks.find((track) => track.id === trackId)
+
+  if (target?.kind === 'audio') {
+    // Dropped on the sound. The sound is what lands where it was put.
+    if (!withAudio) {
+      // A silent file has nothing for this track, so its picture goes to the
+      // first video track that will have it rather than nowhere at all.
+      const home = lowestFreeVideoTrack(start, duration)
+      return { video: addClip({ assetId, trackId: home.id, start, duration }), audio: null }
+    }
+
+    const pairId = nextId('l')
+    const audio = addClip({ assetId, trackId, start, duration, linkId: pairId })
+    if (!audio) return { video: null, audio: null }
+
+    const home = lowestFreeVideoTrack(audio.start, duration)
+
+    const picture = addClip({
+      assetId,
+      trackId: home.id,
+      start: audio.start,
+      duration,
+      linkId: pairId,
+    })
+    if (!picture) {
+      // Same reasoning as below: a clip pointing at a partner that was never
+      // made is worse than an unlinked one.
+      sequence = {
+        ...sequence,
+        clips: sequence.clips.map((clip) =>
+          clip.id === audio.id ? { ...clip, linkId: undefined } : clip,
+        ),
+      }
+      emit()
+    }
+    return { video: picture, audio }
+  }
+
   const linkId = withAudio ? nextId('l') : undefined
   const video = addClip({ assetId, trackId, start, duration, linkId })
   if (!video || !withAudio) return { video, audio: null }

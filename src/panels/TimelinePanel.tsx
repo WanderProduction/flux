@@ -1124,13 +1124,20 @@ export function TimelinePanel() {
         }
 
         /*
-         * Dropped on an audio track, a file arrives as its sound alone — which
-         * is what an audio track is for, and what Premiere does. A file with no
-         * sound is refused rather than laid down as a silent block: an audio
-         * clip that can never make a noise is not a thing the timeline should
-         * be able to contain.
+         * A sound file dropped on an audio track is its sound, and nothing
+         * else — there is no picture to have an opinion about. One with no
+         * sound at all is refused rather than laid down as a silent block: an
+         * audio clip that can never make a noise is not a thing the timeline
+         * should be able to contain.
+         *
+         * A *video* file is not handled here. Dropping one on A1 used to give
+         * its sound alone and throw the picture away, which is a strange thing
+         * for dragging a video file onto a timeline to mean — and the sound
+         * left behind was linked to nothing, so the pair had to be rebuilt by
+         * hand. It now falls through and lands whole, with the sound on the
+         * track it was aimed at; see addLinkedClips.
          */
-        if (track.kind === 'audio') {
+        if (track.kind === 'audio' && asset.kind !== 'video') {
           if (!hasAudio) {
             notices.push(`${silence}, so there is nothing to put on an audio track`)
             continue

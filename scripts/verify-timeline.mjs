@@ -1255,7 +1255,13 @@ try {
     cdp,
     `const assets = window.__fluxDev.assets;
      if (!assets.getAssets().some(a => a.name === 'voice_over.mp4')) {
-       assets.importAssets([{ path: ${dir} + '\\voice_over.mp4', kind: 'video' }]);
+       // Four backslashes, not two. This is inside a template literal, so two
+       // reach the page as one, and \\v in a JS string is a vertical tab — the
+       // path became "flux-media-test\\x0Boice_over.mp4", an asset for a file
+       // that does not exist. It then failed the name guard above, so every
+       // run imported another one, and the junk showed up two suites later as
+       // verify:app finding assets in a project it expected to be empty.
+       assets.importAssets([{ path: ${dir} + '\\\\voice_over.mp4', kind: 'video' }]);
      }
      await Promise.all(assets.getAssets().map(a => assets.ensureProbed(a.id)));
      await new Promise(r => setTimeout(r, 300));
@@ -1383,8 +1389,23 @@ try {
        // Lane 2 is A1: this both imports the fixture and fills A1 from zero.
        await window.__drag('voice_over.mp4', 2, 0, 60);
        await new Promise(r => setTimeout(r, 300));
-       const laid = sequence.getSequence().clips[0];
-       sequence.addClip({ assetId: laid.assetId, trackId: 'A2', start: 0, duration: laid.duration });
+       /*
+        * The drag above is now only a way to *import* the fixture: a video
+        * file dropped on an audio track arrives whole, picture and all — see
+        * addLinkedClips. Deleting the picture is no way to undo that, because
+        * removeClips expands through links and would take the sound with it,
+        * which is what "deleting the picture deletes the sound" checks.
+        *
+        * So the sequence is emptied and both audio tracks are filled by hand.
+        * This check is about where the sound goes when none of them is free,
+        * and that setup is clearer stated than arrived at.
+        */
+       const seeded = sequence.getSequence().clips.find(c => c.trackId === 'A1');
+       const assetId = seeded.assetId;
+       const duration = seeded.duration;
+       sequence.setSequence(null);
+       sequence.addClip({ assetId, trackId: 'A1', start: 0, duration });
+       sequence.addClip({ assetId, trackId: 'A2', start: 0, duration });
 
        // Lane 0 is V2, which is empty, so the picture lands at zero and the
        // sound has to be at zero with it.
@@ -1614,20 +1635,34 @@ try {
     assert.equal(state.left, 0)
   })
 
-  await check('dropped on an audio track, a file arrives as its sound alone', async () => {
+  await check('dropped on an audio track, a video file still arrives whole', async () => {
+    /*
+     * It used to arrive as its sound alone, with the picture discarded.
+     *
+     * Defensible — it is what Premiere's audio-only drag does — but it is not
+     * what dragging a *file* onto a timeline means, and the sound left behind
+     * was linked to nothing, so the pair had to be rebuilt by hand before it
+     * could be trimmed. The sound still lands on the track it was aimed at;
+     * the picture goes to the lowest video track that will take it.
+     */
     const state = await evaluate(
       cdp,
       // Lane 2 is A1: the lanes are drawn in track order, V2 V1 A1 A2.
       dropOne('voice_over.mp4', 2) +
-        `return window.__fluxDev.sequence.getSequence().clips
-           .map(c => c.kind + ':' + c.trackId);`,
+        `const clips = window.__fluxDev.sequence.getSequence().clips;
+         return { where: clips.map(c => c.kind + ':' + c.trackId).sort(),
+                  linked: clips.length === 2 && !!clips[0].linkId
+                          && clips[0].linkId === clips[1].linkId };`,
     )
-    assert.deepEqual(state, ['audio:A1'])
+    assert.deepEqual(state.where, ['audio:A1', 'video:V1'])
+    assert.equal(state.linked, true, 'the two halves must arrive linked')
   })
 
-  await check('a file with no sound is refused by an audio track', async () => {
-    // Not laid down as a silent block: an audio clip that can never make a
-    // noise is not something the timeline should be able to contain.
+  await check('a silent file dropped on an audio track lands as picture alone', async () => {
+    // Still never a silent audio block — an audio clip that can never make a
+    // noise is not something the timeline should contain. But the picture is
+    // real and has somewhere to go, so refusing the whole drop threw away the
+    // only half there was.
     const state = await evaluate(
       cdp,
       `const { sequence, view } = window.__fluxDev;
@@ -1643,9 +1678,14 @@ try {
        lane.dispatchEvent(new DragEvent('drop',
          { dataTransfer: dt, bubbles: true, clientX: rect.left + 10 }));
        await new Promise(r => setTimeout(r, 1200));
-       return sequence.getSequence().clips.length;`,
+       return sequence.getSequence().clips
+         .map(c => c.kind + ':' + c.trackId + (c.linkId ? ':linked' : ''));`,
     )
-    assert.equal(state, 0, 'a silent file has nothing to put on an audio track')
+    assert.deepEqual(
+      state,
+      ['video:V1'],
+      'a silent file should land as its picture, on a video track, linked to nothing',
+    )
   })
 
   await check('a sequence saved before audio tracks existed opens with them', async () => {

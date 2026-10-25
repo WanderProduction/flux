@@ -190,7 +190,28 @@ function drawUpright(
 
   context.save()
   context.translate(box.x + box.w / 2, box.y + box.h / 2)
-  context.rotate((rotation * Math.PI) / 180)
+  /*
+   * Negative, because the two conventions here point opposite ways.
+   *
+   * `rotation` is what `av_display_rotation_get` returns, which is the angle
+   * the display matrix rotates the frame by **counter-clockwise**. Canvas
+   * `rotate()` takes a clockwise angle, since its y-axis points down. Passing
+   * one straight into the other turns every quarter-turn clip the wrong way —
+   * and a wrong quarter turn in a frame box sized for the *right* one does not
+   * look sideways, it looks **upside down**, which reads as a camera problem
+   * rather than a FLUX one.
+   *
+   * Measured rather than reasoned about: ffmpeg's own correct output for
+   * DSCF1908.MOV (matrix rotation 90) is pixel-identical to the coded frame
+   * put through `transpose=2` — counter-clockwise — at PSNR inf, where
+   * clockwise scores 15dB.
+   *
+   * This went unseen because nothing checked orientation. The fixtures are
+   * colour bars, where upside down is invisible, and verify:footage asserted
+   * the coded size, the rotation value and that the canvas was not black —
+   * none of which a 180-degree error changes.
+   */
+  context.rotate((-rotation * Math.PI) / 180)
   const w = quarter ? box.h : box.w
   const h = quarter ? box.w : box.h
   context.drawImage(frame, -w / 2, -h / 2, w, h)
