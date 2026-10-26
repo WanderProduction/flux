@@ -227,6 +227,22 @@ export function refusedReason(path: string, kind: TrackKind = 'video'): string |
  * difference between work that has been banked and work that is about to be
  * done again.
  */
+/**
+ * Resolves once any store in flight for this path has settled.
+ *
+ * `trackFor` deliberately does not wait for the write — the index is already in
+ * hand and someone is waiting to see a frame. That leaves a window in which the
+ * index exists in memory and not yet on disk, and anything asking "is this
+ * banked?" during it gets a truthful no that is about to stop being true.
+ *
+ * The readiness strip asked exactly there, and cached the answer: a clip that
+ * had just been indexed showed as ready-but-not-saved for the rest of the
+ * session, when it had in fact been saved a few milliseconds later.
+ */
+export async function indexSettled(path: string, kind: TrackKind = 'video'): Promise<void> {
+  await writing.get(`${kind}:${path}`)?.catch(() => {})
+}
+
 export async function indexOnDisk(path: string, kind: TrackKind = 'video'): Promise<boolean> {
   const bridge = mediaBridge()
   if (!bridge?.has) return false

@@ -3135,24 +3135,47 @@ try {
        await new Promise(r => setTimeout(r, 1200));
 
        const seen = [];
+       let hidden = 0;
+       let fellBack = 0;
        playback.play();
        const began = performance.now();
        while (performance.now() - began < 2200) {
          await new Promise(r => setTimeout(r, 3));
          seen.push(canvas.dataset.layers);
+         /*
+          * Whether the canvas is on *screen*, which is the thing that was
+          * actually wrong and which counting draws cannot see. A cut put the
+          * next clip in the stack a moment before its decoder existed, the
+          * viewer read that as the pipeline being unavailable, and for one
+          * render it hid the canvas — holding a perfectly good frame — and
+          * mounted the fallback element with nothing in it. The canvas was
+          * never painted black; it was taken away.
+          */
+         if (getComputedStyle(canvas).display === 'none') hidden += 1;
+         if (document.querySelector('video.viewer-media')) fellBack += 1;
        }
        playback.pause();
 
        const painted = seen.filter(v => v !== undefined).length;
        const black = seen.filter(v => v === '0').length;
        const crossed = playback.getTime() > 3;
-       return { painted, black, crossed, at: playback.getTime() };`,
+       return { painted, black, hidden, fellBack, crossed, at: playback.getTime() };`,
     )
 
     assert.ok(!state.error, state.error)
     assert.ok(state.crossed, `setup: the playhead stopped at ${state.at} without reaching the cut`)
     assert.ok(state.painted > 0, 'setup: nothing was drawn at all')
     assert.equal(state.black, 0, `${state.black} draws painted nothing while crossing the cut`)
+    assert.equal(
+      state.hidden,
+      0,
+      `the canvas was taken off screen ${state.hidden} times while crossing the cut`,
+    )
+    assert.equal(
+      state.fellBack,
+      0,
+      `the viewer fell back to the element ${state.fellBack} times on a file it can decode`,
+    )
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {

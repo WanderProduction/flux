@@ -943,10 +943,13 @@ kbd {
 .tl-ready-broken {
   background: var(--flux-danger, #d05f5f);
 }
-/* Nothing has looked at it yet. Barely there on purpose: not a
-   problem, and a fifth bright colour would make the strip noise. */
+/* Nothing has looked at it yet. The quietest of the five, but it has
+   to read as a *state*: at 45% of a faint grey on a dark panel this
+   was invisible, so a timeline that had only been played in places
+   looked like a bar with holes punched in it. Not a problem, still —
+   just not done. */
 .tl-ready-unknown {
-  background: color-mix(in srgb, var(--flux-text-faint) 45%, transparent);
+  background: color-mix(in srgb, var(--flux-text-faint) 90%, transparent);
 }
 
 /* Sticky so the ruler survives scrolling down through tracks — a timeline you

@@ -13,6 +13,7 @@ import * as assets from './kernel/assets'
 import * as sequence from './kernel/sequence'
 import * as thumbnails from './kernel/thumbnails'
 import * as mediaWork from './kernel/mediaWork'
+import * as indexAhead from './kernel/indexAhead'
 import * as readiness from './kernel/readiness'
 import * as layouts from './kernel/layouts'
 import { commands } from './kernel/commands'
@@ -78,6 +79,7 @@ if (import.meta.env.DEV) {
       sequence,
       thumbnails,
       mediaWork,
+      indexAhead,
       readiness,
       layouts,
       commands,
@@ -118,3 +120,16 @@ if (import.meta.env.DEV) {
 // No StrictMode: dockview owns imperative DOM and a double-invoked effect
 // rebuilds the layout twice on boot, which shows up as panels flickering.
 createRoot(container).render(<App />)
+
+/*
+ * Started here rather than left to the module's own wiring.
+ *
+ * `indexAhead` subscribes at import, so importing it would be enough — except
+ * that the only other mention of it is inside the DEV block above, and a
+ * bundler is entitled to decide a namespace import nothing references in a
+ * production build can go. That would leave the indexing working perfectly in
+ * development and absent from the app people actually run, which is the worst
+ * shape a bug can have. Calling it is also the honest way to say when it
+ * begins.
+ */
+indexAhead.indexAhead()

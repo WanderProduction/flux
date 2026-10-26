@@ -87,6 +87,15 @@ const stats = {
    */
   fetchWorstMs: 0,
   slowFetches: 0,
+  /**
+   * Decoder teardowns, which are the most expensive thing this class does.
+   *
+   * A restart throws away the decoder and begins again at the keyframe before
+   * the wanted frame, so every frame between the two is decoded and discarded.
+   * One per seek is the cost of seeking. One per *frame* is a different thing
+   * entirely, and the only way to tell them apart is to count them.
+   */
+  restarts: 0,
 }
 export type SourceStats = typeof stats
 
@@ -450,6 +459,7 @@ export class VideoSource {
 
   /** Throws away decoder state and points it at the keyframe before `time`. */
   private restartAt(time: number) {
+    stats.restarts += 1
     this.generation += 1
     this.discardBuffer()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()

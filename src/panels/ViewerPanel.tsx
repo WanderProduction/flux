@@ -514,8 +514,33 @@ export function ViewerPanel() {
   const [ready, setReady] = useState(0)
   const [why, setWhy] = useState<string | null>(null)
 
-  /** True when every layer can be drawn by the pipeline. */
-  const decoding = layers.length > 0 && layers.every((layer) => sourcesRef.current.has(layer.id))
+  /**
+   * True while the pipeline is the thing on screen.
+   *
+   * Emphatically *not* "every layer has a decoder open". A cut puts the next
+   * clip into the stack a moment before its decoder exists — the sources are
+   * reconciled in their own effect, which cannot finish inside the render that
+   * sees the new stack — so asking that question answers "no" for exactly one
+   * render. During it the canvas is hidden and the fallback element is mounted
+   * with nothing decoded in it yet, and *that* is the frame of black on every
+   * cut, including a razor through a single clip where the same file is on both
+   * sides and there is visibly nothing to go black for.
+   *
+   * The guard further down stops the canvas being painted black. It could not
+   * help here, because the canvas is not painted black — it is taken off the
+   * screen with a perfectly good frame still in it.
+   *
+   * So the question is whether the pipeline has *failed*, which is reported,
+   * rather than whether it has finished, which is merely pending. A stack the
+   * pipeline was never going to serve — a still, a file that is not there —
+   * stays on the element path exactly as before, because those are known from
+   * the asset without opening anything.
+   */
+  const servable = layers.filter((layer) => {
+    const file = assetById.get(layer.assetId)
+    return !!file && !file.missing && !file.unreadable && file.kind === 'video'
+  })
+  const decoding = layers.length > 0 && servable.length === layers.length && why === null
 
   /*
    * What sound this clip's file has, if any.
@@ -572,7 +597,15 @@ export function ViewerPanel() {
         held.set(layer.id, result.source)
       }),
     ).then(() => {
-      if (live) setReady((n) => n + 1)
+      if (!live) return
+      /*
+       * Everything this stack needed is open, so any reason left over from a
+       * stack that could not be served is stale. Without this the viewer would
+       * fall back on the first file that failed and never come back, because
+       * nothing else ever clears it.
+       */
+      if (layers.every((layer) => held.has(layer.id))) setWhy(null)
+      setReady((n) => n + 1)
     })
 
     return () => {
