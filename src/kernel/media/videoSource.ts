@@ -1131,6 +1131,28 @@ export class VideoSource {
     const from = keyframeAt(this.track, this.track.pts[at])
     let to = from
     while (to + 1 < this.track.count && !this.track.key[to + 1]) to += 1
+    /*
+     * Nothing past the frame asked for.
+     *
+     * A build decodes forwards from a keyframe because that is the direction a
+     * decoder is good at, and then the whole stretch is read backwards. But a
+     * pass that *begins* part way into a GOP — pressing reverse anywhere that
+     * is not a keyframe, which is to say almost anywhere — only ever reads
+     * from the frame asked for back to the keyframe. Everything after it was
+     * decoded for nobody, and it was decoded *first*, before the picture the
+     * viewer was waiting on could be handed over.
+     *
+     * Measured: every drawn frame logged against how long since play was
+     * pressed put the big gap before the *first* frame, four times out of
+     * four, at 1100ms, 1735ms, 1733ms and 2607ms. A GOP here is thirty frames
+     * of 4K, about a second of decoding, and starting at 14.35s meant eleven
+     * frames were wanted and thirty were decoded.
+     *
+     * The prefetch is unaffected: it asks for `held.from - 1`, the last frame
+     * of the GOP before, so its stretch is the whole of that GOP and this
+     * takes nothing off it.
+     */
+    if (at < to) to = at
 
     if (this.buildingRun) {
       const span = this.buildingSpan

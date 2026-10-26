@@ -3262,6 +3262,66 @@ try {
     )
   })
 
+  /*
+   * The companion to the check above, for the *cost* of the first run rather
+   * than whether runs happen at all.
+   *
+   * A run is decoded forwards from a keyframe and then read backwards, so a
+   * pass beginning part way into a GOP only ever reads from the frame asked
+   * for back to the keyframe — and the frames after it were being decoded
+   * first, before the picture the viewer was waiting on could be handed over.
+   * On this footage that is thirty frames of 4K where eleven were wanted, and
+   * it was the whole of the gap at the start of a reverse pass.
+   *
+   * Asserting that by rate would need a threshold, and rates on 4K move around
+   * too much for one to mean anything. So the extent of the run is observed
+   * instead: ask for a frame part way into a GOP, then ask for a *later* frame
+   * in the same GOP. A build that had run to the end of the GOP would already
+   * hold the second frame and build nothing; one that stopped where it was
+   * asked has to build again. So the second ask building is the property.
+   */
+  await check('a run built for one frame does not decode past it', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const opened = await videoSource.VideoSource.open(${LONG});
+       if (!opened.ok) return { error: 'could not open the fixture: ' + opened.reason };
+       const source = opened.source;
+       try {
+         const info = source.info;
+         /* A GOP boundary with room after it, found from the index rather than
+            assumed: the fixture's own keyframe spacing is what matters. */
+         const fps = info.frames / info.duration;
+         const early = 8 / fps;   /* a few frames in */
+         const later = 20 / fps;  /* further into the same stretch */
+         if (!(info.duration > later + 1)) return { error: 'fixture too short' };
+
+         const width = Math.max(16, Math.round(info.width / 4));
+         const before = { ...videoSource.sourceStats() };
+         await source.shownFor(early, { backwards: true, width });
+         const mid = { ...videoSource.sourceStats() };
+         await source.shownFor(later, { backwards: true, width });
+         const after = { ...videoSource.sourceStats() };
+         return {
+           firstBuilt: (mid.runsBuilt ?? 0) - (before.runsBuilt ?? 0),
+           secondBuilt: (after.runsBuilt ?? 0) - (mid.runsBuilt ?? 0),
+         };
+       } finally {
+         source.close();
+       }`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(
+      state.firstBuilt > 0,
+      'setup: the first ask built no run at all, so there is nothing to measure the extent of',
+    )
+    assert.ok(
+      state.secondBuilt > 0,
+      'a later frame in the same stretch came out of the first run, so that run decoded past the frame it was asked for',
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
