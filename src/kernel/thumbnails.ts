@@ -19,7 +19,76 @@
  */
 
 import type { MediaKind } from './fsBridge'
+
+interface MediaBridge {
+  sourceToken: (path: string) => Promise<string | null>
+  read: (path: string, name: string, token: string) => Promise<Uint8Array | null>
+  write: (
+    path: string,
+    name: string,
+    token: string,
+    bytes: Uint8Array,
+  ) => Promise<{ ok: boolean; reason?: string }>
+  forget: (path: string, name: string) => Promise<boolean>
+}
+
+function mediaBridge(): MediaBridge | null {
+  return (globalThis as { flux?: { media?: MediaBridge } }).flux?.media ?? null
+}
+
+/**
+ * The thumbnail this file had last time, if the file has not changed since.
+ *
+ * The token is a stat rather than a hash, so a file edited in place is not
+ * served its old picture — the same rule the other two caches use, and the
+ * reason they can be trusted across sessions at all.
+ */
+async function fromDisk(filePath: string): Promise<string | undefined> {
+  const bridge = mediaBridge()
+  if (!bridge) return undefined
+  try {
+    const token = await bridge.sourceToken(filePath)
+    if (!token) return undefined
+    const bytes = await bridge.read(filePath, ENTRY_NAME, token)
+    if (!bytes || bytes.length === 0) return undefined
+    return new TextDecoder().decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Writes one down. Failures are deliberately **not** written.
+ *
+ * A file that could not be decoded this time may be a file on a drive that was
+ * not mounted, and remembering "no thumbnail" for it on disk would make a
+ * temporary condition permanent. In memory it is a useful guard against
+ * retrying all session; on disk it would be a lie that outlives the reason.
+ */
+async function toDisk(filePath: string, thumbnail: string): Promise<void> {
+  const bridge = mediaBridge()
+  if (!bridge) return
+  try {
+    const token = await bridge.sourceToken(filePath)
+    if (!token) return
+    await bridge.write(filePath, ENTRY_NAME, token, new TextEncoder().encode(thumbnail))
+  } catch {
+    // A cache that cannot be written is a slower app, not a broken one.
+  }
+}
 import { workEnded, workQueued, workStarted } from './mediaWork'
+
+/**
+ * Filed under this in the media cache, beside the waveforms and the frame
+ * indexes. See electron/mediaCache.js.
+ *
+ * Thumbnails used to be the one derived thing FLUX forgot on every launch: a
+ * Map and nothing else. Reopening a project re-decoded a frame of every file
+ * it showed, which is the most visible work the app does and the least
+ * necessary — the answer had been computed, it had simply never been written
+ * down.
+ */
+const ENTRY_NAME = 'thumb'
 
 const MAX_EDGE = 320
 const JPEG_QUALITY = 0.72
@@ -201,8 +270,15 @@ function begin(filePath: string, kind: MediaKind, url: string): Promise<string |
   workStarted('thumbnail', filePath)
   const job = (async () => {
     try {
+      const kept = await fromDisk(filePath)
+      if (kept !== undefined) {
+        cache.set(filePath, kept)
+        workEnded('thumbnail', filePath, 'done')
+        return kept
+      }
       const thumbnail = kind === 'video' ? await videoThumbnail(url) : await imageThumbnail(url)
       cache.set(filePath, thumbnail)
+      void toDisk(filePath, thumbnail)
       workEnded('thumbnail', filePath, 'done')
       return thumbnail
     } catch (err) {
@@ -230,7 +306,14 @@ function pump(): void {
   }
 }
 
-/** Forget a path's cached result so the next request decodes it again. */
+/**
+ * Forget a path's cached result so the next request decodes it again.
+ *
+ * Both layers, because a disk entry the memory no longer knows about would
+ * come straight back on the next request and the invalidation would read as
+ * having silently failed.
+ */
 export function invalidateThumbnail(filePath: string) {
   cache.delete(filePath)
+  void mediaBridge()?.forget(filePath, ENTRY_NAME)
 }

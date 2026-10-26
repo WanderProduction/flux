@@ -1029,6 +1029,76 @@ try {
     assert.equal(state.closed, true, 'the peek did not close')
   })
 
+  /*
+   * The one derived thing FLUX used to forget on every launch. Waveforms and
+   * frame indexes have always been written down; thumbnails lived in a Map and
+   * nothing else, so reopening a project re-decoded a frame of every file it
+   * showed — the most visible work the app does and the least necessary.
+   *
+   * Checked through a reload rather than by clearing the Map, because the Map
+   * going away is the whole of what a relaunch does to this, and a check that
+   * reached in to empty it would be checking something else.
+   */
+  await check('a thumbnail is written down and survives a reload', async () => {
+    const written = await evaluate(
+      cdp,
+      `const { thumbnails } = window.__fluxDev;
+       const path = ${dir} + '/clipA.mp4';
+       thumbnails.invalidateThumbnail(path);
+       const made = await thumbnails.requestThumbnail(path, 'video', window.flux.fs.assetUrl(path));
+       /*
+        * Straight from the cache the app writes to, not from the module's Map
+        * — and polled, because the write is deliberately not awaited. A
+        * thumbnail appears on screen the moment it is decoded; making the card
+        * wait for a disk write would be paying for the cache twice.
+        */
+       const token = await window.flux.media.sourceToken(path);
+       let bytes = null;
+       for (let i = 0; i < 20 && !bytes; i++) {
+         bytes = await window.flux.media.read(path, 'thumb', token);
+         if (!bytes) await new Promise(r => setTimeout(r, 100));
+       }
+       return {
+         made: typeof made === 'string' && made.startsWith('data:image/'),
+         stored: bytes ? bytes.length : 0,
+         same: bytes ? new TextDecoder().decode(bytes) === made : false,
+       };`,
+    )
+    assert.ok(written.made, 'no thumbnail was decoded to begin with')
+    assert.ok(written.stored > 0, 'the thumbnail was decoded but never written to the media cache')
+    assert.ok(written.same, 'what was written is not what was decoded')
+
+    // From inside the page, like the other reload checks here: a CDP reload
+    // swaps the execution context underneath every later evaluate.
+    await evaluate(cdp, `location.reload(); return true;`)
+    await new Promise((resolve) => setTimeout(resolve, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const live = await evaluate(
+      cdp,
+      `for (let i = 0; i < 60 && !window.__fluxDev; i++) await new Promise(r => setTimeout(r, 250));
+       return Boolean(window.__fluxDev);`,
+    )
+    assert.ok(live, 'the app did not come back after the reload')
+
+    const after = await evaluate(
+      cdp,
+      `const { thumbnails } = window.__fluxDev;
+       const path = ${dir} + '/clipA.mp4';
+       // Nothing in memory: this is a fresh page.
+       const cold = thumbnails.cachedThumbnail(path);
+       const at = performance.now();
+       const back = await thumbnails.requestThumbnail(path, 'video', window.flux.fs.assetUrl(path));
+       return {
+         cold: cold === undefined,
+         back: typeof back === 'string' && back.startsWith('data:image/'),
+         ms: performance.now() - at,
+       };`,
+    )
+    assert.ok(after.cold, 'setup: the page was not actually fresh')
+    assert.ok(after.back, 'the thumbnail did not come back after a reload')
+    console.log(`       read back in ${Math.round(after.ms)}ms`)
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     // "no thumbnail for …" is an expected console.warn for the deliberately
     // corrupt fixture and arrives as a warning, not an error, so it is absent
