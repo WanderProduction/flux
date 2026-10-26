@@ -34,6 +34,7 @@ import { BYTES_PER_SAMPLE, decodeTrack, encodeTrack } from '../shared/mp4Index.j
 import {
   entryPath,
   pruneCache,
+  hasDerived,
   readDerived,
   sourceToken,
   writeDerived,
@@ -678,6 +679,56 @@ try {
     assert.equal(written.ok, false)
     assert.equal(written.reason, 'stale')
     assert.equal(await readDerived(cacheDir, file, INDEX, await sourceToken(file)), null)
+  })
+
+  await check('asking whether an index is there agrees with reading it', async () => {
+    /*
+     * `hasDerived` is a second implementation of the same validation — it
+     * checks the magic, the format, the token, the path and the name, and it
+     * does so without reading the payload. Two implementations of one rule is
+     * how a cache starts lying: the readiness strip believes `hasDerived`, and
+     * a disagreement would colour a clip as banked when the next open rebuilds
+     * it from scratch. So the two are asked the same questions here.
+     */
+    const file = await subject('agreeing.mp4')
+    const token = await sourceToken(file)
+
+    // Nothing stored yet.
+    assert.equal(await hasDerived(cacheDir, file, INDEX, token), false)
+    assert.equal(await readDerived(cacheDir, file, INDEX, token), null)
+
+    // Stored, and under the right identity.
+    assert.equal((await writeDerived(cacheDir, file, INDEX, token, encoded)).ok, true)
+    assert.equal(await hasDerived(cacheDir, file, INDEX, token), true)
+    assert.ok(await readDerived(cacheDir, file, INDEX, token))
+
+    // The wrong token, the wrong name: both must be refused by both.
+    assert.equal(await hasDerived(cacheDir, file, INDEX, token + 'x'), false)
+    assert.equal(await readDerived(cacheDir, file, INDEX, token + 'x'), null)
+    assert.equal(await hasDerived(cacheDir, file, 'not-the-index', token), false)
+    assert.equal(await readDerived(cacheDir, file, 'not-the-index', token), null)
+
+    // And once the file underneath has changed.
+    await fs.appendFile(file, Buffer.alloc(16))
+    const after = await sourceToken(file)
+    assert.equal(await hasDerived(cacheDir, file, INDEX, after), false)
+    assert.equal(await readDerived(cacheDir, file, INDEX, after), null)
+  })
+
+  await check('a half-written entry is not reported as being there', async () => {
+    // A crash mid-write leaves a file whose declared payload is longer than
+    // what is on disk. `readDerived` rejects it on the length check; so must
+    // the cheap question, which never reads the payload at all.
+    const file = await subject('truncated.mp4')
+    const token = await sourceToken(file)
+    assert.equal((await writeDerived(cacheDir, file, INDEX, token, encoded)).ok, true)
+
+    const at = entryPath(cacheDir, file, INDEX)
+    const whole = await fs.readFile(at)
+    await fs.writeFile(at, whole.subarray(0, whole.length - 8))
+
+    assert.equal(await hasDerived(cacheDir, file, INDEX, token), false)
+    assert.equal(await readDerived(cacheDir, file, INDEX, token), null)
   })
 
   await check('a file that is gone has no identity and stores nothing', async () => {

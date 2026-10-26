@@ -161,6 +161,7 @@ export function clearIndexMemory(): void {
 interface MediaBridge {
   sourceToken: (path: string) => Promise<string | null>
   read: (path: string, name: string, token: string) => Promise<Uint8Array | null>
+  has: (path: string, name: string, token: string) => Promise<boolean>
   write: (
     path: string,
     name: string,
@@ -187,6 +188,51 @@ function remember(key: string, token: string, track: VideoTrack) {
     memory.delete(oldest)
     held -= entry.bytes
   }
+}
+
+/**
+ * What is remembered about this path right now, without building anything.
+ *
+ * `trackFor` is the only other way to ask, and it is not a question — it is an
+ * instruction, because a miss demuxes the file. The readiness strip has to be
+ * able to report on a clip without causing the work it is reporting on, or
+ * drawing the strip would turn every timeline into a hundred demuxes.
+ *
+ * Deliberately does not check the source token: that is a stat per clip per
+ * paint. An index for a file that has since changed reads as ready here and is
+ * rebuilt on the next open, which is a strip briefly optimistic rather than a
+ * strip that costs a hundred stats to draw.
+ */
+export function cachedTrack(path: string, kind: TrackKind = 'video'): VideoTrack | null {
+  return memory.get(`${kind}:${path}`)?.track ?? null
+}
+
+/**
+ * Why this path was refused, if it was.
+ *
+ * A file FLUX cannot read is the one readiness state that is not about waiting:
+ * no amount of work will make it playable, and a strip that showed it as merely
+ * unfinished would be telling the editor to be patient about something broken.
+ */
+export function refusedReason(path: string, kind: TrackKind = 'video'): string | null {
+  return refused.get(`${kind}:${path}`)?.reason ?? null
+}
+
+/**
+ * Is this path's index on disk, so it will still be ready after a restart?
+ *
+ * Separate from `cachedTrack` because the two answer different questions. In
+ * memory means "this plays now"; on disk means "this plays now *and* after the
+ * project is reopened", which is the state worth showing the editor — it is the
+ * difference between work that has been banked and work that is about to be
+ * done again.
+ */
+export async function indexOnDisk(path: string, kind: TrackKind = 'video'): Promise<boolean> {
+  const bridge = mediaBridge()
+  if (!bridge?.has) return false
+  const token = await bridge.sourceToken(path).catch(() => null)
+  if (token === null) return false
+  return bridge.has(path, ENTRY_NAME[kind], token).catch(() => false)
 }
 
 /**

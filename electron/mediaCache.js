@@ -213,6 +213,78 @@ function parseEntry(raw, filePath, name, token) {
 }
 
 /**
+ * Is something cached under `name` for this file at this version of it?
+ *
+ * The same question `readDerived` answers, without the payload. The readiness
+ * bar asks it once per clip on a timeline, and a timeline is a hundred clips:
+ * reading every index off disk to colour a strip would make the strip the most
+ * expensive thing on screen, and it only needs to know whether the bytes are
+ * there.
+ *
+ * Cheap because the layout puts the token, path and name in a preamble ahead of
+ * the payload, so a short read settles it. The payload is checked by length
+ * against the file size rather than read — an entry whose declared length does
+ * not match what is on disk is a half-written file from a crash, which is
+ * exactly what `readDerived` would reject too.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function hasDerived(dir, filePath, name, token) {
+  if (!token || !name) return false
+
+  const at = entryPath(dir, filePath, name)
+  let handle
+  try {
+    handle = await fs.open(at, 'r')
+  } catch {
+    return false
+  }
+  try {
+    const { size } = await handle.stat()
+    if (size < HEADER_BYTES) return false
+
+    // Enough for the header and a preamble holding a token, a path and a name.
+    // A path longer than this is possible and would be read as absent, which
+    // costs a rebuild rather than a wrong answer.
+    const want = Math.min(size, HEADER_BYTES + 4096)
+    const buffer = Buffer.allocUnsafe(want)
+    const { bytesRead } = await handle.read(buffer, 0, want, 0)
+    if (bytesRead < HEADER_BYTES) return false
+
+    const head = new DataView(buffer.buffer, buffer.byteOffset, bytesRead)
+    if (head.getUint32(0, true) !== MAGIC) return false
+    if (head.getUint16(4, true) !== ENTRY_FORMAT) return false
+
+    const tokenLength = head.getUint16(6, true)
+    const payloadLength = head.getUint32(8, true)
+    const pathLength = head.getUint16(12, true)
+    const nameLength = head.getUint16(14, true)
+    const preamble = HEADER_BYTES + tokenLength + pathLength + nameLength
+    // The payload is never read; its size is what says the entry is whole.
+    if (size !== preamble + payloadLength) return false
+    if (bytesRead < preamble) return false
+
+    const text = new TextDecoder()
+    const from = buffer.byteOffset + HEADER_BYTES
+    if (text.decode(new Uint8Array(buffer.buffer, from, tokenLength)) !== token) return false
+    if (
+      text.decode(new Uint8Array(buffer.buffer, from + tokenLength, pathLength)) !==
+      comparablePath(filePath)
+    ) {
+      return false
+    }
+    return (
+      text.decode(new Uint8Array(buffer.buffer, from + tokenLength + pathLength, nameLength)) ===
+      name
+    )
+  } catch {
+    return false
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/**
  * Stores something under `name` against the file it was worked out from.
  *
  * Refused — quietly, and reported as `stale` — when the file no longer matches

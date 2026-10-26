@@ -904,11 +904,56 @@ kbd {
   min-height: 100%;
 }
 
+/* ── the readiness strip ──────────────────────────────────────────
+   A line over the ticks saying how ready each stretch is to play.
+   See panels/ReadinessStrip and kernel/readiness.
+
+   Sticky above the ruler, which is why the ruler's own `top` is no
+   longer zero: both stay pinned while the tracks scroll under them,
+   and a strip that slid away from the ticks it describes would be
+   worse than no strip. Four pixels and no pointer events — it is a
+   status line, and anything taller or clickable reads as a track. */
+.tl-ready {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 4px;
+  background: var(--flux-bg);
+  /* The gaps between clips show through as background, which is the
+     honest answer for a moment with no footage in it. */
+  overflow: hidden;
+}
+.tl-ready-span {
+  position: absolute;
+  top: 0;
+  height: 4px;
+  pointer-events: none;
+}
+/* Saved to disk — ready now and still ready after a reopen. */
+.tl-ready-baked {
+  background: var(--flux-accent);
+}
+/* Ready in memory, not yet banked; this work happens again next session. */
+.tl-ready-ready {
+  background: var(--flux-audio);
+}
+.tl-ready-working {
+  background: var(--flux-warn);
+}
+.tl-ready-broken {
+  background: var(--flux-danger, #d05f5f);
+}
+/* Nothing has looked at it yet. Barely there on purpose: not a
+   problem, and a fifth bright colour would make the strip noise. */
+.tl-ready-unknown {
+  background: color-mix(in srgb, var(--flux-text-faint) 45%, transparent);
+}
+
 /* Sticky so the ruler survives scrolling down through tracks — a timeline you
    cannot read the time off is not a timeline. */
 .tl-ruler {
   position: sticky;
-  top: 0;
+  top: 4px;
   z-index: 2;
   height: 22px;
   border-bottom: 1px solid var(--flux-border);
