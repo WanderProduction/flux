@@ -101,6 +101,7 @@ import { getView, recordView, subscribeView } from '../kernel/view'
 import { activeTool, subscribeTool, type ToolId } from '../kernel/tools'
 import { getAssets as allAssets } from '../kernel/assets'
 import { PanelFrame } from './PanelFrame'
+import { ReadinessStrip, READINESS_HEIGHT } from './ReadinessStrip'
 import { SequenceSettingsDialog } from './SequenceSettingsDialog'
 import { useThumbnail } from './useThumbnail'
 
@@ -222,6 +223,14 @@ function sameSet(a: ReadonlySet<string>, b: string[]): boolean {
  * under it, which is a pixel the lanes start after.
  */
 const RULER_HEIGHT = 23
+
+/*
+ * Note that the ruler is no longer the first thing in the content: the
+ * readiness strip sits above it, and anything measuring down from the top of
+ * the content has to add READINESS_HEIGHT as well. Only the marquee does —
+ * which row the pointer is over is measured off the lanes themselves, for the
+ * reason given in beginMarquee, and is unaffected by anything above them.
+ */
 
 /** What the panel needs to *draw* a drag in progress. The rest lives in the
     handler's own closure — see beginClipDrag. */
@@ -2394,6 +2403,7 @@ export function TimelinePanel() {
 
         <div className="tl-scroll" ref={lanesRef}>
           <div className="tl-content" style={{ width: contentWidth }}>
+            <ReadinessStrip zoom={zoom} onScreen={onScreen} />
             <div className="tl-ruler" onPointerDown={beginScrub}>
               {Array.from({ length: tickCount }, (_, i) => {
                 const seconds = i * step
@@ -2456,7 +2466,10 @@ export function TimelinePanel() {
                 style={{
                   left: Math.min(marquee.fromTime, marquee.toTime) * zoom,
                   width: Math.abs(marquee.toTime - marquee.fromTime) * zoom,
-                  top: RULER_HEIGHT + Math.min(marquee.fromRow, marquee.toRow) * TRACK_HEIGHT,
+                  top:
+                    READINESS_HEIGHT +
+                    RULER_HEIGHT +
+                    Math.min(marquee.fromRow, marquee.toRow) * TRACK_HEIGHT,
                   height:
                     (Math.abs(marquee.toRow - marquee.fromRow) + 1) * TRACK_HEIGHT,
                 }}

@@ -55,6 +55,11 @@ contextBridge.exposeInMainWorld('flux', {
      * comes next. One envelope and one staleness rule for all of it.
      */
     read: (filePath, name, token) => ipcRenderer.invoke('media:read', filePath, name, token),
+    /**
+     * Is it cached, without paying to find out what it is? The readiness strip
+     * asks this per clip, and a timeline is a hundred clips.
+     */
+    has: (filePath, name, token) => ipcRenderer.invoke('media:has', filePath, name, token),
     write: (filePath, name, token, bytes) =>
       ipcRenderer.invoke('media:write', filePath, name, token, bytes),
     /** Throws one cached thing away, so it is worked out again next time. */

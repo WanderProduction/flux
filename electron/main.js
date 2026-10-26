@@ -21,6 +21,7 @@ import {
   forgetDerived,
   pruneCache,
   readDerived,
+  hasDerived,
   sourceToken,
   writeDerived,
 } from './mediaCache.js'
@@ -559,6 +560,12 @@ ipcMain.handle('media:sourceToken', (_e, filePath) => sourceToken(filePath))
  */
 ipcMain.handle('media:read', (_e, filePath, name, token) =>
   readDerived(mediaCachePath(), filePath, name, token),
+)
+/**
+ * Whether an entry is there, without reading it. See mediaCache.hasDerived.
+ */
+ipcMain.handle('media:has', (_e, filePath, name, token) =>
+  hasDerived(mediaCachePath(), filePath, name, token),
 )
 ipcMain.handle('media:write', (_e, filePath, name, token, payload) =>
   writeDerived(mediaCachePath(), filePath, name, token, payload),

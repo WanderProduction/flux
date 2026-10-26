@@ -779,18 +779,33 @@ try {
     )
   })
 
-  await check('the ruler stays put while the tracks scroll under it', async () => {
+  await check('the ruler and the strip stay put while the tracks scroll under it', async () => {
+    // The ruler no longer sits at the very top: the readiness strip is pinned
+    // above it, and both have to stay pinned. A timeline you cannot read the
+    // time off is not a timeline, and a readiness strip that slides away from
+    // the ticks it describes is worse than no strip at all.
     const state = await evaluate(
       cdp,
       `const l = window.__lanes();
        l.scrollTop = 160;
        await new Promise(r => setTimeout(r, 250));
        const ruler = document.querySelector('.tl-ruler').getBoundingClientRect();
+       const strip = document.querySelector('.tl-ready').getBoundingClientRect();
        const box = l.getBoundingClientRect();
-       return { offset: Math.round(ruler.top - box.top), top: l.scrollTop };`,
+       return {
+         rulerOffset: Math.round(ruler.top - box.top),
+         stripOffset: Math.round(strip.top - box.top),
+         stripHeight: Math.round(strip.height),
+         top: l.scrollTop,
+       };`,
     )
     assert.ok(state.top > 0, 'the timeline should be scrolled down for this to mean anything')
-    assert.equal(state.offset, 0, 'a timeline you cannot read the time off is not a timeline')
+    assert.equal(state.stripOffset, 0, 'the readiness strip scrolled away with the tracks')
+    assert.equal(
+      state.rulerOffset,
+      state.stripHeight,
+      'the ruler is not sitting directly under the strip',
+    )
   })
 
   await check('the tracks added for scrolling are taken away again', async () => {
@@ -5861,6 +5876,79 @@ try {
     console.log(
       `       ${state.clips} clips, ${state.stops.map(s => `${s.blocks} drawn`).join(' / ')}`,
     )
+  })
+
+  await check('the readiness strip reports one span per video clip, above the ruler', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { readiness, sequence } = window.__fluxDev;
+       await readiness.sweepReadiness();
+       await new Promise(r => setTimeout(r, 400));
+       const strip = document.querySelector('.tl-ready');
+       const ruler = document.querySelector('.tl-ruler');
+       const video = sequence.getSequence().clips.filter(c => c.kind === 'video').length;
+       return {
+         video,
+         spans: readiness.readySpans().length,
+         drawn: strip ? strip.querySelectorAll('.tl-ready-span').length : -1,
+         present: !!strip,
+         aboveRuler:
+           !!(strip && ruler) &&
+           (strip.compareDocumentPosition(ruler) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+       };`,
+    )
+    assert.ok(state.present, 'no readiness strip in the timeline')
+    assert.ok(state.aboveRuler, 'the strip is not above the ruler')
+    assert.equal(state.spans, state.video, 'the strip does not cover every video clip')
+    // Drawn is the windowed subset, exactly as the blocks below it are.
+    assert.ok(state.drawn > 0, 'the strip drew nothing')
+    assert.ok(
+      state.drawn < state.spans,
+      `the strip drew all ${state.drawn} spans — it is not virtualised with the clips`,
+    )
+    console.log(`       ${state.spans} spans, ${state.drawn} drawn`)
+  })
+
+  await check('reading the strip does not cause the work it reports on', async () => {
+    // The failure this guards against is invisible from the outside: a strip
+    // that demuxed every clip to colour itself in would look exactly like a
+    // strip that was simply right, while making a bulk drop far worse.
+    const cost = await evaluate(
+      cdp,
+      `const { readiness, indexCache } = window.__fluxDev;
+       const before = indexCache.indexCacheStats();
+       for (let i = 0; i < 5; i++) { readiness.readySpans(); readiness.readinessSummary(); }
+       const after = indexCache.indexCacheStats();
+       return { demux: after.demux - before.demux, disk: after.disk - before.disk };`,
+    )
+    assert.equal(cost.demux, 0, `reading the strip demuxed ${cost.demux} files`)
+    assert.equal(cost.disk, 0, `reading the strip read ${cost.disk} indexes off disk`)
+  })
+
+  await check('a file that is not where it was reads as broken, not unfinished', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, readiness } = window.__fluxDev;
+       const all = assets.getAssets();
+       const victim = all.find(a => a.kind === 'video');
+       if (!victim) return { error: 'no video asset' };
+       // Put it back afterwards: every later check shares this project.
+       assets.setAssets(all.map(a => (a.id === victim.id ? { ...a, missing: true } : a)));
+       await new Promise(r => setTimeout(r, 250));
+       const broken = readiness.readySpans().filter(s => s.state === 'broken');
+       const note = broken[0]?.note ?? '';
+       assets.setAssets(all);
+       await new Promise(r => setTimeout(r, 250));
+       const after = readiness.readinessSummary().broken;
+       return { brokenWhileMissing: broken.length, note, brokenAfter: after };`,
+    )
+    assert.ok(!state.error, state.error)
+    assert.ok(
+      state.brokenWhileMissing > 0,
+      'a missing file did not show as broken on the strip',
+    )
+    assert.match(state.note, /not where it was/, 'the strip does not say why it is broken')
+    assert.equal(state.brokenAfter, 0, 'the strip stayed broken after the file came back')
   })
 
   await check('the page logged no console errors or uncaught exceptions', () => {
