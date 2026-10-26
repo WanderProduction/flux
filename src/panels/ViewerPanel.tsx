@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { commands } from '../kernel/commands'
 import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
-import { VideoSource, type Shown } from '../kernel/media/videoSource'
+import { VideoSource, showKeyframesOnly, type Shown } from '../kernel/media/videoSource'
 import { audioInfoFor, type AudioInfo } from '../kernel/media/peaks'
 import {
   formatTimecode,
@@ -743,6 +743,13 @@ export function ViewerPanel() {
                  * from a run it decoded forwards and shrunk; see shownFor.
                  */
                 backwards: getRate() < 0,
+                /*
+                 * Shuttling fast enough that decoding every frame has run
+                 * out of headroom, in which case the source serves keyframes
+                 * only. Which rates those are is measured, and they are not
+                 * symmetric; see `showKeyframesOnly`.
+                 */
+                coarse: showKeyframesOnly(getRate()),
                 // The size it will actually be drawn at, so the copies kept
                 // for playing backwards are neither soft nor wasteful.
                 width: pixels.width,

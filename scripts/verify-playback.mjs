@@ -3322,6 +3322,83 @@ try {
     )
   })
 
+  /*
+   * Shuttling fast is served keyframes only, and the rates that counts for are
+   * the ones that were measured rather than the ones that sound right.
+   *
+   * Both halves are worth pinning. The snapping is the behaviour; the rates
+   * are a *conclusion*, swept three seconds at a time against the unchanged
+   * code, and the sweep said something counterintuitive — that it only pays at
+   * the top of the ladder, and a rung lower going backwards than forwards. At
+   * 2x and 4x the decoder keeps up and serving keyframes throws away a hundred
+   * good frames. Someone tidying this to a single symmetric `Math.abs(rate) >
+   * 1` would be making it worse while making it neater, so the numbers are in
+   * `showKeyframesOnly` and the shape of them is here.
+   */
+  await check('shuttling fast is served keyframes, and only above the measured rates', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const lines = videoSource.keyframeLines();
+       const says = {
+         at1: videoSource.showKeyframesOnly(1),
+         at2: videoSource.showKeyframesOnly(2),
+         at4: videoSource.showKeyframesOnly(4),
+         at16: videoSource.showKeyframesOnly(16),
+         back2: videoSource.showKeyframesOnly(-2),
+         back4: videoSource.showKeyframesOnly(-4),
+         back8: videoSource.showKeyframesOnly(-8),
+       };
+
+       const opened = await videoSource.VideoSource.open(${LONG});
+       if (!opened.ok) return { error: 'could not open the fixture: ' + opened.reason };
+       const source = opened.source;
+       try {
+         const info = source.info;
+         const fps = info.frames / info.duration;
+         /* A moment deliberately not on a keyframe: far enough in that there
+            is a keyframe behind it to snap back to. */
+         const asked = 55 / fps;
+         const coarse = await source.shownFor(asked, { coarse: true });
+         const exact = await source.shownFor(asked, { width: Math.round(info.width / 4) });
+         return {
+           lines,
+           says,
+           askedMs: Math.round(asked * 1000),
+           coarseMs: coarse ? Math.round(coarse.timestamp / 1000) : null,
+           exactMs: exact ? Math.round(exact.timestamp / 1000) : null,
+         };
+       } finally {
+         source.close();
+       }`,
+    )
+
+    assert.ok(!state.error, state.error)
+
+    /* The lines, as measured. */
+    assert.equal(state.lines.forward, 16, 'the forward line moved from the rate that was measured')
+    assert.equal(state.lines.backward, 8, 'the backward line moved from the rate that was measured')
+    assert.equal(state.says.at1, false, '1x must show every frame')
+    assert.equal(state.says.at2, false, '2x keeps up and must show every frame')
+    assert.equal(state.says.at4, false, '4x keeps up and must show every frame')
+    assert.equal(state.says.at16, true, '16x cannot keep up and must show keyframes')
+    assert.equal(state.says.back2, false, '-2x keeps up and must show every frame')
+    assert.equal(state.says.back4, false, '-4x must show every frame')
+    assert.equal(state.says.back8, true, '-8x cannot keep up and must show keyframes')
+
+    /* The snapping. */
+    assert.ok(state.coarseMs !== null, 'shuttling fast returned no picture at all')
+    assert.ok(state.exactMs !== null, 'setup: the ordinary path returned no picture')
+    assert.ok(
+      state.coarseMs < state.askedMs,
+      `shuttling fast returned the frame at ${state.coarseMs}ms for a moment ${state.askedMs}ms in, so it did not snap back to a keyframe`,
+    )
+    assert.ok(
+      Math.abs(state.exactMs - state.askedMs) < Math.abs(state.coarseMs - state.askedMs),
+      'the ordinary path should land nearer the moment asked for than the keyframe one does',
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
