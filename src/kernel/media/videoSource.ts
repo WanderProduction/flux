@@ -370,6 +370,17 @@ export class VideoSource {
    */
   static live = new Set<VideoSource>()
 
+  /**
+   * The file this is decoding.
+   *
+   * So a caller can tell whether a source it already has is for the file it
+   * now wants. The viewer uses it to hand a decoder from a clip that is
+   * leaving to one arriving on the same file — a razor cut is the same
+   * decoder at the same place, and tearing it down to build an identical one
+   * was the freeze at every cut.
+   */
+  path = ''
+
   static async open(
     path: string,
   ): Promise<{ ok: true; source: VideoSource } | { ok: false; reason: OpenFailure }> {
@@ -400,6 +411,7 @@ export class VideoSource {
     if (!support?.supported) return { ok: false, reason: 'unsupported-config' }
 
     const source = new VideoSource(url, track)
+    source.path = path
     VideoSource.live.add(source)
     return { ok: true, source }
   }
