@@ -1060,7 +1060,25 @@ export class VideoSource {
   private async buildRun(at: number, width: number): Promise<void> {
     if (at < 0 || at >= this.track.count) return
     if (this.runFor(at, width)) return
-    if (this.buildingRun) return this.buildingRun
+    /*
+     * A build is already running, for some other stretch. Say so and return,
+     * rather than handing this caller that build's promise to wait on.
+     *
+     * Waiting on it was a deadlock. The draw awaits `shownFor`, `shownFor`
+     * awaited this, and this handed back a promise belonging to a build that
+     * had been started for a different moment — one that could outlive the
+     * reason it existed, or never settle at all once its source had moved on.
+     * The draw then never finished, `drawingRef` stayed true, and every later
+     * notification returned early without drawing. Measured: one draw begun
+     * and none finished, for three seconds, while the playhead ran the whole
+     * way and the canvas kept the last picture it had. Which is exactly what a
+     * freeze looks like from the outside — the playhead moving and the frame
+     * standing still.
+     *
+     * The caller falls back to decoding the one frame it needs, which is
+     * slower than a run and always ends.
+     */
+    if (this.buildingRun) return
 
     const run = (async () => {
       const from = keyframeAt(this.track, this.track.pts[at])
