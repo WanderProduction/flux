@@ -57,6 +57,16 @@ const LOOKAHEAD_FRAMES = 8
 const MAX_FEED_AHEAD = LOOKAHEAD_FRAMES * 4
 
 /**
+ * How many runs of already-shrunk frames to keep for playing backwards.
+ *
+ * Two: the one being played through and the one before it, so crossing a
+ * boundary backwards does not immediately throw away what is being left. A
+ * third buys nothing — nothing ever asks for it — and these are the only thing
+ * here that costs real memory.
+ */
+const KEPT_RUNS = 2
+
+/**
  * Where the time goes, for the harness that asks.
  *
  * Counters rather than logging: the question "why is playback at a third of
@@ -96,7 +106,28 @@ const stats = {
    * entirely, and the only way to tell them apart is to count them.
    */
   restarts: 0,
+  /** Runs of frames shrunk and kept so they can be played backwards. */
+  runsBuilt: 0,
+  /** Pictures handed back from one of those runs rather than decoded. */
+  fromRun: 0,
 }
+/**
+ * What the viewer puts on screen.
+ *
+ * Either a decoded frame or a small copy of one, because playing backwards
+ * cannot use decoded frames and playing forwards should not pay for copies.
+ * The viewer does not care which it has — both draw — so the difference is
+ * stated once, here, rather than everywhere a picture is handled.
+ */
+export interface Shown {
+  readonly picture: VideoFrame | ImageBitmap
+  /** Coded size, before the file's own rotation is honoured. */
+  readonly width: number
+  readonly height: number
+  /** Microseconds, as VideoFrame.timestamp is. */
+  readonly timestamp: number
+}
+
 export type SourceStats = typeof stats
 
 export function sourceStats(): SourceStats {
@@ -226,6 +257,22 @@ export class VideoSource {
   private waiters: Array<() => void> = []
   /** The moment the caller last asked for, so arriving frames know what is stale. */
   private wantTime = 0
+  /**
+   * Runs of shrunk frames, for playing backwards. See shownFor.
+   *
+   * Keyed by the run's first and last sample, and by the width they were made
+   * at — a change of preview resolution makes every one of them the wrong
+   * size, and handing back a picture built for a different canvas is a
+   * silently soft image rather than an error.
+   */
+  private runs: {
+    from: number
+    to: number
+    width: number
+    pictures: Map<number, ImageBitmap>
+  }[] = []
+  /** The run being built, so two requests never build the same one twice. */
+  private buildingRun: Promise<void> | null = null
   /**
    * Incremented whenever the decoder is torn down and restarted.
    *
@@ -390,6 +437,7 @@ export class VideoSource {
     this.reads.abort()
     this.wake()
     this.discardBuffer()
+    this.discardRuns()
     this.decoder?.close()
     this.decoder = null
     VideoSource.live.delete(this)
@@ -904,6 +952,152 @@ export class VideoSource {
    * with a buffer sitting at 0.16s returns the frame from 0.16s and reports
    * success. Which looks exactly like a seek that did not work.
    */
+  /**
+   * The picture for a moment, whichever way the playhead is travelling.
+   *
+   * Forwards this is `frameFor` and nothing more: decoded frames are what the
+   * decoder is for, and copying them would be pure cost.
+   *
+   * Backwards it is a different problem wearing the same clothes. A frame can
+   * only be had by decoding from the keyframe before it, so asking for frames
+   * in descending order asks the decoder to do its worst case every single
+   * time — measured at 15 decoder restarts in five seconds, 24.7 frames
+   * decoded for each one shown, and three times the bytes of forward playback
+   * to show a fourteenth of the frames.
+   *
+   * So the run is decoded *forwards*, once, and each frame is shrunk to the
+   * size the viewer actually draws and kept. Then playing backwards is reading
+   * an array in reverse. The shrinking is what makes this affordable: holding
+   * thirty decoded 4K frames exhausts the decoder's own pool, while thirty
+   * copies at preview size are about fifteen megabytes and cost a tenth of a
+   * millisecond each to make.
+   */
+  async shownFor(
+    time: number,
+    options: { backwards?: boolean; width?: number } = {},
+  ): Promise<Shown | null> {
+    if (!options.backwards) {
+      const frame = await this.frameFor(time)
+      if (!frame) return null
+      return {
+        picture: frame,
+        width: frame.displayWidth,
+        height: frame.displayHeight,
+        timestamp: frame.timestamp ?? 0,
+      }
+    }
+
+    const width = Math.max(16, Math.round(options.width ?? this.track.width / 4))
+    const at = sampleAt(this.track, time)
+
+    const held = this.runFor(at, width)
+    if (held) {
+      const picture = held.pictures.get(at)
+      if (picture) {
+        stats.fromRun += 1
+        /*
+         * Build the run *before* this one while there is still some of this
+         * one left to play. Not awaited: the point is that it happens while
+         * frames are being handed back from memory, so reaching the boundary
+         * costs nothing. Half way is early enough at any sane rate and late
+         * enough not to build runs that are never reached.
+         */
+        if (at <= held.from + (held.to - held.from) / 2) {
+          void this.buildRun(held.from - 1, width)
+        }
+        return { picture, width: picture.width, height: picture.height, timestamp: Math.round(this.track.pts[at] * 1e6) }
+      }
+    }
+
+    await this.buildRun(at, width)
+    const built = this.runFor(at, width)
+    const picture = built?.pictures.get(at)
+    if (!picture) {
+      // Nothing to hand back from a run, so fall back to decoding the one
+      // frame. Slow, and right: a picture late beats a picture missing.
+      const frame = await this.frameFor(time)
+      if (!frame) return null
+      return {
+        picture: frame,
+        width: frame.displayWidth,
+        height: frame.displayHeight,
+        timestamp: frame.timestamp ?? 0,
+      }
+    }
+    stats.fromRun += 1
+    return {
+      picture,
+      width: picture.width,
+      height: picture.height,
+      timestamp: Math.round(this.track.pts[at] * 1e6),
+    }
+  }
+
+  /** The kept run covering this sample at this width, if there is one. */
+  private runFor(at: number, width: number) {
+    return this.runs.find((run) => run.width === width && at >= run.from && at <= run.to)
+  }
+
+  /**
+   * Decodes the run of frames containing `at` forwards, shrinking each.
+   *
+   * One at a time across the whole source: two of these at once would have two
+   * walks competing for one decoder, which is the behaviour this exists to
+   * stop rather than reproduce.
+   */
+  private async buildRun(at: number, width: number): Promise<void> {
+    if (at < 0 || at >= this.track.count) return
+    if (this.runFor(at, width)) return
+    if (this.buildingRun) return this.buildingRun
+
+    const run = (async () => {
+      const from = keyframeAt(this.track, this.track.pts[at])
+      let to = from
+      while (to + 1 < this.track.count && !this.track.key[to + 1]) to += 1
+
+      const pictures = new Map<number, ImageBitmap>()
+      const height = Math.max(
+        16,
+        Math.round((width * this.track.height) / Math.max(1, this.track.width)),
+      )
+      for (let i = from; i <= to; i++) {
+        if (this.closed) break
+        // Walking forwards, which is the direction the decoder is good at.
+        const frame = await this.frameFor(this.track.pts[i])
+        if (!frame) continue
+        /*
+         * Awaited before the next frame is asked for, because asking trims the
+         * buffer and the frame this is copying lives in it.
+         */
+        const picture = await createImageBitmap(frame, {
+          resizeWidth: width,
+          resizeHeight: height,
+          resizeQuality: 'low',
+        }).catch(() => null)
+        if (picture) pictures.set(i, picture)
+      }
+      if (pictures.size === 0) return
+
+      stats.runsBuilt += 1
+      this.runs.push({ from, to, width, pictures })
+      while (this.runs.length > KEPT_RUNS) {
+        const dropped = this.runs.shift()
+        if (dropped) for (const one of dropped.pictures.values()) one.close()
+      }
+    })()
+
+    this.buildingRun = run.finally(() => {
+      this.buildingRun = null
+    })
+    return this.buildingRun
+  }
+
+  /** Lets go of every kept run. */
+  private discardRuns() {
+    for (const run of this.runs) for (const one of run.pictures.values()) one.close()
+    this.runs = []
+  }
+
   private pick(time: number): VideoFrame | null {
     const index = sampleAt(this.track, time)
     const want = Math.round(this.track.pts[index] * 1e6)
