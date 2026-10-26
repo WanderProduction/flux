@@ -74,6 +74,7 @@ const stats = {
   submitted: 0,
   decoded: 0,
   waitMs: 0,
+  rescues: 0,
 }
 export type SourceStats = typeof stats
 
@@ -97,8 +98,8 @@ const MAX_FETCH_BYTES = 8 << 20
 const FRAME_TIMEOUT_MS = 5000
 
 /**
- * How long to wait for a frame that was already submitted before giving up on
- * waiting and starting again from a keyframe.
+ * How long the decoder may emit *nothing at all* before the wait gives up on
+ * it and starts again from a keyframe.
  *
  * There is a case — reproducible, not yet explained — where a decoder is fed
  * well past the frame it owes and simply never emits it: the samples before it
@@ -109,8 +110,20 @@ const FRAME_TIMEOUT_MS = 5000
  *
  * A restart from the keyframe before it costs about sixty milliseconds and has
  * always produced the frame. So the wait stops being patient long before the
- * timeout: this is a floor under how bad that case can get, not a licence to
- * restart casually — it fires only after a frame is genuinely overdue.
+ * timeout.
+ *
+ * Measured against *silence*, not against elapsed time, and that distinction
+ * is the whole of it. Judged on elapsed time this fired on frames that were
+ * merely slow — on a real timeline it went off six times in six seconds and
+ * made things worse, turning a 623ms worst case into 1572ms and reading an
+ * extra 35MB to do it:
+ *
+ *   rescue on elapsed time   5368ms waiting, 6 rescues, 98.1MB, 99th 1572ms
+ *   rescue on silence        3042ms waiting, 0 rescues, 63.7MB, 99th  623ms
+ *
+ * A decoder still handing back frames is working, even if the one being waited
+ * for is not among them yet. A decoder that has handed back nothing for this
+ * long has stopped, and that is the case worth tearing down.
  */
 const RESTART_AFTER_MS = 350
 
@@ -680,6 +693,9 @@ export class VideoSource {
     const deadline = began + FRAME_TIMEOUT_MS
     /** One rescue per call: a restart that does not help must not become a loop. */
     let rescued = false
+    /** Frames out of the decoder when the wait began, and when it last moved. */
+    let emitted = this.counts.decoded
+    let movedAt = began
     /*
      * How far past the target this wait is willing to submit.
      *
@@ -712,13 +728,26 @@ export class VideoSource {
       }
       if (performance.now() > deadline) break
 
+      // Anything at all out of the decoder means it is alive and working.
+      if (this.counts.decoded !== emitted) {
+        emitted = this.counts.decoded
+        movedAt = performance.now()
+      }
+
       /*
-       * Overdue. The chunks went in and the frame did not come out, so stop
-       * waiting on a decoder that is not going to answer and start again from
-       * the keyframe before it.
+       * Silent for too long. Not "slow" — silent: the chunks went in and
+       * nothing whatever has come back, so stop waiting on a decoder that has
+       * stopped and start again from the keyframe before.
        */
-      if (!rescued && performance.now() - began > RESTART_AFTER_MS) {
+      /*
+       * ...and nothing being read either. A feed in flight means bytes are on
+       * their way, and a span off a spinning drive can easily outlast this
+       * window — tearing the decoder down then throws away a read that was
+       * about to arrive and starts the same one again.
+       */
+      if (!rescued && !this.feeding && performance.now() - movedAt > RESTART_AFTER_MS) {
         rescued = true
+        stats.rescues += 1
         if (this.feeding) await this.feeding
         this.restartAt(time)
         this.feeding = this.feed(time).finally(() => {

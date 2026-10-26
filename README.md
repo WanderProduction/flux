@@ -2103,6 +2103,30 @@ The crop happens in the picture's **displayed** orientation, so its edges are th
 whatever way the file was coded. Taking a source rectangle instead would need the crop mapped back
 through the file's rotation, and a left crop on a sideways clip would come off the top.
 
+#### The rescue waits for silence, not slowness
+
+A frame that was submitted and never comes out is a real condition — it is what froze the preview
+for five seconds on about one play in three — and the answer is to stop waiting and start again from
+a keyframe, which costs about sixty milliseconds.
+
+Judged on *elapsed time*, that rescue fires on frames that are merely slow, and then it is worse
+than the disease. On a real timeline it went off six times in six seconds, each time throwing away
+a read that was about to land:
+
+| | waiting | rescues | read | worst frame |
+|---|---|---|---|---|
+| rescue on elapsed time | 5368ms | 6 | 98MB | 1572ms |
+| no rescue at all | 3042ms | 0 | 64MB | 623ms |
+| **rescue on silence** | **4149ms** | **1** | **97MB** | **549ms** |
+
+So it watches for *nothing happening* rather than for *taking a while*: no frame out of the decoder
+**and** no read in flight. A decoder still handing back frames is working, even if the one being
+waited for is not among them yet; a span off a spinning drive can easily outlast the window, and
+tearing the decoder down then starts the same read again.
+
+The freeze it exists for stays fixed — twelve plays, worst case 449ms, against 5030ms before any of
+this.
+
 #### A cut does not flash black
 
 The decoders are reconciled in their own effect, which cannot finish inside the one that draws. So
