@@ -5951,6 +5951,72 @@ try {
     assert.equal(state.brokenAfter, 0, 'the strip stayed broken after the file came back')
   })
 
+  await check('the timeline gets indexed without being played, and not while it is', async () => {
+    /*
+     * What the strip's "gaps" were: a clip only ever got an index when
+     * something opened it, so a freshly filled timeline stayed mostly unknown
+     * for ever. This builds them. It must also stand down while the preview is
+     * running — an index reads the file, and that is the load that turned span
+     * reads from 15ms into 700ms and made playback stall.
+     *
+     * The queue is emptied and refilled rather than found: by the time this
+     * runs, indexAhead has already done the timeline, and a check that waits
+     * for work it did not create tests nothing. Playing comes first, while a
+     * full queue is pending, because "nothing was indexed" is only evidence of
+     * standing down if there was something to index.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { readiness, indexAhead, playback } = window.__fluxDev;
+       playback.pause();
+       playback.seek(0);
+       // Forget what has been tried, so there is a full queue to observe.
+       indexAhead.stopIndexingAhead();
+       indexAhead.indexAhead();
+       const began = indexAhead.indexAheadState();
+
+       // Playing, with everything still to do.
+       playback.play();
+       await new Promise(r => setTimeout(r, 2500));
+       const whilePlaying = indexAhead.indexAheadState();
+       playback.pause();
+
+       // Parked: now it may work.
+       indexAhead.indexAhead();
+       for (let i = 0; i < 80 && indexAhead.indexAheadState().waiting > 0; i++) {
+         await new Promise(r => setTimeout(r, 250));
+       }
+       const parked = indexAhead.indexAheadState();
+
+       await readiness.sweepReadiness();
+       return {
+         waitingBefore: began.waiting,
+         builtWhilePlaying: whilePlaying.tried - began.tried,
+         waitingAfter: parked.waiting,
+         builtWhileParked: parked.tried - whilePlaying.tried,
+         summary: readiness.readinessSummary(),
+       };`,
+    )
+
+    assert.ok(state.waitingBefore > 0, 'setup: nothing was queued to be indexed')
+    assert.equal(
+      state.builtWhilePlaying,
+      0,
+      `${state.builtWhilePlaying} indexes were built while the preview was playing`,
+    )
+    assert.ok(state.builtWhileParked > 0, 'nothing was indexed with the playhead parked')
+    assert.equal(state.waitingAfter, 0, `${state.waitingAfter} clips were never indexed`)
+    assert.equal(
+      state.summary.unknown,
+      0,
+      `${state.summary.unknown} clips are still unknown after a full pass`,
+    )
+    console.log(
+      `       ${state.waitingBefore} queued · 0 built playing · ` +
+        `${state.builtWhileParked} built parked · ${state.summary.baked} banked`,
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
