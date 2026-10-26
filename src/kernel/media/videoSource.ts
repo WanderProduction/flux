@@ -274,6 +274,14 @@ export class VideoSource {
   /** The run being built, so two requests never build the same one twice. */
   private buildingRun: Promise<void> | null = null
   /**
+   * The stretch that build covers.
+   *
+   * So a caller wanting a frame *inside* it can wait for it rather than
+   * decoding that frame itself and tearing down the decoder the build is
+   * walking with. See buildRun.
+   */
+  private buildingSpan: { from: number; to: number; width: number } | null = null
+  /**
    * Incremented whenever the decoder is torn down and restarted.
    *
    * A feed in flight is sitting on a range request when a seek arrives. It
@@ -283,6 +291,27 @@ export class VideoSource {
    * required". The generation is how a feed asks whether it is still wanted.
    */
   private generation = 0
+
+  /**
+   * Restarts the *playhead* caused, as opposed to ones a run build caused.
+   *
+   * `generation` counts every teardown, which makes it the wrong thing for a
+   * run build to watch. A build begins by walking back to its own keyframe,
+   * and `frameFor` restarts the decoder whenever the frame wanted sits behind
+   * what the current run still holds — so the build's own first step bumped
+   * the generation it had just captured, and the check meant to notice the
+   * playhead leaving fired on the build itself. Every time, on the second
+   * frame, before anything was kept.
+   *
+   * Measured on 0.0.27: no run finished at all in four reverse passes, 165
+   * frames decoded to show seven, and backwards playback ran at 3 fps against
+   * forward's 30. The cache written to make playing backwards a read out of an
+   * array was switched off by the guard added to protect it.
+   *
+   * So restarts are now counted by *who asked for them*: `frameFor` takes
+   * `own`, a build passes it, and only the others move this. See buildRun.
+   */
+  private away = 0
 
   /**
    * Repairs spent since the last frame this source actually produced.
@@ -518,9 +547,12 @@ export class VideoSource {
   }
 
   /** Throws away decoder state and points it at the keyframe before `time`. */
-  private restartAt(time: number) {
+  private restartAt(time: number, own = false) {
     stats.restarts += 1
     this.generation += 1
+    // A build walking back to its own keyframe is not the playhead going
+    // somewhere else, and only the second should abandon a build. See `away`.
+    if (!own) this.away += 1
     this.discardBuffer()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
@@ -712,8 +744,12 @@ export class VideoSource {
    *
    * The frame stays owned by the source — the caller draws it and does not
    * close it.
+   *
+   * `own` marks a call made by a run build rather than by the playhead, so
+   * that the restarts a build causes itself do not read as the playhead
+   * leaving. See `away`.
    */
-  async frameFor(time: number): Promise<VideoFrame | null> {
+  async frameFor(time: number, own = false): Promise<VideoFrame | null> {
     if (this.closed) return null
 
     /*
@@ -729,7 +765,7 @@ export class VideoSource {
       if (this.repairs >= MAX_REPAIRS) return null
       this.repairs += 1
       this.failed = false
-      this.restartAt(time)
+      this.restartAt(time, own)
     }
 
     this.wantTime = time
@@ -809,7 +845,7 @@ export class VideoSource {
       reachable &&
       this.next >= 0 &&
       wanted <= this.next + MAX_FEED_AHEAD
-    if (!runningInto) this.restartAt(time)
+    if (!runningInto) this.restartAt(time, own)
 
     if (this.feeding) await this.feeding
     this.feeding = this.feed(time, streamAhead).finally(() => {
@@ -881,7 +917,7 @@ export class VideoSource {
         rescued = true
         stats.rescues += 1
         if (this.feeding) await this.feeding
-        this.restartAt(time)
+        this.restartAt(time, own)
         this.feeding = this.feed(time, streamAhead).finally(() => {
           this.feeding = null
         })
@@ -1077,9 +1113,32 @@ export class VideoSource {
      *
      * The caller falls back to decoding the one frame it needs, which is
      * slower than a run and always ends.
+     *
+     * Unless the frame it wants is inside the stretch being built. Then that
+     * fallback is the worst of both: it tears down the decoder the build is
+     * using, which abandons the build, and the next ask starts another one
+     * that the next fallback abandons in turn. Measured once the cache was
+     * serving again: rounds that got a build finished before the first
+     * fallback ran at 29.9 fps, and rounds where a fallback landed first ran
+     * at 0.4 — two builds begun, two pictures served, one frame drawn in two
+     * and a half seconds.
+     *
+     * So a caller waiting for a frame the build is about to have waits for it.
+     * That is not the deadlock above: the wait is for the stretch covering the
+     * frame actually wanted, which ends with that frame in hand, rather than
+     * for whatever build happened to be in flight.
      */
-    if (this.buildingRun) return
+    const from = keyframeAt(this.track, this.track.pts[at])
+    let to = from
+    while (to + 1 < this.track.count && !this.track.key[to + 1]) to += 1
 
+    if (this.buildingRun) {
+      const span = this.buildingSpan
+      if (span && span.width === width && span.from === from) await this.buildingRun
+      return
+    }
+
+    this.buildingSpan = { from, to, width }
     const run = (async () => {
       /*
        * The decoder run this build belongs to.
@@ -1096,14 +1155,12 @@ export class VideoSource {
        * every frame it asked for and took half a second to catch up, which had
        * been read as "starting playback is slow" for some time.
        *
-       * `generation` already counts decoder runs and already changes when the
-       * playhead goes somewhere this one cannot reach, so it is the thing to
-       * watch rather than a new flag.
+       * The counter watched is `away`, not `generation`: a build walks back to
+       * its own keyframe to begin, that restarts the decoder, and a build
+       * watching every restart abandons itself on its own first step. See
+       * `away` for what that cost.
        */
-      const mine = this.generation
-      const from = keyframeAt(this.track, this.track.pts[at])
-      let to = from
-      while (to + 1 < this.track.count && !this.track.key[to + 1]) to += 1
+      const mine = this.away
 
       const pictures = new Map<number, ImageBitmap>()
       const height = Math.max(
@@ -1113,9 +1170,10 @@ export class VideoSource {
       for (let i = from; i <= to; i++) {
         if (this.closed) break
         // Somewhere else now; this run is nobody's business any more.
-        if (this.generation !== mine) break
-        // Walking forwards, which is the direction the decoder is good at.
-        const frame = await this.frameFor(this.track.pts[i])
+        if (this.away !== mine) break
+        // Walking forwards, which is the direction the decoder is good at,
+        // and marked as the build's own so its restarts do not stop it.
+        const frame = await this.frameFor(this.track.pts[i], true)
         if (!frame) continue
         /*
          * Awaited before the next frame is asked for, because asking trims the
@@ -1131,7 +1189,7 @@ export class VideoSource {
       // Nothing worth keeping, or abandoned part way: a half-built run would
       // answer for frames it does not hold and send every one of them to the
       // slow path.
-      if (pictures.size === 0 || this.generation !== mine) {
+      if (pictures.size === 0 || this.away !== mine) {
         for (const one of pictures.values()) one.close()
         return
       }
@@ -1146,6 +1204,7 @@ export class VideoSource {
 
     this.buildingRun = run.finally(() => {
       this.buildingRun = null
+      this.buildingSpan = null
     })
     return this.buildingRun
   }
