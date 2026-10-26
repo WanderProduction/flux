@@ -915,6 +915,26 @@ Drag the ruler, or the playhead itself — it carries a narrow handle down the l
 line is otherwise inert, because it lies over every lane and one that swallowed clicks would make
 the clip underneath it unselectable at exactly the time you are looking at.
 
+#### Thumbnails are written down too
+
+Waveforms and frame indexes have always been kept in the media cache, keyed by a stat of the source
+so a file edited in place is never served a stale answer. Thumbnails were the exception: a Map and
+nothing else. Reopening a project re-decoded a frame of every file it showed — the most visible
+work the app does and the least necessary, because the answer had been computed, it had simply
+never been written down.
+
+Now they go in the same cache under `thumb`, and a reopened project reads them back in about two
+milliseconds instead of seeking a video for each one.
+
+> **A failed decode is remembered in memory but never on disk.** A file that could not be read this
+> time may be a file on a drive that was not mounted; remembering "no thumbnail" for it permanently
+> would turn a temporary condition into a lasting one. In memory it is a useful guard against
+> retrying all session, which is as long as the reason is likely to last.
+
+Checked through an actual page reload rather than by emptying the Map, because the Map going away
+is the whole of what a relaunch does to this — a check that reached in to clear it would be
+checking something else.
+
 #### The ring in the corner, and what is behind it
 
 Three queues make the things a timeline needs but a file does not contain: a waveform, a thumbnail
