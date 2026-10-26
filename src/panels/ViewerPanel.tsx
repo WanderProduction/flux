@@ -112,6 +112,33 @@ const SYNC_TOLERANCE = 0.01 + 1 / 96
  * number of frames at any rate — a jump that lands between two frames would
  * make the next single step half a frame long.
  */
+/**
+ * How long one draw may wait for a picture before giving up on it.
+ *
+ * A draw skips itself while another is in flight, which is right — sixty
+ * notifications a second must not queue sixty decodes. But it means a draw
+ * that never finishes stops every draw after it, for good: the playhead runs
+ * on and the canvas keeps the last picture it managed. Measured, that is 191
+ * playhead notifications across two and a half seconds with *none* of them
+ * drawing, because the one in flight had been waiting since before they began.
+ *
+ * Every await under `shownFor` is meant to be bounded and most are. Rather
+ * than chase them one at a time and hope the next is the last, the draw bounds
+ * itself: whatever has not arrived by now is treated as not arrived, the
+ * previous picture stays up, and the next notification tries again. A frame
+ * held a third of a second too long is a stutter; a draw that never returns is
+ * a viewer that has stopped.
+ *
+ * Two seconds, and the number matters more than it looks. At a third of a
+ * second it fired on draws that were merely slow — a run of frames takes three
+ * to five hundred milliseconds to build — and threw away pictures that were
+ * about to arrive: the total freezes went, and the frames actually drawn
+ * nearly halved, which is a worse trade than the one it was fixing. This is
+ * not a deadline for a draw to meet; it is the point past which a draw is
+ * certainly never coming back.
+ */
+const DRAW_TIMEOUT_MS = 2000
+
 const JUMP_FRAMES = 5
 
 /**
@@ -706,19 +733,29 @@ export function ViewerPanel() {
             const source = sourcesRef.current.get(layer.id)
             // Sequence time to source time: how far into the clip the
             // playhead is, at the rate the clip runs, from where it was cut.
-            return source
-              ? source.shownFor(layer.offset + (now - layer.start) * layer.speed, {
-                  /*
-                   * Which way the playhead is going decides how the picture is
-                   * got, not merely which frame. Backwards, the source serves
-                   * from a run it decoded forwards and shrunk; see shownFor.
-                   */
-                  backwards: getRate() < 0,
-                  // The size it will actually be drawn at, so the copies kept
-                  // for playing backwards are neither soft nor wasteful.
-                  width: pixels.width,
-                })
-              : Promise.resolve(null)
+            if (!source) return Promise.resolve(null)
+            const wanted = source.shownFor(
+              layer.offset + (now - layer.start) * layer.speed,
+              {
+                /*
+                 * Which way the playhead is going decides how the picture is
+                 * got, not merely which frame. Backwards, the source serves
+                 * from a run it decoded forwards and shrunk; see shownFor.
+                 */
+                backwards: getRate() < 0,
+                // The size it will actually be drawn at, so the copies kept
+                // for playing backwards are neither soft nor wasteful.
+                width: pixels.width,
+              },
+            )
+            /*
+             * Bounded, so one picture that never arrives cannot stop every
+             * draw after it. See DRAW_TIMEOUT_MS.
+             */
+            return Promise.race([
+              wanted,
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), DRAW_TIMEOUT_MS)),
+            ])
           }),
         )
         if (stopped) return
