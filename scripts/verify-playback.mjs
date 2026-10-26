@@ -3100,6 +3100,61 @@ try {
      return true;`,
   )
 
+  /*
+   * A razor through one clip, with the same file either side and no gap: there
+   * is visibly nothing for the picture to go black for, which is what makes it
+   * the right shape to check. The draw used to clear to black and then find it
+   * had no frame yet, because the clip under the playhead had changed and its
+   * decoder was still opening in another effect.
+   *
+   * `dataset.layers` is what each draw actually painted, so a draw that wrote
+   * "0" put a black frame on screen. One is enough to see.
+   */
+  await check('a cut does not flash black', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       const asset = assets.getAssets().find(a => a.path === ${LONG})
+         ?? assets.importAssets([{ path: ${LONG}, kind: 'video' }])[0];
+       await assets.ensureProbed(asset.id);
+
+       sequence.setSequence(null);
+       sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: 3 });
+       sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 3, duration: 3, offset: 3 });
+       view.recordView({ viewer: { playbackResolution: 0.5, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+
+       const canvas = document.querySelector('canvas.viewer-media');
+       if (!canvas) return { error: 'no viewer canvas' };
+
+       playback.pause();
+       playback.seek(2.2);
+       await new Promise(r => setTimeout(r, 1200));
+
+       const seen = [];
+       playback.play();
+       const began = performance.now();
+       while (performance.now() - began < 2200) {
+         await new Promise(r => setTimeout(r, 3));
+         seen.push(canvas.dataset.layers);
+       }
+       playback.pause();
+
+       const painted = seen.filter(v => v !== undefined).length;
+       const black = seen.filter(v => v === '0').length;
+       const crossed = playback.getTime() > 3;
+       return { painted, black, crossed, at: playback.getTime() };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(state.crossed, `setup: the playhead stopped at ${state.at} without reaching the cut`)
+    assert.ok(state.painted > 0, 'setup: nothing was drawn at all')
+    assert.equal(state.black, 0, `${state.black} draws painted nothing while crossing the cut`)
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })

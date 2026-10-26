@@ -2103,6 +2103,24 @@ The crop happens in the picture's **displayed** orientation, so its edges are th
 whatever way the file was coded. Taking a source rectangle instead would need the crop mapped back
 through the file's rotation, and a left crop on a sideways clip would come off the top.
 
+#### A cut does not flash black
+
+The decoders are reconciled in their own effect, which cannot finish inside the one that draws. So
+for the few milliseconds after the clip under the playhead changes, the draw runs with no frame for
+the new layer — and it used to clear the canvas to black and then find it had nothing to put on
+top. That is a black frame on **every** cut, including a razor through one clip where the same file
+is on both sides and there is visibly nothing to go black for.
+
+Now a draw that gets no frame at all leaves the previous picture alone. A frame held a moment too
+long is invisible; a black flash is not.
+
+> An empty stack is a different thing and never reaches that code — the draw does not run at all
+> without layers — so this cannot swallow the black of a genuine gap.
+
+Checked by razoring one clip in two with no gap, playing across the join, and counting draws that
+painted nothing: one before, none after. `canvas.dataset.layers` is what each draw actually put up,
+which is the only way to ask this question without looking at pixels.
+
 #### The render draws it too
 
 The ffmpeg graph builds a clip's filters in the same order the canvas does: scale the whole
