@@ -3178,6 +3178,90 @@ try {
     )
   })
 
+  /*
+   * The regression this exists to stop shipped twice over.
+   *
+   * Playing backwards is served out of runs of frames decoded forwards and
+   * shrunk, because asking a decoder for frames in descending order makes it
+   * do its worst case on every one. 0.0.27 added a guard to `buildRun` that
+   * watched the decoder generation to notice the playhead leaving — and a
+   * build begins by walking back to its own keyframe, which restarts the
+   * decoder, so every build abandoned itself on its own first step. No run was
+   * ever finished. Backwards playback fell to a tenth of forward's rate and
+   * the whole suite still passed, because nothing here asked whether the cache
+   * was being *used*.
+   *
+   * So that is what this asks. Not a rate — rates on 4K footage vary with what
+   * else the machine is doing, and a threshold loose enough to be reliable
+   * would not have caught 3 fps against 30. Two counters instead: runs
+   * finished, and pictures handed back out of one. Both were zero.
+   */
+  await check('playing backwards is served out of the frame cache', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       const asset = assets.getAssets().find(a => a.path === ${LONG})
+         ?? assets.importAssets([{ path: ${LONG}, kind: 'video' }])[0];
+       await assets.ensureProbed(asset.id);
+       if (!(asset.duration > 6)) return { error: 'setup: fixture too short to play back' };
+
+       sequence.setSequence(null);
+       sequence.addClip({ assetId: asset.id, trackId: 'V1', start: 0, duration: Math.min(asset.duration, 10) });
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+
+       const canvas = document.querySelector('canvas.viewer-media');
+       if (!canvas) return { error: 'no viewer canvas' };
+
+       /* Far enough in that playing backwards crosses a keyframe boundary and
+          so has to build more than the one run it starts in. */
+       playback.pause();
+       playback.setRate(1);
+       playback.seek(Math.min(asset.duration, 10) - 0.5);
+       await new Promise(r => setTimeout(r, 1500));
+
+       const was = { ...videoSource.sourceStats() };
+       let last = canvas.dataset.frameTime;
+       let drawn = 0;
+       playback.setRate(-1);
+       playback.play();
+       const began = performance.now();
+       while (performance.now() - began < 2500) {
+         await new Promise(r => setTimeout(r, 4));
+         if (canvas.dataset.frameTime === last) continue;
+         drawn++;
+         last = canvas.dataset.frameTime;
+       }
+       playback.pause();
+       playback.setRate(1);
+       const now = videoSource.sourceStats();
+       return {
+         drawn,
+         travelled: playback.getTime() - (Math.min(asset.duration, 10) - 0.5),
+         runsBuilt: (now.runsBuilt ?? 0) - (was.runsBuilt ?? 0),
+         fromRun: (now.fromRun ?? 0) - (was.fromRun ?? 0),
+       };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(
+      state.travelled < -1,
+      `setup: the playhead went ${state.travelled.toFixed(2)}s, so it did not play backwards`,
+    )
+    assert.ok(state.drawn > 0, 'setup: nothing was drawn at all')
+    assert.ok(
+      state.runsBuilt > 0,
+      'no run of frames was finished while playing backwards, so the frame cache is switched off',
+    )
+    assert.ok(
+      state.fromRun > 0,
+      `${state.runsBuilt} runs were built but no picture came out of one, so nothing is served from the cache`,
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
