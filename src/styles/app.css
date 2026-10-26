@@ -3540,3 +3540,97 @@ kbd {
 .ec-check input {
   accent-color: var(--flux-accent);
 }
+
+/* Saving and choosing a panel arrangement. See kernel/layouts.ts. */
+.layout-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: rgba(0, 0, 0, 0.45);
+}
+.layout-sheet {
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  padding: 14px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-elevated);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);
+}
+.layout-sheet-title {
+  margin: 0 0 6px;
+  font-size: var(--flux-text-lg);
+  font-weight: 600;
+  color: var(--flux-text);
+}
+.layout-sheet-note {
+  margin: 0 0 12px;
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+  color: var(--flux-text-dim);
+}
+.layout-sheet-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+}
+.layout-sheet-input:focus {
+  outline: none;
+  border-color: var(--flux-accent);
+}
+.layout-sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.layout-sheet-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 46vh;
+  overflow: auto;
+}
+.layout-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--flux-border);
+}
+.layout-row:last-child {
+  border-bottom: none;
+}
+.layout-row-name {
+  flex: 1;
+  padding: 7px 4px;
+  border: none;
+  background: none;
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  text-align: left;
+  cursor: pointer;
+}
+.layout-row-name:hover {
+  color: var(--flux-accent);
+}
+.layout-row-drop {
+  border: none;
+  background: none;
+  color: var(--flux-text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.layout-row-drop:hover {
+  color: var(--flux-warn);
+}

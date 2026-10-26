@@ -935,6 +935,32 @@ Checked through an actual page reload rather than by emptying the Map, because t
 is the whole of what a relaunch does to this — a check that reached in to clear it would be
 checking something else.
 
+#### The Window menu, and layouts you can name
+
+Every panel is listed under **Window**, with a tick beside the ones that are open — so the menu says
+what is on screen as much as it puts something there, which is the half people reach for when a
+layout has got away from them. Above that: **Save Layout as Preset…**, and the presets saved so far.
+
+A preset is not the same thing as a workspace. Edit and Export are built in, each with one
+remembered arrangement, and they answer *what is FLUX for right now*. A preset answers *this is how
+I like it*, and there can be as many as someone wants — a wide timeline for assembling, a big viewer
+for grading, something else for a second monitor. Saving over a name replaces it, because pressing
+it twice means "I moved something", not "make me a second one I cannot tell apart".
+
+> **Layouts are installation state, never project state.** Copy a project to another machine and it
+> should arrive with its sequences and its render settings, not with somebody else's idea of where
+> the Timeline goes.
+
+The menu is built in the main process and the panels live in the renderer, so the renderer does the
+telling: it sends a description — panels, which are open, the presets, the active workspace — and
+re-sends it whenever the layout changes. Every item sends one thing back: **a command id**. Nothing
+in `electron/appMenu.js` knows what `panel.toggle.timeline` means, which is what stops the menu
+becoming a second copy of the command table that drifts away from the first.
+
+Checked by driving the same ids the menu sends: save a preset through the sheet, toggle the Viewer
+off, apply the preset, and see the Viewer come back. A menu item that silently does nothing looks
+exactly like one that works, which is why it is checked at all.
+
 #### The ring in the corner, and what is behind it
 
 Three queues make the things a timeline needs but a file does not contain: a waveform, a thumbnail

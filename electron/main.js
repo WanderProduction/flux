@@ -13,6 +13,7 @@ import {
   listSubfolders,
   scanFootage,
 } from './filesystem.js'
+import { buildAppMenu, updateAppMenu } from './appMenu.js'
 import { serveFile } from './assetServer.js'
 import { checkEncoder, findTools } from './render.js'
 import { RenderQueue } from './renderQueue.js'
@@ -299,7 +300,12 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#0e0f13',
     show: false,
-    autoHideMenuBar: true,
+    /*
+     * Shown rather than hidden now that the Window menu is worth reaching: it
+     * is where the panels are listed and where layouts are saved, and a menu
+     * you have to know to press Alt for is a menu most people never find.
+     */
+    autoHideMenuBar: false,
     title: 'FLUX',
     icon: path.join(
       __dirname,
@@ -333,6 +339,10 @@ function createWindow() {
    */
   if (saved?.fullScreen) win.setFullScreen(true)
   else if (saved?.maximized) win.maximize()
+
+  // A menu before the renderer has described itself, so the bar is never
+  // empty — it fills in with panels and layouts a moment later.
+  buildAppMenu(win)
 
   win.once('ready-to-show', () => {
     win.show()
@@ -508,6 +518,11 @@ ipcMain.handle('project:deleteSequence', (_e, root, file) => deleteSequence(root
  * finishing does not light the unsaved dot. See electron/project.js.
  */
 ipcMain.handle('project:readQueue', (_e, root) => readQueue(root))
+ipcMain.on('menu:describe', (event, description) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (window) updateAppMenu(window, description)
+})
+
 ipcMain.handle('project:writeQueue', (_e, root, jobs) => writeQueue(root, jobs))
 ipcMain.handle('project:importSequence', (_e, root, sourcePath) => importSequence(root, sourcePath))
 

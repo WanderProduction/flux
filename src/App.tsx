@@ -6,6 +6,14 @@ import { panels } from './kernel/panels'
 import { createKeymapController, defaultKeymap } from './kernel/keymap'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
+import {
+  getLayoutPreset,
+  layoutPresets,
+  loadLayoutPresets,
+  removeLayoutPreset,
+  saveLayoutPreset,
+  subscribeLayouts,
+} from './kernel/layouts'
 import { getSequence, subscribeSequence } from './kernel/sequence'
 import { getView, recordView } from './kernel/view'
 import { getSelection } from './kernel/selection'
@@ -114,6 +122,18 @@ function Workspace({ project }: { project: Project }) {
    * saved a moment later would be the empty one, and the layout would be lost
    * by the act of restoring it.
    */
+  const [presets, setPresets] = useState(layoutPresets)
+  const [layoutDialog, setLayoutDialog] = useState<{
+    mode: 'save' | 'manage'
+    name: string
+  } | null>(null)
+
+  // Read once, then kept in step: the menu is built from this list too.
+  useEffect(() => {
+    void loadLayoutPresets().then(() => setPresets([...layoutPresets()]))
+    return subscribeLayouts(() => setPresets([...layoutPresets()]))
+  }, [])
+
   const rearranging = useRef(false)
 
   const applyWorkspace = useCallback((id: string) => {
@@ -179,6 +199,65 @@ function Workspace({ project }: { project: Project }) {
       api.addPanel({ id: panelId, component: panelId, title: definition.title })
     }
   }, [])
+
+  /**
+   * A panel the Window menu can turn off as well as on.
+   *
+   * `focusPanel` only ever opens; a menu with a tick beside each panel has to
+   * be able to clear the tick too, which is the half people reach for when a
+   * layout has got away from them.
+   */
+  const togglePanel = useCallback(
+    (panelId: string) => {
+      const api = apiRef.current
+      if (!api) return
+      const open = api.getPanel(panelId)
+      if (open) api.removePanel(open)
+      else focusPanel(panelId)
+    },
+    [focusPanel],
+  )
+
+  /** Saves the arrangement under a name, through the same serialisation the workspaces use. */
+  const savePreset = useCallback(
+    (name: string) => {
+      const api = apiRef.current
+      if (!api) return
+      const preset = saveLayoutPreset(name, api.toJSON(), activeRef.current)
+      say(`Saved layout "${preset.name}"`)
+    },
+    [say],
+  )
+
+  /**
+   * Puts a saved arrangement back.
+   *
+   * `rearranging` for the same reason applying a workspace sets it: restoring
+   * clears the dock first, and that clearing is a layout change which would
+   * otherwise be written down as the user's current arrangement — losing the
+   * thing being restored at the moment of restoring it.
+   */
+  const applyPreset = useCallback(
+    (id: string) => {
+      const api = apiRef.current
+      const preset = getLayoutPreset(id)
+      if (!api || !preset) return
+      rearranging.current = true
+      try {
+        api.fromJSON(preset.layout as Parameters<typeof api.fromJSON>[0])
+        if (preset.workspace) {
+          activeRef.current = preset.workspace
+          setActiveId(preset.workspace)
+        }
+        say(`Layout "${preset.name}"`)
+      } catch {
+        say(`Could not apply "${preset.name}" — it was saved by a different version`)
+      } finally {
+        rearranging.current = false
+      }
+    },
+    [say],
+  )
 
   const onReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api
@@ -328,6 +407,32 @@ function Workspace({ project }: { project: Project }) {
           say(parts.length ? parts.join(' · ') : 'Nothing to render')
         },
       },
+      {
+        id: 'layout.saveAs',
+        title: 'Save Layout as Preset…',
+        category: 'Workspace',
+        detail: 'Keeps this arrangement under a name you can come back to',
+        run: () => setLayoutDialog({ mode: 'save', name: '' }),
+      },
+      {
+        id: 'layout.manage',
+        title: 'Manage Saved Layouts…',
+        category: 'Workspace',
+        run: () => setLayoutDialog({ mode: 'manage', name: '' }),
+      },
+      ...layoutPresets().map((preset) => ({
+        id: `layout.apply.${preset.id}`,
+        title: `Layout: ${preset.name}`,
+        category: 'Workspace',
+        run: () => applyPreset(preset.id),
+      })),
+      ...panels.list().map((panel) => ({
+        id: `panel.toggle.${panel.id}`,
+        title: `Toggle ${panel.title}`,
+        category: 'Panel',
+        detail: panel.description,
+        run: () => togglePanel(panel.id),
+      })),
       ...panels.list().map((panel) => ({
         id: `panel.focus.${panel.id}`,
         title: `Focus ${panel.title}`,
@@ -338,7 +443,63 @@ function Workspace({ project }: { project: Project }) {
     ])
 
     return () => handle.dispose()
-  }, [ready, applyWorkspace, saveWorkspace, resetWorkspace, focusPanel, say])
+  }, [
+    ready,
+    applyWorkspace,
+    saveWorkspace,
+    resetWorkspace,
+    focusPanel,
+    togglePanel,
+    applyPreset,
+    presets,
+    say,
+  ])
+
+  /**
+   * The application menu is told what this window has.
+   *
+   * It is built in the main process and the panels live here, so somebody has
+   * to carry the list across. Re-sent on every layout change as well as when
+   * the presets change, because the ticks beside the panel names are the half
+   * of the menu that says what is *already* on screen.
+   */
+  useEffect(() => {
+    if (!ready) return
+    const bridge = (window as unknown as { flux?: { menu?: { describe: (d: unknown) => void } } })
+      .flux?.menu
+    if (!bridge) return
+
+    const describe = () => {
+      const api = apiRef.current
+      const open = new Set(api ? api.panels.map((panel) => panel.id) : [])
+      bridge.describe({
+        panels: panels.list().map((panel) => ({
+          id: panel.id,
+          title: panel.title,
+          open: open.has(panel.id),
+        })),
+        presets: presets.map((preset) => ({ id: preset.id, name: preset.name })),
+        workspaces: workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name })),
+        activeWorkspace: activeId,
+      })
+    }
+
+    describe()
+    const api = apiRef.current
+    const disposable = api?.onDidLayoutChange(describe)
+    return () => disposable?.dispose()
+  }, [ready, activeId, presets])
+
+  /** And the answers come back as command ids, run through the same table as everything else. */
+  useEffect(() => {
+    const bridge = (
+      window as unknown as { flux?: { menu?: { onRun: (h: (id: string) => void) => () => void } } }
+    ).flux?.menu
+    if (!bridge) return
+    return bridge.onRun((id) => {
+      void commands.run(id)
+    })
+  }, [])
 
   useEffect(() => keymap.attach(), [keymap])
 
@@ -428,6 +589,99 @@ function Workspace({ project }: { project: Project }) {
         lookupChord={keymap.lookup}
       />
       <ImportChoiceHost />
+      {layoutDialog && (
+        <div
+          className="layout-sheet-backdrop"
+          onClick={() => setLayoutDialog(null)}
+          role="presentation"
+        >
+          <div
+            className="layout-sheet"
+            role="dialog"
+            aria-label={layoutDialog.mode === 'save' ? 'Save layout as preset' : 'Saved layouts'}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {layoutDialog.mode === 'save' ? (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (!layoutDialog.name.trim()) return
+                  savePreset(layoutDialog.name)
+                  setLayoutDialog(null)
+                }}
+              >
+                <h2 className="layout-sheet-title">Save layout as preset</h2>
+                <p className="layout-sheet-note">
+                  The arrangement of every panel, under a name. Saving over a name you already used
+                  replaces it.
+                </p>
+                <input
+                  className="layout-sheet-input"
+                  autoFocus
+                  placeholder="Assembling, Grading, Two monitors…"
+                  value={layoutDialog.name}
+                  onChange={(event) =>
+                    setLayoutDialog({ mode: 'save', name: event.target.value })
+                  }
+                />
+                <div className="layout-sheet-actions">
+                  <button type="button" className="batch-button" onClick={() => setLayoutDialog(null)}>
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="batch-button batch-button--go"
+                    disabled={!layoutDialog.name.trim()}
+                  >
+                    Save
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <h2 className="layout-sheet-title">Saved layouts</h2>
+                {presets.length === 0 ? (
+                  <p className="layout-sheet-note">
+                    None yet. Arrange the panels how you like them, then Window ▸ Save Layout as
+                    Preset.
+                  </p>
+                ) : (
+                  <div className="layout-sheet-list" role="list">
+                    {presets.map((preset) => (
+                      <div className="layout-row" role="listitem" key={preset.id}>
+                        <button
+                          className="layout-row-name"
+                          onClick={() => {
+                            applyPreset(preset.id)
+                            setLayoutDialog(null)
+                          }}
+                        >
+                          {preset.name}
+                        </button>
+                        <button
+                          className="layout-row-drop"
+                          title={`Forget "${preset.name}"`}
+                          onClick={() => {
+                            removeLayoutPreset(preset.id)
+                            say(`Forgot layout "${preset.name}"`)
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="layout-sheet-actions">
+                  <button className="batch-button" onClick={() => setLayoutDialog(null)}>
+                    Done
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
