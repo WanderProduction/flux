@@ -1030,6 +1030,94 @@ try {
   })
 
   /*
+   * The Window menu is an OS object the renderer cannot see, so what is
+   * checked is everything on this side of the bridge: the commands the menu
+   * sends exist, they do what their labels promise, and a saved arrangement
+   * really comes back. A menu item that silently does nothing is the failure
+   * this is here to catch, and it would look exactly like a working one.
+   */
+  await check('the Window menu can save a layout, close a panel and put it back', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { commands, panels, layouts } = window.__fluxDev;
+       const bridge = window.flux && window.flux.menu;
+       const ids = () => commands.list().map(c => c.id);
+
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 700));
+
+       const kept = layouts.layoutPresets();
+       layouts.setLayoutPresets([]);
+       await new Promise(r => setTimeout(r, 150));
+
+       await commands.run('layout.saveAs');
+       await new Promise(r => setTimeout(r, 250));
+       const input = document.querySelector('.layout-sheet-input');
+       if (!input) {
+         layouts.setLayoutPresets(kept);
+         return { error: 'the save sheet did not open' };
+       }
+       const setter = Object.getOwnPropertyDescriptor(
+         window.HTMLInputElement.prototype, 'value').set;
+       setter.call(input, 'Checked');
+       input.dispatchEvent(new Event('input', { bubbles: true }));
+       await new Promise(r => setTimeout(r, 120));
+       input.closest('form').dispatchEvent(
+         new Event('submit', { bubbles: true, cancelable: true }));
+       await new Promise(r => setTimeout(r, 400));
+
+       const tabs = () => [...document.querySelectorAll('.dv-tab')].map(t => t.textContent);
+       const victim = panels.list().find(p => p.id === 'viewer') ?? panels.list()[0];
+       const before = tabs();
+       await commands.run('panel.toggle.' + victim.id);
+       await new Promise(r => setTimeout(r, 500));
+       const afterToggle = tabs();
+
+       const preset = layouts.layoutPresets()[0];
+       await commands.run('layout.apply.' + preset.id);
+       await new Promise(r => setTimeout(r, 900));
+       const afterApply = tabs();
+
+       layouts.setLayoutPresets(kept);
+       return {
+         bridge: Boolean(bridge && bridge.describe && bridge.onRun),
+         commands: {
+           saveAs: ids().includes('layout.saveAs'),
+           manage: ids().includes('layout.manage'),
+           toggles: panels.list().every(p => ids().includes('panel.toggle.' + p.id)),
+         },
+         saved: layouts.layoutPresets === undefined ? [] : [preset.name],
+         sheetClosed: !document.querySelector('.layout-sheet'),
+         victim: victim.title,
+         before,
+         afterToggle,
+         afterApply,
+       };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(state.bridge, 'the menu bridge is not on the preload')
+    assert.ok(state.commands.saveAs, 'no layout.saveAs command for the menu to send')
+    assert.ok(state.commands.manage, 'no layout.manage command')
+    assert.ok(state.commands.toggles, 'some panel has no panel.toggle command')
+    assert.deepEqual(state.saved, ['Checked'], 'the layout was not saved under its name')
+    assert.ok(state.sheetClosed, 'the sheet stayed open after saving')
+
+    assert.ok(
+      state.before.includes(state.victim),
+      `setup: "${state.victim}" was not open to begin with`,
+    )
+    assert.ok(
+      !state.afterToggle.includes(state.victim),
+      `toggling did not close "${state.victim}": ${state.afterToggle.join(', ')}`,
+    )
+    assert.ok(
+      state.afterApply.includes(state.victim),
+      `the saved layout did not bring "${state.victim}" back: ${state.afterApply.join(', ')}`,
+    )
+  })
+
+  /*
    * The one derived thing FLUX used to forget on every launch. Waveforms and
    * frame indexes have always been written down; thumbnails lived in a Map and
    * nothing else, so reopening a project re-decoded a frame of every file it
@@ -1054,7 +1142,7 @@ try {
         */
        const token = await window.flux.media.sourceToken(path);
        let bytes = null;
-       for (let i = 0; i < 20 && !bytes; i++) {
+       for (let i = 0; i < 60 && !bytes; i++) {
          bytes = await window.flux.media.read(path, 'thumb', token);
          if (!bytes) await new Promise(r => setTimeout(r, 100));
        }

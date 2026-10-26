@@ -13,6 +13,7 @@ import * as assets from './kernel/assets'
 import * as sequence from './kernel/sequence'
 import * as thumbnails from './kernel/thumbnails'
 import * as mediaWork from './kernel/mediaWork'
+import * as layouts from './kernel/layouts'
 import { commands } from './kernel/commands'
 import { panels } from './kernel/panels'
 import * as store from './kernel/store'
@@ -76,6 +77,7 @@ if (import.meta.env.DEV) {
       sequence,
       thumbnails,
       mediaWork,
+      layouts,
       commands,
       panels,
       store,

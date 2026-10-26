@@ -136,5 +136,21 @@ contextBridge.exposeInMainWorld('flux', {
       return () => ipcRenderer.removeListener('update:state', listener)
     },
   },
+  /**
+   * The application menu.
+   *
+   * `describe` is the renderer telling the main process what it has — panels,
+   * saved layouts, which workspace is on — because those live here and the menu
+   * lives there. `onRun` is the answer coming back: a command id, which the
+   * renderer runs through the same table the palette uses.
+   */
+  menu: {
+    describe: (description) => ipcRenderer.send('menu:describe', description),
+    onRun: (handler) => {
+      const listener = (_e, id) => handler(id)
+      ipcRenderer.on('menu:run', listener)
+      return () => ipcRenderer.removeListener('menu:run', listener)
+    },
+  },
   platform: process.platform,
 })
