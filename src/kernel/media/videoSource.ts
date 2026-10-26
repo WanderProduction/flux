@@ -97,6 +97,24 @@ const MAX_FETCH_BYTES = 8 << 20
 const FRAME_TIMEOUT_MS = 5000
 
 /**
+ * How long to wait for a frame that was already submitted before giving up on
+ * waiting and starting again from a keyframe.
+ *
+ * There is a case — reproducible, not yet explained — where a decoder is fed
+ * well past the frame it owes and simply never emits it: the samples before it
+ * come out and are trimmed, the ones after it are submitted, and the one asked
+ * for never appears. Waiting it out costs the full timeout, which is what a
+ * preview freezing for five seconds on play actually was, about one play in
+ * three.
+ *
+ * A restart from the keyframe before it costs about sixty milliseconds and has
+ * always produced the frame. So the wait stops being patient long before the
+ * timeout: this is a floor under how bad that case can get, not a licence to
+ * restart casually — it fires only after a frame is genuinely overdue.
+ */
+const RESTART_AFTER_MS = 350
+
+/**
  * How many times a source will rebuild its decoder before giving up.
  *
  * Three, and the count resets on every frame that comes out. A decoder lost to
@@ -658,7 +676,10 @@ export class VideoSource {
      * emerge as they are decoded; the lookahead submitted past the target is
      * what pushes the target itself out of the decoder without a flush.
      */
-    const deadline = performance.now() + FRAME_TIMEOUT_MS
+    const began = performance.now()
+    const deadline = began + FRAME_TIMEOUT_MS
+    /** One rescue per call: a restart that does not help must not become a loop. */
+    let rescued = false
     /*
      * How far past the target this wait is willing to submit.
      *
@@ -690,6 +711,20 @@ export class VideoSource {
         return frame
       }
       if (performance.now() > deadline) break
+
+      /*
+       * Overdue. The chunks went in and the frame did not come out, so stop
+       * waiting on a decoder that is not going to answer and start again from
+       * the keyframe before it.
+       */
+      if (!rescued && performance.now() - began > RESTART_AFTER_MS) {
+        rescued = true
+        if (this.feeding) await this.feeding
+        this.restartAt(time)
+        this.feeding = this.feed(time).finally(() => {
+          this.feeding = null
+        })
+      }
 
       const waitAt = performance.now()
       const arrived = new Promise<void>((resolve) => this.waiters.push(resolve))
