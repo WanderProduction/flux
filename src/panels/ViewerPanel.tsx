@@ -649,6 +649,26 @@ export function ViewerPanel() {
           canvas.width = width
           canvas.height = height
         }
+        /*
+         * Nothing came back, for a stack that has something in it.
+         *
+         * This is a cut: the clip under the playhead changed a moment ago and
+         * its source is still opening — the decoders are reconciled in their
+         * own effect, which cannot finish inside this one. Painting now would
+         * clear to black and draw nothing on top, and that is exactly the
+         * frame of black people see on every cut, including a razor through
+         * one clip where the same file is on both sides and there is visibly
+         * nothing to go black for.
+         *
+         * So the previous picture stays up for the few milliseconds it takes.
+         * A frame held a moment too long is invisible; a black flash is not.
+         *
+         * An empty stack is a different thing and never reaches here — the
+         * effect does not run at all without layers — so this cannot swallow
+         * the black of a genuine gap.
+         */
+        if (frames.every((frame) => !frame)) return
+
         // Cleared, not painted over: a layer that has gone must leave, and the
         // frame behind the bottom one is the sequence's own black.
         context.clearRect(0, 0, width, height)
