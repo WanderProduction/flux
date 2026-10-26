@@ -2103,6 +2103,42 @@ The crop happens in the picture's **displayed** orientation, so its edges are th
 whatever way the file was coded. Taking a source rectangle instead would need the crop mapped back
 through the file's rotation, and a left crop on a sideways clip would come off the top.
 
+#### Fed far enough ahead to stop waiting a wake cycle per frame
+
+A decoder emits nothing until enough chunks are queued behind the one being waited for, so feeding
+it eight at a time costs a round trip per frame whatever it is capable of. The window that governs
+*chunks in flight* is therefore not the one that governs *decoded frames held* — the second is
+about the decoder's frame pool, the first costs nothing but memory.
+
+The catch is that nearly every request is a miss, and the miss path fed the default regardless. So
+raising this measured as doing nothing at all, twice, until both paths were pointed at it.
+
+> **It has been wrong to ship twice before, for two different reasons, and both are worth knowing.**
+> The first time, the decoder was restarting on almost every frame, so a deeper queue was more to
+> throw away and a sweep showed a flat line. The second time the restarts were gone but the rescue
+> was firing on slowness, and a deeper queue made every rescue cost three times the reading — it
+> measured *worse* on a real timeline and was dropped. Only with both of those fixed does it help.
+
+Measured on the real project, warm, drawn frames per second against a sequence asking for fifty:
+
+| | cold | warm median | best |
+|---|---|---|---|
+| fed eight ahead | 3.5 | 13.5 | 15.3 |
+| fed twenty-four ahead | 6.2 | 18.7 | 21.8 |
+
+Seeks are unchanged — 66ms on a 50fps camera clip, 7ms on the small fixture — which is the thing a
+deeper queue would cost if it cost anything.
+
+#### The first pass over a stretch of timeline is the slow one
+
+Ten runs of the same six seconds, in one session: **3.5, then 11.5, 15.3, 11.5, 14.3, 13, 14, 13.5,
+14.3, 13**. The first is four times slower than every one after it, because the frame indexes for
+those clips are being built and written. Scrub somewhere new and you pay it again; play the same
+stretch twice and the second time is the real speed.
+
+Worth knowing before reaching for an explanation: a preview that is slow once and then fine is this,
+not a decoder that cannot keep up.
+
 #### A closed source stops working
 
 A cut closes one source and opens another, and the old one was left running: a frame request still

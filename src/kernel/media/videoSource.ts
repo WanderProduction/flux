@@ -86,6 +86,28 @@ export function resetSourceStats(): void {
   for (const key of Object.keys(stats) as (keyof SourceStats)[]) stats[key] = 0
 }
 
+/**
+ * How far ahead to keep the decoder fed, in frames.
+ *
+ * Separate from LOOKAHEAD_FRAMES, which bounds how many decoded frames may be
+ * *held* — that is about the decoder's frame pool. This bounds how many
+ * encoded chunks are in flight, and chunks cost nothing but memory.
+ *
+ * A decoder emits nothing until enough chunks are queued behind the one being
+ * waited for, so feeding it eight at a time costs a wake cycle per frame
+ * whatever the decoder can manage.
+ */
+let streamAhead = 24
+
+export function framesAhead(): number {
+  return streamAhead
+}
+
+/** For the harness that measures it. Not a setting: the value is measured. */
+export function setFramesAhead(frames: number): void {
+  streamAhead = Math.max(2, Math.min(240, Math.round(frames)))
+}
+
 /** Never ask for more than this in one range request. */
 const MAX_FETCH_BYTES = 8 << 20
 
@@ -630,8 +652,8 @@ export class VideoSource {
       this.repairs = 0
       this.trim()
       // Top up in the background so playing forward never waits on a decode.
-      if (!this.feeding && this.next >= 0 && this.buffer.length < LOOKAHEAD_FRAMES / 2) {
-        this.feeding = this.feed(time).finally(() => {
+      if (!this.feeding && this.next >= 0 && this.buffer.length < streamAhead / 2) {
+        this.feeding = this.feed(time, streamAhead).finally(() => {
           this.feeding = null
         })
       }
@@ -703,7 +725,7 @@ export class VideoSource {
     if (!runningInto) this.restartAt(time)
 
     if (this.feeding) await this.feeding
-    this.feeding = this.feed(time).finally(() => {
+    this.feeding = this.feed(time, streamAhead).finally(() => {
       this.feeding = null
     })
 
@@ -773,7 +795,7 @@ export class VideoSource {
         stats.rescues += 1
         if (this.feeding) await this.feeding
         this.restartAt(time)
-        this.feeding = this.feed(time).finally(() => {
+        this.feeding = this.feed(time, streamAhead).finally(() => {
           this.feeding = null
         })
       }
