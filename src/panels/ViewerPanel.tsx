@@ -579,12 +579,45 @@ export function ViewerPanel() {
     const held = sourcesRef.current
     const wanted = new Set(layers.map((layer) => layer.id))
 
-    for (const [id, source] of held) {
-      if (!wanted.has(id)) {
-        source.close()
-        held.delete(id)
+    /*
+     * Decoders whose clip has gone, kept by the file they were reading.
+     *
+     * A razor is one clip becoming two, and sources are kept per *clip* —
+     * so crossing the cut used to close a decoder that was already open on
+     * exactly the right file at exactly the right frame, and open an
+     * identical one. The playhead carried on and the picture stopped, for
+     * 147ms going forward and 254ms going back, which is four to eight
+     * frames of nothing on every cut. The black flash that used to be there
+     * was only the symptom; this was always the cost underneath it.
+     *
+     * A clip's offset and speed do not come into it: a source decodes a
+     * file, and the moment wanted is worked out before it is asked. So a
+     * decoder is worth handing over whenever the file matches, whatever the
+     * clip around it says.
+     */
+    const spare = new Map<string, VideoSource>()
+    for (const [id, source] of [...held]) {
+      if (wanted.has(id)) continue
+      held.delete(id)
+      // Only one spare per file: a second would never be claimed, because an
+      // arriving layer takes at most one.
+      if (spare.has(source.path)) source.close()
+      else spare.set(source.path, source)
+    }
+
+    for (const layer of layers) {
+      if (held.has(layer.id)) continue
+      const file = assetById.get(layer.assetId)
+      if (!file) continue
+      const carried = spare.get(file.path)
+      if (carried) {
+        held.set(layer.id, carried)
+        spare.delete(file.path)
       }
     }
+
+    // Whatever nothing claimed really has gone.
+    for (const source of spare.values()) source.close()
 
     void Promise.all(
       layers.map(async (layer) => {
