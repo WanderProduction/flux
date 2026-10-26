@@ -264,6 +264,27 @@ export function ViewerPanel() {
   const [playing, setPlaying] = useState(isPlaying)
   const [seekToken, setSeekToken] = useState(getSeekToken)
 
+  /**
+   * Whether a draw is in flight, and the newest draw to run when it lands.
+   *
+   * Refs rather than locals inside the effect, because what has to be mutually
+   * exclusive outlives any one effect instance. Changing the preview
+   * resolution — which happens on every play and pause — replaces the effect
+   * while its draw is still awaiting a frame, and a per-effect flag let the
+   * replacement start a *second* draw asking the same source for the same
+   * timestamp. Two callers then share one decoder's wantTime, its feed and its
+   * restarts, and both wait: measured at two simultaneous 1.9-second waits for
+   * one frame, at every cut.
+   *
+   * So: one draw at a time across instances, and a draw asked for while
+   * another is running is remembered and run afterwards — through the newest
+   * effect's closure, because by the time a draw lands the resolution may have
+   * changed and re-running the old one would paint at a size nobody wants.
+   */
+  const drawingRef = useRef(false)
+  const drawAgainRef = useRef(false)
+  const latestDrawRef = useRef<() => void>(() => {})
+
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const mediaRef = useRef<HTMLMediaElement>(null)
 
@@ -587,7 +608,6 @@ export function ViewerPanel() {
     if (!canvas || layers.length === 0) return
 
     let stopped = false
-    let drawing = false
     /*
      * The *preview* size, not the sequence's.
      *
@@ -601,8 +621,12 @@ export function ViewerPanel() {
     const { width, height } = pixels
 
     const draw = async () => {
-      if (stopped || drawing) return
-      drawing = true
+      if (stopped) return
+      if (drawingRef.current) {
+        drawAgainRef.current = true
+        return
+      }
+      drawingRef.current = true
       try {
         const now = getTime()
         const frames = await Promise.all(
@@ -692,9 +716,14 @@ export function ViewerPanel() {
         if (front) canvas.dataset.frameTime = ((front.timestamp ?? 0) / 1e6).toFixed(3)
         canvas.dataset.layers = String(drawn)
       } finally {
-        drawing = false
+        drawingRef.current = false
+        if (drawAgainRef.current) {
+          drawAgainRef.current = false
+          latestDrawRef.current()
+        }
       }
     }
+    latestDrawRef.current = () => void draw()
 
     void draw()
     const unsubscribe = subscribePlayback(() => void draw())

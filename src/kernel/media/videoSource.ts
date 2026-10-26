@@ -215,6 +215,17 @@ export class VideoSource {
   private refused = new Set<number>()
 
   /**
+   * Aborts the reads when this source closes.
+   *
+   * A span can be several megabytes off a spinning drive, and a source that
+   * has been closed is one nobody will ever look at again — the clip under the
+   * playhead has changed. Letting its read run to completion holds the
+   * connection that the *new* clip's first frame is queueing behind, which is
+   * most of what a cut costs.
+   */
+  private readonly reads = new AbortController()
+
+  /**
    * The furthest sample this run has decoded and then thrown away.
    *
    * The one fact that separates "this frame is still coming" from "this frame
@@ -326,6 +337,15 @@ export class VideoSource {
 
   close(): void {
     this.closed = true
+    /*
+     * Everything waiting on this source is told now rather than discovering it
+     * up to a wait-cycle later. Callers check `closed` the moment they wake,
+     * so this turns an abandoned frame request into an immediate null — and
+     * those were costing most of a second each at every cut, because the
+     * caller was parked inside an await on a read that nobody needed any more.
+     */
+    this.reads.abort()
+    this.wake()
     this.discardBuffer()
     this.decoder?.close()
     this.decoder = null
@@ -543,7 +563,10 @@ export class VideoSource {
 
   private async readRange(start: number, end: number): Promise<Uint8Array | null> {
     try {
-      const res = await fetch(this.url, { headers: { Range: `bytes=${start}-${end}` } })
+      const res = await fetch(this.url, {
+        headers: { Range: `bytes=${start}-${end}` },
+        signal: this.reads.signal,
+      })
       if (!res.ok && res.status !== 206) return null
       return new Uint8Array(await res.arrayBuffer())
     } catch {

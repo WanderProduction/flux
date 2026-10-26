@@ -2103,6 +2103,28 @@ The crop happens in the picture's **displayed** orientation, so its edges are th
 whatever way the file was coded. Taking a source rectangle instead would need the crop mapped back
 through the file's rotation, and a left crop on a sideways clip would come off the top.
 
+#### A closed source stops working
+
+A cut closes one source and opens another, and the old one was left running: a frame request still
+awaiting it sat there, and the several-megabyte read it was waiting on ran to completion holding
+the connection the *new* clip's first frame was queueing behind. Timed across three cuts, that was
+842ms, 857ms and 2400ms of waiting for frames nobody would ever use.
+
+Closing now aborts its reads and wakes everything waiting on it, so an abandoned request becomes an
+immediate null. The same three cuts: 260ms, 342ms, 809ms.
+
+#### One draw at a time, across effects
+
+Changing the preview resolution replaces the draw effect while its draw is still awaiting a frame,
+and a per-effect flag let the replacement start a *second* draw asking the same source for the same
+timestamp. Two callers then share one decoder's `wantTime`, its feed and its restarts — measured as
+two simultaneous 1.9-second waits for one frame, at every cut.
+
+> **This was tried once before and discarded**, because removing the race did not change how often
+> the preview froze on play. That was true and it was the wrong conclusion to draw: the race was
+> never the freeze, and once the freeze and the abandoned reads were dealt with it was plainly
+> visible underneath them.
+
 #### The rescue waits for silence, not slowness
 
 A frame that was submitted and never comes out is a real condition — it is what froze the preview
