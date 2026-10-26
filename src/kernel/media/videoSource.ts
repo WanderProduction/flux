@@ -1081,6 +1081,26 @@ export class VideoSource {
     if (this.buildingRun) return
 
     const run = (async () => {
+      /*
+       * The decoder run this build belongs to.
+       *
+       * A build walks a whole stretch of frames through `frameFor`, and that
+       * takes a few hundred milliseconds. If the playhead leaves in the middle
+       * — a seek, or simply stopping somewhere else — carrying on decodes
+       * frames nobody is going to look at *and* leaves the buffer sitting
+       * where the build was rather than where the playhead now is.
+       *
+       * Measured: after playing backwards and seeking away, the buffer still
+       * held the frames the build had reached, 1.6 seconds later and a hundred
+       * and fifty frames from the playhead. The next press of play then missed
+       * every frame it asked for and took half a second to catch up, which had
+       * been read as "starting playback is slow" for some time.
+       *
+       * `generation` already counts decoder runs and already changes when the
+       * playhead goes somewhere this one cannot reach, so it is the thing to
+       * watch rather than a new flag.
+       */
+      const mine = this.generation
       const from = keyframeAt(this.track, this.track.pts[at])
       let to = from
       while (to + 1 < this.track.count && !this.track.key[to + 1]) to += 1
@@ -1092,6 +1112,8 @@ export class VideoSource {
       )
       for (let i = from; i <= to; i++) {
         if (this.closed) break
+        // Somewhere else now; this run is nobody's business any more.
+        if (this.generation !== mine) break
         // Walking forwards, which is the direction the decoder is good at.
         const frame = await this.frameFor(this.track.pts[i])
         if (!frame) continue
@@ -1106,7 +1128,13 @@ export class VideoSource {
         }).catch(() => null)
         if (picture) pictures.set(i, picture)
       }
-      if (pictures.size === 0) return
+      // Nothing worth keeping, or abandoned part way: a half-built run would
+      // answer for frames it does not hold and send every one of them to the
+      // slow path.
+      if (pictures.size === 0 || this.generation !== mine) {
+        for (const one of pictures.values()) one.close()
+        return
+      }
 
       stats.runsBuilt += 1
       this.runs.push({ from, to, width, pictures })
