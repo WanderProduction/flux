@@ -56,6 +56,35 @@ const LOOKAHEAD_FRAMES = 8
  */
 const MAX_FEED_AHEAD = LOOKAHEAD_FRAMES * 4
 
+/**
+ * Where the time goes, for the harness that asks.
+ *
+ * Counters rather than logging: the question "why is playback at a third of
+ * realtime" has several plausible answers that look identical from outside —
+ * reading, decoding, or waiting on a batch — and guessing between them cost
+ * most of an afternoon before these existed.
+ */
+const stats = {
+  hits: 0,
+  misses: 0,
+  feeds: 0,
+  fetches: 0,
+  fetchBytes: 0,
+  fetchMs: 0,
+  submitted: 0,
+  decoded: 0,
+  waitMs: 0,
+}
+export type SourceStats = typeof stats
+
+export function sourceStats(): SourceStats {
+  return { ...stats }
+}
+
+export function resetSourceStats(): void {
+  for (const key of Object.keys(stats) as (keyof SourceStats)[]) stats[key] = 0
+}
+
 /** Never ask for more than this in one range request. */
 const MAX_FETCH_BYTES = 8 << 20
 
@@ -155,6 +184,49 @@ export class VideoSource {
   private refused = new Set<number>()
 
   /**
+   * The furthest sample this run has decoded and then thrown away.
+   *
+   * The one fact that separates "this frame is still coming" from "this frame
+   * has been and gone". Frames are dropped in presentation order as the
+   * playhead passes them, so anything at or below this was decoded and is now
+   * unrecoverable — only a restart will produce it. Anything above it may be
+   * submitted and still inside the decoder, and waiting is exactly right.
+   *
+   * Counted at the drop rather than at the *output*, which was tried first and
+   * is wrong wherever there are B-frames: decode order is not presentation
+   * order, so the furthest frame emitted runs ahead of frames still to come,
+   * and treating those as gone restarts the decoder for nothing. One clip in
+   * the test set went from 51fps to 19 that way — same codec, same size, more
+   * B-frames.
+   *
+   * Getting this wrong in either direction is expensive and the two costs look
+   * nothing alike: too eager and the decoder restarts on almost every frame
+   * (the whole file read eight times over to play it once); too reluctant and
+   * a frame that can never arrive is waited on for five seconds.
+   */
+  private dropped = -1
+
+  /**
+   * The sample this decoder run began at.
+   *
+   * The other half of "can this frame still arrive". Submitting only ever
+   * moves forward, so anything before where the run started was never handed
+   * to this decoder and never will be: seeking backwards past it has to begin
+   * again, however little has been thrown away since.
+   */
+  private runFrom = 0
+
+  /**
+   * This source's own share of the counters.
+   *
+   * The module-wide ones answer "what is this app doing", which is what makes
+   * them useful while chasing a stall — and useless to a check, because the
+   * Viewer is holding a source of its own and feeding it. A harness needs the
+   * numbers for the source it opened.
+   */
+  readonly counts = { submitted: 0, decoded: 0, fetches: 0 }
+
+  /**
    * Every source currently open, newest last.
    *
    * Here for one reason: the verification harnesses have to be able to reach
@@ -239,6 +311,8 @@ export class VideoSource {
 
     const decoder = new VideoDecoder({
       output: (frame) => {
+        stats.decoded += 1
+        this.counts.decoded += 1
         if (this.closed) {
           frame.close()
           return
@@ -298,7 +372,9 @@ export class VideoSource {
     const at = keyframeAt(this.track, time)
     // Straight past the ones already known to be no good, rather than
     // rediscovering them a fetch at a time on every seek.
+    this.dropped = -1
     this.next = this.refused.has(at) ? this.startBefore(at) : at
+    this.runFrom = this.next
   }
 
   /**
@@ -317,6 +393,7 @@ export class VideoSource {
    * frames — fail outright with "a key frame is required after flush()".
    */
   private async feed(time: number, ahead: number = LOOKAHEAD_FRAMES): Promise<void> {
+    stats.feeds += 1
     const track = this.track
     const mine = this.generation
     const wanted = Math.min(sampleAt(track, time) + ahead, track.count - 1)
@@ -339,7 +416,12 @@ export class VideoSource {
 
       const start = track.offset[from]
       const span = track.offset[to] + track.bytes[to] - start
+      const readAt = performance.now()
       const bytes = await this.readRange(start, start + span - 1)
+      stats.fetches += 1
+      this.counts.fetches += 1
+      stats.fetchMs += performance.now() - readAt
+      stats.fetchBytes += bytes ? bytes.length : 0
       // The await is where a seek gets in. Everything below is about a decoder
       // that may since have been replaced.
       if (!bytes || this.closed || this.failed || this.generation !== mine) return
@@ -362,6 +444,7 @@ export class VideoSource {
        */
       if ((!this.decoder || this.decoder.state === 'closed') && !track.key[from]) {
         this.next = keyframeAt(track, track.pts[from])
+        this.runFrom = this.next
         continue
       }
 
@@ -380,6 +463,8 @@ export class VideoSource {
               data: bytes.subarray(at, at + track.bytes[i]),
             }),
           )
+          stats.submitted += 1
+          this.counts.submitted += 1
           submitted += 1
         }
       } catch {
@@ -449,7 +534,13 @@ export class VideoSource {
     let drop = 0
     while (drop < this.buffer.length && (this.buffer[drop].timestamp ?? 0) < keepFrom) drop += 1
     if (drop === 0) return
-    for (let i = 0; i < drop; i++) this.buffer[i].close()
+    for (let i = 0; i < drop; i++) {
+      this.dropped = Math.max(
+        this.dropped,
+        sampleAt(this.track, (this.buffer[i].timestamp ?? 0) / 1e6),
+      )
+      this.buffer[i].close()
+    }
     this.buffer = this.buffer.slice(drop)
   }
 
@@ -481,6 +572,7 @@ export class VideoSource {
     this.wantTime = time
     const held = this.pick(time)
     if (held) {
+      stats.hits += 1
       this.repairs = 0
       this.trim()
       // Top up in the background so playing forward never waits on a decode.
@@ -497,6 +589,7 @@ export class VideoSource {
      * jumped somewhere else entirely — and only the second needs the decoder
      * torn down and restarted from a keyframe.
      */
+    stats.misses += 1
     const wanted = sampleAt(this.track, time)
     /*
      * Keep going only if the frame wanted is *near* where the decoder already
@@ -508,10 +601,51 @@ export class VideoSource {
      * frames decoded and thrown away to show one, when the keyframe two seconds
      * before it would have cost fifty.
      */
+    /*
+     * Being *ahead* is not a reason to start again — and reading it as one is
+     * what made playback a slideshow.
+     *
+     * The old test asked whether the wanted sample was within a lookahead of
+     * `next` in either direction. But `next` is where submitting has reached,
+     * and the whole point of submitting ahead is that it outruns the playhead:
+     * the moment it did, every frame fell outside the window, tore the decoder
+     * down and started again from the keyframe before. Ninety frames of a
+     * clip cost 229 range reads, 920MB — eight times the size of the file —
+     * and 849 decoded frames to deliver 90. Raising the lookahead made it
+     * worse, which is why it looked like the lookahead was not the problem.
+     *
+     * What genuinely needs a restart is the playhead moving *behind* what this
+     * decoder run still holds, because frames already handed back cannot be
+     * fetched out of a decoder again. So the near bound is the oldest frame in
+     * hand rather than the furthest chunk submitted.
+     */
+    /*
+     * Can this frame still arrive? Three ways it cannot, and they are
+     * different failures that look identical from here — a frame that never
+     * comes.
+     *
+     *   before the run began  — never submitted to this decoder, never will be
+     *   at or below the drops — decoded once and thrown away as the playhead passed
+     *   far beyond what is submitted — a jump, cheaper from a keyframe than chased
+     *
+     * Anything else is either in the decoder already or a few chunks ahead of
+     * it, and waiting is right.
+     */
+    const reachable = wanted >= this.runFrom && wanted > this.dropped
+    /*
+     * A decoder that is gone starts again at a keyframe, whatever the arithmetic
+     * says. WebCodecs closes a decoder on an internal error, and the samples it
+     * had reached are mid-GOP by definition — carrying on from there hands a
+     * fresh decoder a delta frame, which it refuses. The old bound happened to
+     * cover this by being narrow enough to fail; now that being ahead is
+     * allowed, the invariant has to be stated rather than fallen into.
+     */
+    const decoderGone = !this.decoder || this.decoder.state === 'closed'
     const runningInto =
+      !decoderGone &&
+      reachable &&
       this.next >= 0 &&
-      wanted >= this.next - LOOKAHEAD_FRAMES &&
-      wanted <= this.next + LOOKAHEAD_FRAMES
+      wanted <= this.next + MAX_FEED_AHEAD
     if (!runningInto) this.restartAt(time)
 
     if (this.feeding) await this.feeding
@@ -557,8 +691,10 @@ export class VideoSource {
       }
       if (performance.now() > deadline) break
 
+      const waitAt = performance.now()
       const arrived = new Promise<void>((resolve) => this.waiters.push(resolve))
       await Promise.race([arrived, new Promise((r) => setTimeout(r, 60))])
+      stats.waitMs += performance.now() - waitAt
 
       // Still nothing, and there is more of the file to offer: widen and
       // submit again rather than waiting on a decoder that is waiting on us.
