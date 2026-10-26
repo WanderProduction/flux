@@ -58,6 +58,42 @@ async function fromDisk(filePath: string): Promise<string | undefined> {
 }
 
 /**
+ * Stores in flight, so anything that needs the write to have landed can wait.
+ *
+ * The app never waits: a thumbnail is on screen the moment it is decoded, and
+ * making the card wait for a disk write would be paying for the cache twice.
+ * That leaves a window in which the thumbnail exists and is not yet on disk,
+ * and the only way to ask about it was to poll and hope — which lost the race
+ * whenever the machine was busy, including whenever FLUX itself was indexing
+ * in the background.
+ */
+const storing = new Map<string, Promise<void>>()
+
+/**
+ * Forgets in flight, so a store cannot land before the delete it follows.
+ *
+ * `invalidateThumbnail` does not wait for the disk entry to go — nothing
+ * calling it wants to. But the next thumbnail for that file is written while
+ * that delete may still be on its way, and a delete that lands second removes
+ * the entry that was just written. From outside it looks exactly like a write
+ * that never happened, which is how it was read for some time.
+ */
+const forgetting = new Map<string, Promise<unknown>>()
+
+/** How the last store went, for the harnesses. See toDisk. */
+let lastStore: { path: string; ok: boolean; reason?: string } | null = null
+
+/** How the last store went, or null if none has been attempted. */
+export function lastThumbnailStore(): { path: string; ok: boolean; reason?: string } | null {
+  return lastStore
+}
+
+/** Resolves once any store in flight for this file has settled. */
+export async function thumbnailSettled(filePath: string): Promise<void> {
+  await storing.get(filePath)?.catch(() => {})
+}
+
+/**
  * Writes one down. Failures are deliberately **not** written.
  *
  * A file that could not be decoded this time may be a file on a drive that was
@@ -69,11 +105,26 @@ async function toDisk(filePath: string, thumbnail: string): Promise<void> {
   const bridge = mediaBridge()
   if (!bridge) return
   try {
+    // After any delete already on its way, or it removes what this writes.
+    await forgetting.get(filePath)
     const token = await bridge.sourceToken(filePath)
-    if (!token) return
-    await bridge.write(filePath, ENTRY_NAME, token, new TextEncoder().encode(thumbnail))
-  } catch {
-    // A cache that cannot be written is a slower app, not a broken one.
+    if (!token) {
+      lastStore = { path: filePath, ok: false, reason: 'no-token' }
+      return
+    }
+    const written = await bridge.write(
+      filePath,
+      ENTRY_NAME,
+      token,
+      new TextEncoder().encode(thumbnail),
+    )
+    lastStore = { path: filePath, ok: !!written?.ok, reason: written?.reason }
+  } catch (err) {
+    // A cache that cannot be written is a slower app, not a broken one — but
+    // it should still be possible to find out why, which was not true before:
+    // every reason a store can fail was swallowed here, so a suite could only
+    // report that nothing arrived.
+    lastStore = { path: filePath, ok: false, reason: String(err) }
   }
 }
 import { workEnded, workQueued, workStarted } from './mediaWork'
@@ -278,7 +329,15 @@ function begin(filePath: string, kind: MediaKind, url: string): Promise<string |
       }
       const thumbnail = kind === 'video' ? await videoThumbnail(url) : await imageThumbnail(url)
       cache.set(filePath, thumbnail)
-      void toDisk(filePath, thumbnail)
+      /*
+       * Still not awaited — see toDisk — but recorded, so a caller that
+       * genuinely needs it on disk can wait for exactly this write instead of
+       * polling for it to appear.
+       */
+      const stored = toDisk(filePath, thumbnail).finally(() => {
+        if (storing.get(filePath) === stored) storing.delete(filePath)
+      })
+      storing.set(filePath, stored)
       workEnded('thumbnail', filePath, 'done')
       return thumbnail
     } catch (err) {
@@ -315,5 +374,34 @@ function pump(): void {
  */
 export function invalidateThumbnail(filePath: string) {
   cache.delete(filePath)
-  void mediaBridge()?.forget(filePath, ENTRY_NAME)
+  /*
+   * Work already under way is let go of too, and this is the whole point.
+   *
+   * Without it, invalidating is not invalidating: a request that started
+   * before the call is still in `inflight`, the next caller is handed *its*
+   * result, and that result was decoded earlier and will never be stored —
+   * because the store happens where a thumbnail is made, and this one is not
+   * being made, it is being reused. So the caller gets a picture, the disk
+   * entry that was just forgotten stays forgotten, and nothing anywhere says
+   * so.
+   *
+   * Measured at one time in twenty asking for it in a tight loop, and about
+   * half the time in a suite where other thumbnails are in flight — which is
+   * exactly the shape of a flake that gets widened and widened and never
+   * fixed.
+   *
+   * Dropping the entry does not cancel the decode: whatever is running will
+   * finish and store itself as usual. It only stops it answering for a
+   * question asked after the invalidate.
+   */
+  inflight.delete(filePath)
+  waiting.delete(filePath)
+  // Recorded rather than merely started, so the next store waits for it. See
+  // `forgetting`.
+  const gone = (mediaBridge()?.forget(filePath, ENTRY_NAME) ?? Promise.resolve())
+    .catch(() => {})
+    .finally(() => {
+      if (forgetting.get(filePath) === gone) forgetting.delete(filePath)
+    })
+  forgetting.set(filePath, gone)
 }

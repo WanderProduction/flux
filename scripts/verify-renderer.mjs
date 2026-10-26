@@ -1141,11 +1141,12 @@ try {
         * wait for a disk write would be paying for the cache twice.
         */
        const token = await window.flux.media.sourceToken(path);
-       let bytes = null;
-       for (let i = 0; i < 60 && !bytes; i++) {
-         bytes = await window.flux.media.read(path, 'thumb', token);
-         if (!bytes) await new Promise(r => setTimeout(r, 100));
-       }
+       // Waits for *this* write rather than polling for it to show up. The
+       // poll was a guess at how long a disk write takes and lost the race
+       // whenever the machine was busy — including whenever FLUX itself was
+       // indexing in the background, which it now does.
+       await thumbnails.thumbnailSettled(path);
+       const bytes = await window.flux.media.read(path, 'thumb', token);
        return {
          made: typeof made === 'string' && made.startsWith('data:image/'),
          stored: bytes ? bytes.length : 0,

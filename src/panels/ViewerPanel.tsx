@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { commands } from '../kernel/commands'
 import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
-import { VideoSource } from '../kernel/media/videoSource'
+import { VideoSource, type Shown } from '../kernel/media/videoSource'
 import { audioInfoFor, type AudioInfo } from '../kernel/media/peaks'
 import {
   formatTimecode,
@@ -11,6 +11,7 @@ import {
   getTime,
   goToEnd,
   goToStart,
+  getRate,
   isPlaying,
   pause,
   play,
@@ -188,7 +189,12 @@ export function clipAt(sequence: SequenceState, time: number): Clip | null {
  */
 function drawClip(
   context: CanvasRenderingContext2D,
-  frame: VideoFrame,
+  /*
+   * A decoded frame, or a small copy of one made for playing backwards. They
+   * draw identically and differ only in where their size is written down,
+   * which is why kernel/media hands both back wrapped the same way.
+   */
+  frame: Shown,
   width: number,
   height: number,
   rotation: number,
@@ -201,8 +207,8 @@ function drawClip(
   // The picture's shape once the file's own rotation has been honoured.
   const quarter = rotation === 90 || rotation === 270
   const shown = quarter
-    ? { width: frame.displayHeight, height: frame.displayWidth }
-    : { width: frame.displayWidth, height: frame.displayHeight }
+    ? { width: frame.height, height: frame.width }
+    : { width: frame.width, height: frame.height }
   if (!(shown.width > 0) || !(shown.height > 0)) return
 
   const rect = cropRect(t.crop, shown)
@@ -253,7 +259,7 @@ function drawClip(
   // picture that is upright and squashed, which reads as a bad aspect ratio.
   const drawWidth = quarter ? fullHeight : fullWidth
   const drawHeight = quarter ? fullWidth : fullHeight
-  context.drawImage(frame, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
+  context.drawImage(frame.picture, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
   context.restore()
 }
 
@@ -668,7 +674,17 @@ export function ViewerPanel() {
             // Sequence time to source time: how far into the clip the
             // playhead is, at the rate the clip runs, from where it was cut.
             return source
-              ? source.frameFor(layer.offset + (now - layer.start) * layer.speed)
+              ? source.shownFor(layer.offset + (now - layer.start) * layer.speed, {
+                  /*
+                   * Which way the playhead is going decides how the picture is
+                   * got, not merely which frame. Backwards, the source serves
+                   * from a run it decoded forwards and shrunk; see shownFor.
+                   */
+                  backwards: getRate() < 0,
+                  // The size it will actually be drawn at, so the copies kept
+                  // for playing backwards are neither soft nor wasteful.
+                  width: pixels.width,
+                })
               : Promise.resolve(null)
           }),
         )
@@ -733,7 +749,7 @@ export function ViewerPanel() {
         context.fillRect(0, 0, width, height)
 
         let drawn = 0
-        let front: VideoFrame | null = null
+        let front: Shown | null = null
         for (const [index, frame] of frames.entries()) {
           if (!frame) continue
           // Per layer, because a stack can mix a vertical phone clip with a
@@ -746,7 +762,7 @@ export function ViewerPanel() {
 
         // What is *actually* on screen, for anything that needs to check. The
         // front layer's moment, since that is the one being looked at.
-        if (front) canvas.dataset.frameTime = ((front.timestamp ?? 0) / 1e6).toFixed(3)
+        if (front) canvas.dataset.frameTime = (front.timestamp / 1e6).toFixed(3)
         canvas.dataset.layers = String(drawn)
       } finally {
         drawingRef.current = false
