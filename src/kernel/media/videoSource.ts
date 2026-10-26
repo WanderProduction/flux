@@ -75,6 +75,18 @@ const stats = {
   decoded: 0,
   waitMs: 0,
   rescues: 0,
+  /**
+   * The worst single span read, and how many were bad.
+   *
+   * `fetchMs` is a sum over reads that overlap each other and the decode, so it
+   * runs to most of a window even while playback is perfect and says nothing
+   * about any one read. The picture stalls on a *single* slow one: the rescue
+   * below cannot fire while a read is in flight, by design, so one read that
+   * takes seconds holds the frame for exactly that long. These two say whether
+   * that is happening.
+   */
+  fetchWorstMs: 0,
+  slowFetches: 0,
 }
 export type SourceStats = typeof stats
 
@@ -493,8 +505,13 @@ export class VideoSource {
       const bytes = await this.readRange(start, start + span - 1)
       stats.fetches += 1
       this.counts.fetches += 1
-      stats.fetchMs += performance.now() - readAt
+      const took = performance.now() - readAt
+      stats.fetchMs += took
       stats.fetchBytes += bytes ? bytes.length : 0
+      if (took > stats.fetchWorstMs) stats.fetchWorstMs = took
+      // A span is a few megabytes off a drive that reads at 345 MB/s, so a
+      // fifth of a second is already an order of magnitude out.
+      if (took > 200) stats.slowFetches += 1
       // The await is where a seek gets in. Everything below is about a decoder
       // that may since have been replaced.
       if (!bytes || this.closed || this.failed || this.generation !== mine) return

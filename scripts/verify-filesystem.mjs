@@ -261,6 +261,28 @@ try {
     assert.equal(res.headers.get('Content-Range'), 'bytes 9990-9999/' + body.length)
   })
 
+  await check('a span too big to buffer is still served byte for byte', async () => {
+    // Spans a decoder asks for are read in one go; anything larger is streamed,
+    // because buffering it is how a 4GB take costs 4GB of memory. Two paths
+    // through one function, so the boundary gets a check of its own — a wrong
+    // answer on this side would only show up on long files.
+    const big = path.join(root, 'long.mp4')
+    const size = (16 << 20) + 4096
+    const pattern = Buffer.alloc(size)
+    for (let i = 0; i < size; i++) pattern[i] = i % 251
+    await fs.writeFile(big, pattern)
+    try {
+      const res = await serveFile(new Request('http://asset/', { headers: { Range: 'bytes=0-' } }), big)
+      assert.equal(res.status, 206)
+      assert.equal(res.headers.get('Content-Length'), String(size))
+      const got = Buffer.from(await res.arrayBuffer())
+      assert.equal(got.length, size, 'the whole span arrived')
+      assert.ok(got.equals(pattern), 'and every byte of it is the right one')
+    } finally {
+      await fs.rm(big, { force: true })
+    }
+  })
+
   await check('a range header FLUX does not speak is ignored, not guessed at', async () => {
     // Multipart ranges are legal HTTP that no media element asks for. The whole
     // file as a 200 is honest; inventing one part of it is a silent wrong answer.

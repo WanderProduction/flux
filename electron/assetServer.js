@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 
 import { contentTypeOf } from '../shared/mediaTypes.js'
@@ -31,6 +31,29 @@ import { contentTypeOf } from '../shared/mediaTypes.js'
 
 /** Read in chunks rather than whole; the file may be enormous. */
 const CHUNK = 1 << 16
+
+/**
+ * The largest range answered in one read instead of a stream.
+ *
+ * Streaming is right for a whole file and wrong for a span, and the difference
+ * was costing most of the preview's frame rate. The decoder asks for one GOP
+ * at a time — a few megabytes, bounded — and a stream hands that back in 64KB
+ * pieces, so an eight megabyte span crossed the process boundary 128 times.
+ * Each crossing is a turn of the main process's event loop, and the main
+ * process is also importing, scanning and rendering: the per-chunk scheduling
+ * is multiplied by a hundred and twenty-eight.
+ *
+ * Measured during playback of 4K footage, spans that read in 15ms from an idle
+ * app were taking 300-730ms, and the share of reads over 200ms tracked the
+ * frame rate almost exactly — 71% slow gave 5 fps, 4% slow gave 29. The frames
+ * were never the problem; waiting for bytes that had already left the drive
+ * was.
+ *
+ * Above this the stream still wins: a span this big is not a decoder asking
+ * for a GOP, it is the media element asking for the file, and buffering that
+ * is how a 4GB take costs 4GB of memory.
+ */
+const WHOLE_READ = 16 << 20
 
 /**
  * Parses one byte range against a known size.
@@ -73,6 +96,35 @@ function streamOf(filePath, start, end) {
   return Readable.toWeb(
     fs.createReadStream(filePath, { start, end, highWaterMark: CHUNK }),
   )
+}
+
+/**
+ * Reads one bounded span, in as few reads as the file will allow.
+ *
+ * Loops because a short read is legal and says nothing about the end of the
+ * file; returns however much it got, so the caller can answer honestly about
+ * a span that ran past the end rather than claiming bytes it does not have.
+ *
+ * @param {string} filePath
+ * @param {number} start
+ * @param {number} end inclusive
+ * @returns {Promise<Buffer>}
+ */
+async function readSpan(filePath, start, end) {
+  const length = end - start + 1
+  const buffer = Buffer.allocUnsafe(length)
+  const handle = await open(filePath, 'r')
+  try {
+    let got = 0
+    while (got < length) {
+      const { bytesRead } = await handle.read(buffer, got, length - got, start + got)
+      if (bytesRead === 0) break
+      got += bytesRead
+    }
+    return got === length ? buffer : buffer.subarray(0, got)
+  } finally {
+    await handle.close()
+  }
 }
 
 /**
@@ -125,6 +177,28 @@ export async function serveFile(request, filePath) {
   }
 
   const { start, end } = range
+
+  // One read for a span a decoder could have asked for. See WHOLE_READ.
+  if (wantsBody && end - start + 1 <= WHOLE_READ) {
+    const body = await readSpan(filePath, start, end).catch(() => null)
+    if (body) {
+      return new Response(body, {
+        status: 206,
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(body.length),
+          // What was actually read, which is the same as what was asked for
+          // unless the file ended inside the span.
+          'Content-Range': `bytes ${start}-${start + Math.max(0, body.length - 1)}/${size}`,
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-store',
+        },
+      })
+    }
+    // A file that cannot be opened for a span can still be streamed: fall
+    // through rather than turning a readable file into a failed request.
+  }
+
   return new Response(wantsBody ? streamOf(filePath, start, end) : null, {
     status: 206,
     headers: {
