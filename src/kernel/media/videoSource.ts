@@ -160,6 +160,61 @@ export function setFramesAhead(frames: number): void {
   streamAhead = Math.max(2, Math.min(240, Math.round(frames)))
 }
 
+/**
+ * The shuttle rates at which only keyframes are shown.
+ *
+ * Above 1x the decoder is asked for a rate of frames it cannot reach: showing
+ * every frame at Nx wants thirty N of them a second. A keyframe needs nothing
+ * before it, so serving only keyframes costs one decode per picture at any
+ * rate, and the pictures come one GOP apart — one a second of source on this
+ * footage, so the faster the shuttle the *more* of them arrive, which is the
+ * right way round for scrubbing.
+ *
+ * Where the lines sit was swept rather than reasoned about, and the answer was
+ * not the obvious one. Three seconds a pass, three rounds, every threshold
+ * measured in the same app as the unchanged behaviour (median gap / worst gap
+ * / frames drawn):
+ *
+ *      2x    14ms /  44ms / 177   ->  574ms / 881ms /   6
+ *      4x    13ms / 643ms / 102   ->  259ms / 698ms /   9
+ *      8x    67ms / 412ms /  33   ->  120ms / 575ms /  16
+ *     16x   185ms / 529ms /  13   ->  123ms / 342ms /  21
+ *     -4x   125ms / 759ms /  15   ->  243ms / 319ms /  12
+ *     -8x   320ms / 751ms /   6   ->  136ms / 354ms /  21
+ *    -16x   230ms / 570ms /  11   ->  119ms / 440ms /  21
+ *
+ * So it only pays where decoding everything has actually run out of headroom,
+ * and that is further up the ladder than it looks. At 2x and 4x the decoder
+ * keeps up — a median gap of 13ms is every frame arriving on time — and
+ * serving keyframes there throws away a hundred good frames to fix a stall it
+ * does not fix. Those stalls are a different fault and want their own
+ * measurement.
+ *
+ * The lines are not symmetric because the costs are not. Going backwards a
+ * frame is served out of a run of a whole GOP decoded forwards and shrunk, and
+ * that run has to finish before any of it can be shown, so backwards runs out
+ * of headroom a rung earlier: 8x back against 16x forward. At -8x the
+ * unchanged code drew six frames in three seconds.
+ */
+let coarseForward = 16
+let coarseBackward = 8
+
+/** Whether this rate is served keyframes only. See coarseForward. */
+export function showKeyframesOnly(rate: number): boolean {
+  return rate < 0 ? rate <= -coarseBackward : rate >= coarseForward
+}
+
+/** The lines themselves, for the harness that checks them. */
+export function keyframeLines(): { forward: number; backward: number } {
+  return { forward: coarseForward, backward: coarseBackward }
+}
+
+/** For the harness that sweeps where the lines belong. */
+export function setKeyframeLines(forward: number, backward: number): void {
+  coarseForward = Math.max(1, Math.abs(forward))
+  coarseBackward = Math.max(1, Math.abs(backward))
+}
+
 /** Never ask for more than this in one range request. */
 const MAX_FETCH_BYTES = 8 << 20
 
@@ -1022,8 +1077,29 @@ export class VideoSource {
    */
   async shownFor(
     time: number,
-    options: { backwards?: boolean; width?: number } = {},
+    options: { backwards?: boolean; width?: number; coarse?: boolean } = {},
   ): Promise<Shown | null> {
+    /*
+     * Shuttling fast: the keyframe at or before the moment wanted, and nothing
+     * else. See coarseFrom for why, and why not below 4x.
+     *
+     * This is ahead of the backwards path deliberately. A run exists to make
+     * reading thirty consecutive frames backwards cheap, and a shuttle reads
+     * one frame per GOP — so a run would decode thirty to serve one of them,
+     * which is the behaviour being replaced rather than a way to serve it.
+     */
+    if (options.coarse) {
+      const want = keyframeAt(this.track, time)
+      const frame = await this.frameFor(this.track.pts[want])
+      if (!frame) return null
+      return {
+        picture: frame,
+        width: frame.displayWidth,
+        height: frame.displayHeight,
+        timestamp: frame.timestamp ?? 0,
+      }
+    }
+
     if (!options.backwards) {
       const frame = await this.frameFor(time)
       if (!frame) return null
