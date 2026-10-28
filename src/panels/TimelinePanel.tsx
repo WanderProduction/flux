@@ -325,9 +325,29 @@ export function TimelinePanel() {
   useEffect(() => subscribeSelection(() => setSelectedLocal(getSelection())), [])
   const setSelected = setSelection
   const [preview, setPreview] = useState<DropPreview | null>(null)
-  const [time, setTime] = useState(getTime)
   const [playing, setPlaying] = useState(isPlaying)
   const [rate, setRate] = useState(getRate)
+  /**
+   * The playhead is written to the DOM, not held in React state.
+   *
+   * It used to be `useState(getTime)` with `setTime` called from the playback
+   * subscription, which re-rendered this whole panel — and every `ClipBlock`
+   * in it — thirty times a second. Profiled at 1x: React was 19% of the main
+   * thread with nine clips, and the cost is linear in clip count, 394ms per
+   * three seconds at one clip against 835ms at sixty. Extrapolated to the
+   * five hundred assets a project here is expected to hold, re-rendering
+   * wanted more time than the clock had, which would have stopped playback
+   * dead. For comparison, decoding the video is 0.5% of the same thread.
+   *
+   * Nothing on screen needed the re-render. The playhead is two absolutely
+   * positioned elements, so a tick moves two `left` values and touches
+   * nothing else; the timecode readout subscribes on its own behalf (see
+   * `Timecode`); and snapping reads the playhead when a drag asks for it.
+   */
+  const playheadRef = useRef<HTMLDivElement | null>(null)
+  const gripRef = useRef<HTMLSpanElement | null>(null)
+  /** Read inside `placePlayhead`, so a zoom change does not rebuild it. */
+  const zoomForPlayhead = useRef(1)
   const [drag, setDrag] = useState<ClipDrag | null>(null)
   const [trim, setTrim] = useState<ClipTrim | null>(null)
   /**
@@ -440,15 +460,42 @@ export function TimelinePanel() {
     return { front, ids: front ? withLinked([front.id]) : [] }
   }, [])
 
+  /**
+   * Puts the playhead where the clock says, without re-rendering anything.
+   *
+   * Stable — it reads the zoom through a ref rather than closing over it — so
+   * the playback subscription below is set up once and never torn down.
+   *
+   * `setPlaying` and `setRate` stay as state because they genuinely change
+   * what is drawn (the live class, the shuttle readout) and they change when
+   * the transport does, not thirty times a second. React bails out of a
+   * re-render when the value it is given is the one it already has, so the
+   * two of them cost nothing on a tick that only moved the clock.
+   */
+  const placePlayhead = useCallback(() => {
+    const left = `${getTime() * zoomForPlayhead.current}px`
+    if (playheadRef.current) playheadRef.current.style.left = left
+    if (gripRef.current) gripRef.current.style.left = left
+  }, [])
+
   useEffect(
     () =>
       subscribePlayback(() => {
-        setTime(getTime())
+        placePlayhead()
         setPlaying(isPlaying())
         setRate(getRate())
       }),
-    [],
+    [placePlayhead],
   )
+
+  /*
+   * After every render, because a render can move the playhead without the
+   * clock moving: zooming changes pixels-per-second, and the elements are
+   * recreated on a layout change with no `left` of their own. Before paint,
+   * so the playhead is never briefly at zero.
+   */
+  zoomForPlayhead.current = zoom
+  useLayoutEffect(placePlayhead)
 
   /**
    * Pausing selects what the playhead landed on, when the mode is on.
@@ -639,14 +686,17 @@ export function TimelinePanel() {
    */
   const snapTargets = useCallback(
     (movingIds: Set<string>): number[] => {
-      const targets = [0, time]
+      // Asked for at the moment of the drag rather than captured at render:
+      // the playhead is no longer render state, and where it is *now* is what
+      // a snap should land on anyway.
+      const targets = [0, getTime()]
       for (const clip of sequence.clips) {
         if (movingIds.has(clip.id)) continue
         targets.push(clip.start, clip.start + clip.duration)
       }
       return targets
     },
-    [sequence, time],
+    [sequence],
   )
 
   /**
@@ -2307,9 +2357,10 @@ export function TimelinePanel() {
             {sequence.clips.length} clip{sequence.clips.length === 1 ? '' : 's'}
           </span>
           <span className="tool-sep" />
-          <span className="tool-value tool-value--mono tl-timecode">
-            {formatTimecode(time, sequence.settings.frameRate, sequence.settings.startTimecode)}
-          </span>
+          <Timecode
+            frameRate={sequence.settings.frameRate}
+            startTimecode={sequence.settings.startTimecode}
+          />
           {playing && rate !== 1 && (
             <span className="tool-value tool-value--shuttle" title="Shuttling — no sound">
               {rate > 0 ? `▶▶ ${rate}×` : `◀◀ ${Math.abs(rate)}×`}
@@ -2457,7 +2508,7 @@ export function TimelinePanel() {
               {/* The grip lives in the ruler, not on the playhead line: the
                   ruler stays put while the tracks scroll under it, and a grip
                   that slid away from its own ruler would read as broken. */}
-              <span className="tl-playhead-grip" style={{ left: time * zoom }} />
+              <span className="tl-playhead-grip" ref={gripRef} />
             </div>
 
             {marquee?.swept && (
@@ -2574,7 +2625,7 @@ export function TimelinePanel() {
             {/* One playhead over every lane, drawn last so nothing covers it. */}
             <div
               className={`tl-playhead${playing ? ' tl-playhead--live' : ''}`}
-              style={{ left: time * zoom }}
+              ref={playheadRef}
             >
               {/* The line itself stays inert so it never swallows a click meant
                   for the clip underneath it; only this narrow handle grabs. */}
@@ -2794,6 +2845,25 @@ function SequenceTabs({
  * side of it would leave nothing in the middle to press for a move.
  */
 const HANDLE_MIN_WIDTH = 22
+
+/**
+ * The timecode readout, which really does have to change thirty times a second.
+ *
+ * Its own component for that reason: it subscribes to the clock itself, so a
+ * tick re-renders this one span rather than the timeline panel around it. The
+ * whole panel used to re-render for the sake of these few characters, which
+ * cost more than everything the video pipeline does put together — see the
+ * note on `playheadRef`.
+ */
+function Timecode({ frameRate, startTimecode }: { frameRate: number; startTimecode: number }) {
+  const [time, setTime] = useState(getTime)
+  useEffect(() => subscribePlayback(() => setTime(getTime())), [])
+  return (
+    <span className="tool-value tool-value--mono tl-timecode">
+      {formatTimecode(time, frameRate, startTimecode)}
+    </span>
+  )
+}
 
 function ClipBlock({
   clip,
