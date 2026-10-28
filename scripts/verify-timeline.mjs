@@ -3990,7 +3990,7 @@ try {
    * clip laid down after it starts at the nearest one, and about half the time
    * that frame is *before* the previous clip's raw end.
    *
-   * At 24fps a 1.02s clip ends 24.48 frames in, so the next clip starts at
+   * At 24fps a 1.02s clip ends 24.48 frames in, so the next clip started at
    * frame 24 — two hundredths of a second inside it. A ripple that measured
    * the hole with the raw end then decided that clip was not after the hole,
    * left it standing, and slid everything beyond it back on top of it.
@@ -3998,6 +3998,11 @@ try {
    * Reported from the app as a clip block stuck over another one, with the
    * word "sometimes" doing the work of "it depends which way the last
    * part-frame rounds".
+   *
+   * Lengths are quantised at the door now, so asking for 1.02s gets a clip of
+   * 24 frames and the slop never arises. These keep it that way: the seed asks
+   * for lengths off the grid, and what follows checks that the timeline laid
+   * out from them abuts exactly and ripples without burying anything.
    */
   const seedOffGrid = `
     const { assets, sequence, view } = window.__fluxDev;
@@ -4026,7 +4031,7 @@ try {
     };
   `
 
-  await check('clips of an unround length still lie flush when one is rippled out', async () => {
+  await check('clips asked for in unround lengths lie flush when one is rippled out', async () => {
     const state = await evaluate(
       cdp,
       seedOffGrid +
@@ -4042,8 +4047,8 @@ try {
     )
     assert.deepEqual(
       state.laid,
-      ['V1@0+1.02', 'V1@1+2', 'V1@3+1.5'],
-      'setup: the second clip should start at frame 24, just inside the first',
+      ['V1@0+1', 'V1@1+2', 'V1@3+1.5'],
+      'setup: 1.02s should have become 24 frames, so the second clip abuts it',
     )
     assert.equal(state.overlaps, 0, 'no clip may be left sitting on top of another')
     assert.deepEqual(
@@ -4053,7 +4058,7 @@ try {
     )
   })
 
-  await check('an unround ripple closes the hole completely', async () => {
+  await check('the ripple closes its hole completely, leaving no frame behind', async () => {
     /*
      * Not just "no overlap" — no gap either. The hole was one second of frames
      * wide however the arithmetic is written, and what follows has to land on
@@ -4077,6 +4082,106 @@ try {
     assert.ok(
       Math.abs(state.gap) < 1 / 24 / 2 + 1e-9,
       `and the next should be flush against it, not ${state.gap}s away`,
+    )
+  })
+
+  await check('a clip is a whole number of frames however long its file is', async () => {
+    /*
+     * The root of the half-frame overlap rather than its symptom. A start was
+     * always quantised and a duration never was, so a clip's end fell between
+     * two frames and the clip laid down after it started at the nearest one —
+     * which is up to half a frame inside it.
+     *
+     * The batch importer found this first, from its own symptom: a hundred
+     * clips laid end to end gave a hundred single-frame overlaps, both clips
+     * under the playhead for one frame, and the compositor blended each into a
+     * cross-dissolve too brief to see. It quantised its own clips and moved on.
+     * Now every clip is quantised, so the snap that lays the next one down is
+     * an identity and one clip's end *is* the next one's start.
+     */
+    const state = await evaluate(
+      cdp,
+      seedOffGrid +
+        `const fps = sequence.getSequence().settings.frameRate;
+         const on = sequence.getSequence().clips.filter(c => c.trackId === 'V1')
+           .sort((p, q) => p.start - q.start);
+         return {
+           fps,
+           asked: [1.02, 2, 1.5],
+           frames: on.map(c => c.duration * fps),
+           ends: on.map(c => c.start + c.duration),
+           starts: on.map(c => c.start),
+           sources: on.map(c => Math.round(c.sourceDuration * 1000) / 1000),
+         };`,
+    )
+    assert.deepEqual(
+      state.frames.map((f) => Math.abs(f - Math.round(f)) < 1e-9),
+      [true, true, true],
+      `each clip should be a whole number of frames, got ${JSON.stringify(state.frames)}`,
+    )
+    assert.deepEqual(
+      state.ends.slice(0, -1),
+      state.starts.slice(1),
+      "and one clip's end should be exactly the next one's start",
+    )
+    assert.ok(
+      state.sources[0] >= 1.02 - 1e-9,
+      `the file's own length must survive the rounding, got ${state.sources[0]}`,
+    )
+  })
+
+  await check('a project saved with unround lengths opens on the grid', async () => {
+    /*
+     * The migration. Quantising new clips does nothing for the projects that
+     * already exist, and those are the ones carrying the overlap — so a
+     * document arriving with a length that is not a whole number of frames is
+     * brought onto the grid as it loads, the same way a project saved before
+     * audio tracks existed is given them.
+     *
+     * Built as a document and handed to setSequence rather than saved and
+     * reloaded, because `normalise` is what is being checked and a round trip
+     * through disk would only add ways for it to fail for other reasons.
+     *
+     * Starts are deliberately left where they are: the one way a document can
+     * hold one off the grid is somebody changing the sequence's frame rate
+     * under clips already cut, and moving them would move every cut.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { sequence } = window.__fluxDev;
+       sequence.setSequence({
+         id: 'seq-unround', name: 'Unround', createdAt: Date.now(),
+         settings: { width: 1920, height: 1080, frameRate: 24, duration: 0, startTimecode: 0 },
+         tracks: [{ id: 'V1', name: 'V1', kind: 'video' },
+                  { id: 'A1', name: 'A1', kind: 'audio' }],
+         clips: [
+           { id: 'old-1', assetId: 'a', trackId: 'V1', start: 0, duration: 1.02,
+             offset: 0, speed: 1, kind: 'video' },
+           { id: 'old-2', assetId: 'a', trackId: 'V1', start: 1, duration: 2,
+             offset: 0, speed: 1, kind: 'video' },
+           /* Shorter than a frame: it has to come back as one frame, not none. */
+           { id: 'old-3', assetId: 'a', trackId: 'A1', start: 0, duration: 0.004,
+             offset: 0, speed: 1, kind: 'audio' },
+         ],
+       });
+       await new Promise(r => setTimeout(r, 300));
+       const fps = sequence.getSequence().settings.frameRate;
+       const by = Object.fromEntries(
+         sequence.getSequence().clips.map(c => [c.id, c]));
+       return {
+         fps,
+         frames: ['old-1', 'old-2', 'old-3'].map(id => by[id].duration * fps),
+         starts: ['old-1', 'old-2'].map(id => by[id].start),
+         firstEnd: by['old-1'].start + by['old-1'].duration,
+         secondStart: by['old-2'].start,
+       };`,
+    )
+    assert.deepEqual(state.frames, [24, 48, 1], 'every length should come back in whole frames')
+    assert.deepEqual(state.starts, [0, 1], 'and no start should have been moved')
+    assert.equal(
+      state.firstEnd,
+      state.secondStart,
+      'the pair that overlapped by a hair should now be exactly flush',
     )
   })
 

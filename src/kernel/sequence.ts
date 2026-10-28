@@ -729,6 +729,26 @@ function normalise(next: SequenceState): SequenceState {
     hidden: Boolean(track.hidden),
   }))
 
+  /*
+   * Settings, from wherever this arrived with them.
+   *
+   * A sequence written before it was a file of its own carried its frame rate
+   * and size as its own fields; one written after carries a settings object.
+   * Both open, and both save forward in the current shape. makeSettings fills
+   * in whatever is missing, so nothing downstream has to ask which era a
+   * document came from.
+   *
+   * Read before the clips rather than after, because the grid a document's
+   * clips belong on is the document's own — reading it afterwards would have
+   * quantised them against whatever sequence happened to be open.
+   */
+  const raw = next.settings ?? {
+    width: (next as unknown as { width?: number }).width,
+    height: (next as unknown as { height?: number }).height,
+    frameRate: (next as unknown as { frameRate?: number }).frameRate,
+  }
+  const settings = makeSettings(raw) as SequenceSettings
+
   const kindOf = new Map(tracks.map((track) => [track.id, track.kind]))
   const clips = next.clips.map((clip) => ({
     ...clip,
@@ -744,29 +764,33 @@ function normalise(next: SequenceState): SequenceState {
       Number.isFinite(clip.sourceDuration) && clip.sourceDuration > 0
         ? clip.sourceDuration
         : (Number.isFinite(clip.offset) ? Math.max(0, clip.offset) : 0) + clip.duration,
+    /*
+     * A clip saved before lengths were quantised carries the media's own
+     * length, which is almost never a whole number of frames — and the clip
+     * laid down after it was snapped to the nearest frame, so the two overlap
+     * by up to half a frame. Quantising on load is what lets those documents
+     * come out flush rather than needing the project rebuilt.
+     *
+     * It is safe in the direction that matters: a start is already on the
+     * grid, so the snapped end lands exactly where `findFreeStart` put the
+     * next clip. A pair that was flush stays flush; one with a gap keeps it,
+     * give or take the part-frame.
+     *
+     * Starts are deliberately left alone. They are quantised when they are
+     * made, and the one way a document can hold one that is not — somebody
+     * changing the sequence's frame rate under clips already cut — is a case
+     * where moving them would move every cut in the sequence. `clipEnd` is
+     * what covers those.
+     */
+    duration: wholeFrames(clip.duration, settings.frameRate),
   }))
-
-  /*
-   * Settings, from wherever this arrived with them.
-   *
-   * A sequence written before it was a file of its own carried its frame rate
-   * and size as its own fields; one written after carries a settings object.
-   * Both open, and both save forward in the current shape. makeSettings fills
-   * in whatever is missing, so nothing downstream has to ask which era a
-   * document came from.
-   */
-  const raw = next.settings ?? {
-    width: (next as unknown as { width?: number }).width,
-    height: (next as unknown as { height?: number }).height,
-    frameRate: (next as unknown as { frameRate?: number }).frameRate,
-  }
 
   return {
     ...next,
     id: next.id || nextId('s'),
     name: next.name || 'Sequence 1',
     createdAt: next.createdAt || Date.now(),
-    settings: makeSettings(raw) as SequenceSettings,
+    settings,
     // Undefined when nothing was marked, which is also what a document from
     // before the marks existed reads back as.
     range: readRange((next as unknown as { range?: unknown }).range),
@@ -782,24 +806,54 @@ export function snapToFrame(seconds: number, frameRate = sequence.settings.frame
 }
 
 /**
+ * A length in whole frames of the grid.
+ *
+ * The companion to `snapToFrame`, and the reason the two have to exist
+ * together: quantising where a clip *starts* while leaving how long it *is*
+ * alone puts its end between two frames, and everything that compares one
+ * clip's end to another's start is then working with a number that is not on
+ * the grid the rest of the model is laid out on.
+ *
+ * The batch importer worked this out first, for a symptom of its own: a
+ * hundred clips laid end to end gave a hundred single-frame overlaps, both
+ * clips under the playhead for one frame, and the compositor blended each one
+ * into a cross-dissolve too brief to see and too consistent to be chance. The
+ * same slop later let a ripple delete bury a clip under the ones behind it.
+ * So the rule it applied to its own clips is applied to every clip here.
+ *
+ * At least one frame, because a clip of no frames is not a shorter clip, it is
+ * nothing — and the timeline cannot draw or play it.
+ *
+ * What it costs: a clip's length on the timeline differs from its file's by
+ * under half a frame, which is below the resolution the timeline can represent
+ * at all. `sourceDuration` still carries the file's own length, so nothing is
+ * forgotten about the media — only about where its last part-frame falls.
+ */
+export function wholeFrames(seconds: number, frameRate = sequence.settings.frameRate): number {
+  return Math.max(1, Math.round(seconds * frameRate)) / frameRate
+}
+
+/**
  * Where a clip ends, on the frame grid.
  *
- * A clip's `start` is always snapped, but its `duration` is whatever the media
- * is long — so `start + duration` lands between two frames, and the clip laid
- * down after it starts at the *nearest* frame to that, which can be up to half
- * a frame **before** it. Two clips that look flush on screen therefore overlap
- * by a hair in the numbers, and every test of the form "is this clip after
- * that one" written against the raw end quietly answers no.
+ * The end that *matters* to the timeline: the frame the next clip can start
+ * on. The same number `findFreeStart` lays clips down at and the same one
+ * `cutEdges` reports, which is what makes it the edge the rest of the model is
+ * built around.
  *
- * That is not academic: a ripple delete measured the hole with the raw end,
- * decided the very next clip was not after it, left it where it was and slid
- * everything beyond it back — on top of it. Half the time, since it depends on
- * which way that last part-frame rounds.
+ * It used to be the difference between a working ripple and a broken one. A
+ * start was quantised and a duration was not, so `start + duration` fell
+ * between two frames, the clip after it began at the nearest frame — up to
+ * half a frame *inside* it — and every test of the form "is this clip after
+ * that one" written against the raw end quietly answered no about its own
+ * next-door neighbour. A ripple delete left that neighbour standing and slid
+ * everything beyond it back on top of it.
  *
- * So this is the end that *matters* to the timeline: the frame the next clip
- * can start on. It is the same number `findFreeStart` already lays clips down
- * at and the same one `cutEdges` reports, which is what makes it the edge the
- * rest of the model is built around.
+ * `wholeFrames` has since removed the slop at the door, so for a clip made by
+ * this build this is an identity. It stays because the identity is not
+ * guaranteed: a document can carry a start off the grid — change a sequence's
+ * frame rate under clips already cut and every one of them is — and because
+ * saying which end is meant is worth more than the arithmetic it saves.
  */
 export function clipEnd(clip: Pick<Clip, 'start' | 'duration'>): number {
   return snapToFrame(clip.start + clip.duration)
@@ -931,16 +985,28 @@ export function addClip({
    */
   if (!Number.isFinite(duration) || duration <= 0) return null
 
+  /*
+   * Whole frames, from here on. Every other way a clip's length changes — a
+   * trim, a stretch, a razor — moves it by a frame-quantised delta from a
+   * frame-quantised start, so quantising it once at the door is what keeps it
+   * on the grid for the rest of its life. See `wholeFrames`.
+   */
+  const length = wholeFrames(duration)
+
   const clip: Clip = {
     id: nextId('c'),
     assetId,
     trackId,
     // Same reasoning: a start that is not a number lands the clip nowhere.
-    start: findFreeStart(trackId, Number.isFinite(start) ? start : 0, duration),
-    duration,
+    start: findFreeStart(trackId, Number.isFinite(start) ? start : 0, length),
+    duration: length,
     offset: Math.max(0, offset ?? 0),
+    // The media's own extent, but never less than the clip laid on it: a
+    // length rounded up to the next frame has to be one the clip is allowed to
+    // have, or every trim on it reads as already past the end of its source.
+    // The fallback keeps the raw duration, which is what the file really holds.
+    sourceDuration: Math.max(length, sourceDuration ?? (offset ?? 0) + duration),
     speed: speed && speed > 0 ? speed : 1,
-    sourceDuration: Math.max(duration, sourceDuration ?? (offset ?? 0) + duration),
     // Taken from the track rather than passed in. A clip's kind and the track
     // it sits on cannot disagree, so there is no point offering a way for them
     // to.
@@ -1008,7 +1074,9 @@ export function addLinkedClips(
     const audio = addClip({ assetId, trackId, start, duration, linkId: pairId })
     if (!audio) return { video: null, audio: null }
 
-    const home = lowestFreeVideoTrack(audio.start, duration)
+    // The sound's own length, which is the quantised one — asking about a
+    // track with the raw length tests for a clip that will never exist.
+    const home = lowestFreeVideoTrack(audio.start, audio.duration)
 
     const picture = addClip({
       assetId,
