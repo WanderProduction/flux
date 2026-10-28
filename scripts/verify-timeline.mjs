@@ -4379,6 +4379,157 @@ try {
     assert.equal(state.backOn, true, 'F again should turn it back on')
   })
 
+  await check('stepping a frame at a time brings the view along', async () => {
+    /*
+     * The playhead can be moved by the clock, by a jump, by a step or by a
+     * hand, and all four are the same question to anyone watching. Stepping
+     * reaches the transport through stepFrames rather than through a seek, so
+     * it is worth saying out loud that it follows too.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `const scroller = window.__scroller();
+         scroller.scrollLeft = 0;
+         playback.pause();
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 300));
+         for (let i = 0; i < 260; i++) playback.stepFrames(1);
+         await new Promise(r => setTimeout(r, 300));
+         const l = window.__scroller();
+         const z = view.getView().timeline.zoom;
+         const out = { scroll: l.scrollLeft,
+                       across: (playback.getTime() * z - l.scrollLeft) / l.clientWidth };
+         window.__parkView();
+         return out;`,
+    )
+    assert.ok(state.scroll > 0, 'the view should have travelled')
+    assert.ok(
+      Math.abs(state.across - 0.75) < 0.06,
+      `and held the playhead at three quarters across, not ${state.across.toFixed(3)}`,
+    )
+  })
+
+  await check('dragging the playhead tracks the hand rather than running away', async () => {
+    /*
+     * A dragged playhead cannot follow the way a playing one does. The time is
+     * read from where the pointer is *plus* how far the view has scrolled, so
+     * a view that scrolls underneath a still hand changes the answer — and the
+     * later time scrolls it further. Measured before this was fixed: a drag
+     * that should have read 1.67 seconds per hundred pixels of hand read 6.72,
+     * and the playhead hit the end of a two-minute sequence before the hand
+     * was a quarter of the way across.
+     *
+     * Dragged across the middle of the view, well clear of the edge band,
+     * where the right answer is that nothing scrolls at all.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `const scroller = window.__scroller();
+         scroller.scrollLeft = 0;
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 300));
+         const ruler = document.querySelector('.tl-ruler');
+         const lane = scroller.getBoundingClientRect();
+         const y = ruler.getBoundingClientRect().top + 6;
+         const from = lane.left + 20;
+         const to = lane.left + lane.width * 0.55;
+         const step = (to - from) / 16;
+         ruler.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 77, clientX: from, clientY: y }));
+         await new Promise(r => setTimeout(r, 80));
+         const seen = [];
+         for (let i = 1; i <= 16; i++) {
+           const clientX = from + i * step;
+           window.dispatchEvent(new PointerEvent('pointermove',
+             { bubbles: true, cancelable: true, button: 0, pointerId: 77, clientX, clientY: y }));
+           await new Promise(r => setTimeout(r, 70));
+           seen.push({ pointer: clientX - lane.left, t: playback.getTime(),
+                       scroll: window.__scroller().scrollLeft });
+         }
+         window.dispatchEvent(new PointerEvent('pointerup',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 77 }));
+         await new Promise(r => setTimeout(r, 200));
+         const out = { seen, zoom: view.getView().timeline.zoom };
+         window.__parkView();
+         return out;`,
+    )
+    const want = 100 / state.zoom
+    const rates = state.seen
+      .map((one, i) =>
+        i > 0 && one.pointer !== state.seen[i - 1].pointer
+          ? ((one.t - state.seen[i - 1].t) / (one.pointer - state.seen[i - 1].pointer)) * 100
+          : null,
+      )
+      .filter((rate) => rate !== null)
+    const worst = Math.max(...rates.map((rate) => Math.abs(rate - want)))
+    assert.ok(
+      worst < want * 0.35,
+      `an even drag should read ${want.toFixed(2)}s per 100px of hand, worst was ${worst.toFixed(2)}s off`,
+    )
+    assert.ok(
+      state.seen.every((one) => one.scroll === 0),
+      'and nothing should scroll while the hand is in the middle of the view',
+    )
+  })
+
+  await check('a scrub held against the edge carries on travelling', async () => {
+    /*
+     * The other half: the hand runs out of screen long before the sequence
+     * runs out of timeline, so the edge has to carry it. A view-width a
+     * second, which is about a second of warning before anything crosses the
+     * view. The first attempt was a flat 28 pixels a frame, which worked out
+     * at four screens a second and took a two-minute sequence past in half of
+     * one.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `const scroller = window.__scroller();
+         scroller.scrollLeft = 0;
+         playback.seek(0);
+         await new Promise(r => setTimeout(r, 300));
+         const ruler = document.querySelector('.tl-ruler');
+         const lane = scroller.getBoundingClientRect();
+         const y = ruler.getBoundingClientRect().top + 6;
+         ruler.dispatchEvent(new PointerEvent('pointerdown',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 78,
+             clientX: lane.left + 20, clientY: y }));
+         window.dispatchEvent(new PointerEvent('pointermove',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 78,
+             clientX: lane.right - 8, clientY: y }));
+         await new Promise(r => setTimeout(r, 150));
+         const began = { t: playback.getTime(), scroll: window.__scroller().scrollLeft,
+                         at: performance.now() };
+         /* The hand does not move again. Only the edge may carry it on. */
+         await new Promise(r => setTimeout(r, 1200));
+         const ended = { t: playback.getTime(), scroll: window.__scroller().scrollLeft,
+                         at: performance.now() };
+         window.dispatchEvent(new PointerEvent('pointerup',
+           { bubbles: true, cancelable: true, button: 0, pointerId: 78 }));
+         await new Promise(r => setTimeout(r, 300));
+         const out = { began, ended, width: lane.width,
+                       afterUp: window.__scroller().scrollLeft };
+         window.__parkView();
+         return out;`,
+    )
+    const seconds = (state.ended.at - state.began.at) / 1000
+    const widths = (state.ended.scroll - state.began.scroll) / state.width / seconds
+    assert.ok(
+      state.ended.t > state.began.t + 0.5,
+      `the scrub should have carried on, ${state.began.t} -> ${state.ended.t}`,
+    )
+    assert.ok(
+      widths > 0.4 && widths < 2.5,
+      `and travelled about a view-width a second, it did ${widths.toFixed(2)}`,
+    )
+    assert.ok(
+      Math.abs(state.afterUp - state.ended.scroll) < 60,
+      'and letting go should not jump the view',
+    )
+  })
+
   await check('S takes the gap when there is no clip to take', async () => {
     const state = await evaluate(
       cdp,
