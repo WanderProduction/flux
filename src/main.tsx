@@ -28,6 +28,7 @@ import * as importPipeline from './kernel/importPipeline'
 import * as videoSource from './kernel/media/videoSource'
 import * as indexCache from './kernel/media/indexCache'
 import * as decodeSpike from './kernel/media/decodeSpike'
+import * as ranges from './kernel/media/ranges'
 import * as peaks from './kernel/media/peaks'
 import * as mixer from './kernel/media/mixer'
 import * as audioSource from './kernel/media/audioSource'
@@ -96,6 +97,7 @@ if (import.meta.env.DEV) {
       videoSource,
       indexCache,
       decodeSpike,
+      ranges,
       peaks,
       mixer,
       /*

@@ -1,6 +1,7 @@
 import { assetUrl } from '../fsBridge'
 import { keyframeAt, sampleAt } from '../../../shared/mp4.js'
 import { trackFor, type VideoTrack } from './indexCache'
+import { RangeReader } from './ranges'
 
 /**
  * One decoded video file, addressed by time.
@@ -389,15 +390,18 @@ export class VideoSource {
   private refused = new Set<number>()
 
   /**
-   * Aborts the reads when this source closes.
+   * This source's reads, and the means of stopping them when it closes.
    *
    * A span can be several megabytes off a spinning drive, and a source that
    * has been closed is one nobody will ever look at again — the clip under the
    * playhead has changed. Letting its read run to completion holds the
    * connection that the *new* clip's first frame is queueing behind, which is
    * most of what a cut costs.
+   *
+   * The reads themselves happen in a worker; see media/ranges.ts for why, and
+   * for what happens where there is no worker to be had.
    */
-  private readonly reads = new AbortController()
+  private readonly reads = new RangeReader()
 
   /**
    * The furthest sample this run has decoded and then thrown away.
@@ -530,7 +534,7 @@ export class VideoSource {
      * those were costing most of a second each at every cut, because the
      * caller was parked inside an await on a read that nobody needed any more.
      */
-    this.reads.abort()
+    this.reads.close()
     this.wake()
     this.discardBuffer()
     this.discardRuns()
@@ -757,17 +761,16 @@ export class VideoSource {
     }
   }
 
-  private async readRange(start: number, end: number): Promise<Uint8Array | null> {
-    try {
-      const res = await fetch(this.url, {
-        headers: { Range: `bytes=${start}-${end}` },
-        signal: this.reads.signal,
-      })
-      if (!res.ok && res.status !== 206) return null
-      return new Uint8Array(await res.arrayBuffer())
-    } catch {
-      return null
-    }
+  /**
+   * One span of the file.
+   *
+   * Null covers every way this can come to nothing — refused, aborted because
+   * the source closed, or no bytes at all — because the caller does the same
+   * thing with all of them, and has since before the read moved off this
+   * thread.
+   */
+  private readRange(start: number, end: number): Promise<Uint8Array | null> {
+    return this.reads.read(this.url, start, end)
   }
 
   /**
