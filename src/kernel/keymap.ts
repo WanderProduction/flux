@@ -170,6 +170,23 @@ export const defaultKeymap: Keymap = {
   'alt+arrowdown': 'timeline.nudgeDown',
   /** Which half of a linked pair the keyboard is holding. */
   'alt+s': 'timeline.toggleHalf',
+  /*
+   * Seeing the whole timeline, and coming back.
+   *
+   * Premiere's pair, on Premiere's key: the one above Tab zooms out until the
+   * whole sequence fits, and with Shift it comes back to where you were
+   * working. Two keys rather than one that toggles, because the way out and
+   * the way back are different questions — the way out has one answer, and the
+   * way back has to remember something.
+   */
+  '`': 'timeline.zoomToFit',
+  'shift+`': 'timeline.zoomToPlayhead',
+  /*
+   * Whether the view travels with the playhead. `F` for follow, bare, because
+   * it is a mode you flip mid-play — reaching for a modifier to stop the
+   * timeline running away from you is already too slow.
+   */
+  f: 'timeline.toggleFollow',
   // The transport. Space is the one key in a media app that is spoken for
   // before anything else is designed.
   space: 'playback.toggle',
@@ -206,6 +223,17 @@ export function chordOf(e: KeyboardEvent, held: ReadonlySet<string> = new Set())
   let key = e.key.toLowerCase()
   if (key === ' ') key = 'space'
   if (key === 'escape') key = 'esc'
+  /*
+   * The key above Tab, by position rather than by what it prints.
+   *
+   * `e.key` for it is a backtick unshifted and a tilde shifted, so a chord
+   * written as 'shift+`' could never match what the keyboard sends — it sends
+   * 'shift+~'. Taking it from `e.code` makes the pair one key with and without
+   * Shift, and makes it the same physical key on a layout that prints
+   * something else there, which is what somebody reaching for Premiere's zoom
+   * keys is reaching for.
+   */
+  if (e.code === 'Backquote') key = '`'
 
   // Modifier-only presses are not chords.
   if (['control', 'meta', 'alt', 'shift'].includes(key)) return ''

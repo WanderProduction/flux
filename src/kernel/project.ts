@@ -51,6 +51,7 @@ import {
 } from './sequence'
 import { importAssets, type ImportCandidate } from './assets'
 import { getView, resetView, setView, type ViewState } from './view'
+import { getTime, seek } from './playback'
 import { loadStore, saveStore } from './store'
 import { DOCUMENT_FORMAT } from '../../shared/projectFormat.js'
 
@@ -245,7 +246,7 @@ export function buildDocument(): ProjectDocument | null {
     createdAt: current.createdAt,
     savedAt: Date.now(),
     settings: { importMode: getImportMode(), render: getRenderSettings() },
-    view: getView(),
+    view: viewToSave(),
     assets: getAssets(),
     // The sequences themselves are files; the document only remembers which
     // one was open. See shared/sequenceFormat.js.
@@ -426,6 +427,16 @@ function adopt(project: Project, startDirty: boolean) {
    */
   void loadQueue(project.root)
   setView(project.view)
+  /*
+   * Back to the frame this project was left on.
+   *
+   * After the sequences, because `seek` clamps to what is loaded — asking for
+   * a moment before there is a sequence to hold it lands at zero. A playhead
+   * past the end of a sequence that has since been shortened is clamped there
+   * rather than refused, which is the same thing the transport does for every
+   * other seek.
+   */
+  seek(getView().timeline.playhead ?? 0)
 
   // setAssets/setSequence/setView notify without marking dirty, so this is the
   // whole truth about whether there is unsaved work.
@@ -439,6 +450,20 @@ function adopt(project: Project, startDirty: boolean) {
   void verifyAssetPaths().finally(() => {
     applying = false
   })
+}
+
+/**
+ * The view as it should be written, with the playhead folded in.
+ *
+ * Read here rather than recorded as it moves, which is this module's standing
+ * rule for the view: a playhead reports thirty times a second and would wake
+ * every view subscriber on each tick, for a number nobody reads until a save.
+ * Reading it at save time also means a save taken *during* playback records
+ * where the playhead actually was, which a debounced recorder would not.
+ */
+function viewToSave(): ViewState {
+  const view = getView()
+  return { ...view, timeline: { ...view.timeline, playhead: getTime() } }
 }
 
 /**

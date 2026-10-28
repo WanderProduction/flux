@@ -37,6 +37,30 @@ export interface ViewState {
     snapping?: boolean
     /** Whether pausing selects the clip under the playhead. Off unless asked for. */
     autoSelect?: boolean
+    /**
+     * Where the playhead was left.
+     *
+     * Reopening a project at zero makes the work look lost: the clips are all
+     * there, but the viewer is showing the first frame of the first shot
+     * rather than the moment that was being worked on, and the first
+     * impression is that something did not save. Coming back to the same frame
+     * is what makes a reopen feel like returning.
+     *
+     * Read at save time rather than recorded as it moves — a playhead reports
+     * thirty times a second, and the view is not a thing to write that often.
+     * Optional, so a project saved before this opens at zero as it always did.
+     */
+    playhead?: number
+    /**
+     * Whether the view travels with the playhead during playback.
+     *
+     * On by default, which is what an NLE does and what makes a long timeline
+     * watchable. Off is a real working mode rather than an escape hatch:
+     * watching one stretch of the timeline while another plays is how you
+     * compare two takes, and a view that snaps back to the playhead makes it
+     * impossible.
+     */
+    follow?: boolean
   }
   browser: {
     location: BrowserLocation
@@ -58,7 +82,7 @@ export interface ViewState {
 export function defaultView(): ViewState {
   return {
     workspace: 'edit',
-    timeline: { zoom: 0 },
+    timeline: { zoom: 0, follow: true },
     browser: { location: { type: 'project' } },
     viewer: {
       playbackResolution: DEFAULT_PLAYBACK_RESOLUTION,
@@ -115,7 +139,27 @@ export function setView(next: Partial<ViewState> | null | undefined): void {
   const base = defaultView()
   view = {
     workspace: typeof next?.workspace === 'string' && next.workspace ? next.workspace : base.workspace,
-    timeline: { zoom: Number(next?.timeline?.zoom) || 0 },
+    /*
+     * Every field read back, not only the zoom.
+     *
+     * `snapping` and `autoSelect` were written on every save and dropped here
+     * on every open, which is the failure the viewer comment below warns
+     * about: a preference that looks like it works until the next time the
+     * project is opened. Both are optional in the type and both have a
+     * non-false default, so the bug was invisible to anyone who liked the
+     * defaults.
+     */
+    timeline: {
+      zoom: Number(next?.timeline?.zoom) || 0,
+      snapping: next?.timeline?.snapping !== false,
+      autoSelect: next?.timeline?.autoSelect === true,
+      follow: next?.timeline?.follow !== false,
+      // Not clamped to the sequence here: this module does not know how long
+      // the sequence is, and a playhead past the end is seeked, which does.
+      playhead: Number.isFinite(next?.timeline?.playhead)
+        ? Math.max(0, Number(next?.timeline?.playhead))
+        : 0,
+    },
     browser: {
       location:
         next?.browser?.location?.type === 'folder' && next.browser.location.path

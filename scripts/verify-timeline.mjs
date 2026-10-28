@@ -4185,6 +4185,200 @@ try {
     )
   })
 
+  /*
+   * The timeline's viewport: what is on screen, and whether it travels.
+   *
+   * A long sequence on one track, because all four of these are about the view
+   * rather than about the cut — thirty four-second clips is two minutes, which
+   * no working zoom fits and every god view must.
+   */
+  const seedLong = `
+    const { assets, sequence, view, playback } = window.__fluxDev;
+    const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 60, follow: true } });
+    await new Promise(r => setTimeout(r, 200));
+    for (let i = 0; i < 30; i++) {
+      sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration: 4 });
+    }
+    playback.pause();
+    playback.seek(0);
+    await new Promise(r => setTimeout(r, 700));
+    /* Not __lanes. The suite already uses that name, and by this point in the
+       run it answers with the list of lane elements that __laneOf indexes
+       into. Redefining it as a single element made every later click-based
+       check reach for lanes[n] of an element and find undefined — eleven
+       failures in a row, none of them about the thing being checked. */
+    window.__scroller = () => document.querySelector('.tl-scroll');
+    /* One dispatch, at the window. Firing at the panel as well reads as two
+       presses, which a toggle answers with nothing — found exactly that way. */
+    window.__press = (k, mods = {}) => window.dispatchEvent(new KeyboardEvent('keydown',
+      { key: k, code: (k === '\`' || k === '~') ? 'Backquote' : undefined,
+        bubbles: true, cancelable: true, ...mods }));
+    /*
+     * Put the view back before handing control on.
+     *
+     * These four are the only checks that deliberately leave the timeline
+     * scrolled somewhere other than the start, and the timeline only renders
+     * the blocks near the viewport. A check that follows and reaches for a
+     * clip at two seconds then finds nothing there — eleven of them failed
+     * that way, every one with an undefined element rather than a wrong
+     * answer, which is what being scrolled away looks like from the outside.
+     */
+    window.__parkView = () => {
+      const lanes = window.__scroller();
+      if (lanes) lanes.scrollLeft = 0;
+      window.__fluxDev.view.recordView({ timeline: { zoom: 60, follow: true } });
+      window.__fluxDev.playback.pause();
+      window.__fluxDev.playback.seek(0);
+    };
+  `
+
+  await check('the key above Tab fits the whole sequence on screen', async () => {
+    /*
+     * Every clip visible, which is the thing being asked for — not a content
+     * box narrower than the view. The timeline keeps a 600px minimum drop area
+     * whatever the zoom, so on a narrow panel there is still empty timeline to
+     * scroll past the last clip. That is somewhere to drop things, not work
+     * that cannot be seen.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `const before = view.getView().timeline.zoom;
+         window.__press('\`');
+         await new Promise(r => setTimeout(r, 500));
+         const lanes = window.__scroller();
+         const zoom = view.getView().timeline.zoom;
+         const out = { before, zoom, total: sequence.sequenceDuration(),
+                       width: lanes.clientWidth, scrollLeft: lanes.scrollLeft };
+         window.__parkView();
+         return out;`,
+    )
+    assert.ok(state.zoom < state.before, `the zoom should have gone out, ${state.before} -> ${state.zoom}`)
+    assert.ok(
+      state.total * state.zoom <= state.width + 2,
+      `all ${state.total}s should fit ${state.width}px, but span ${state.total * state.zoom}px`,
+    )
+    assert.equal(state.scrollLeft, 0, 'and the view should be at the top of the sequence')
+  })
+
+  await check('Shift and the same key comes back, centred on the playhead', async () => {
+    /*
+     * The zoom it was thrown wide from, not a guess — which is the reason the
+     * way out and the way back are two keys rather than one toggle.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `const working = view.getView().timeline.zoom;
+         window.__press('\`');
+         await new Promise(r => setTimeout(r, 500));
+         const fitted = view.getView().timeline.zoom;
+         playback.seek(sequence.sequenceDuration() * 0.6);
+         await new Promise(r => setTimeout(r, 300));
+         window.__press('~', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 700));
+         const lanes = window.__scroller();
+         const zoom = view.getView().timeline.zoom;
+         const out = { working, fitted, zoom,
+                       offCentre: Math.abs(playback.getTime() * zoom -
+                         (lanes.scrollLeft + lanes.clientWidth / 2)) };
+         window.__parkView();
+         return out;`,
+    )
+    assert.ok(state.fitted < state.working, 'setup: the fit should have zoomed out')
+    assert.ok(
+      Math.abs(state.zoom - state.working) < 0.01,
+      `the zoom should be back to ${state.working}, got ${state.zoom}`,
+    )
+    assert.ok(state.offCentre < 4, `the playhead should be centred, it is ${state.offCentre}px off`)
+  })
+
+  await check('the view travels with the playhead instead of paging at the edge', async () => {
+    /*
+     * The complaint this answers: Premiere jumps a whole screen when the
+     * playhead reaches the right-hand edge, the clip you were watching ends up
+     * behind you, and you lose your place at the moment you were paying
+     * attention. Holding it at three quarters reveals what is coming *before*
+     * it is needed, and every scroll is a few pixels rather than a screen.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `const lanes = window.__scroller();
+         lanes.scrollLeft = 0;
+         const seen = [];
+         playback.play();
+         const began = performance.now();
+         while (performance.now() - began < 7000) {
+           await new Promise(r => setTimeout(r, 200));
+           const l = window.__scroller();
+           const z = view.getView().timeline.zoom;
+           seen.push({ scroll: l.scrollLeft, width: l.clientWidth,
+                       across: (playback.getTime() * z - l.scrollLeft) / l.clientWidth });
+         }
+         playback.pause();
+         await new Promise(r => setTimeout(r, 200));
+         const out = { seen, width: window.__scroller().clientWidth };
+         window.__parkView();
+         return out;`,
+    )
+    const travelled = state.seen.filter((one) => one.scroll > 0)
+    assert.ok(travelled.length > 0, 'the view should have travelled at all')
+    const worst = Math.max(...travelled.map((one) => Math.abs(one.across - 0.75)))
+    assert.ok(
+      worst < 0.06,
+      `the playhead should sit at three quarters across, worst was ${worst.toFixed(3)} off`,
+    )
+    const steps = state.seen
+      .map((one, i) => (i > 0 ? one.scroll - state.seen[i - 1].scroll : 0))
+      .filter((d) => d > 0)
+    const biggest = Math.max(...steps, 0)
+    assert.ok(
+      biggest < state.width * 0.5,
+      `each scroll should be a nudge, not a page — biggest was ${biggest}px of ${state.width}px`,
+    )
+  })
+
+  await check('with following off the view stays where it was put', async () => {
+    /*
+     * The other half of the toggle, and a real working mode: watching one
+     * stretch of the timeline while another plays is how two takes get
+     * compared. Checked past the point where it *would* have scrolled, so
+     * "stayed put" cannot pass for want of the playhead getting far enough.
+     */
+    const state = await evaluate(
+      cdp,
+      seedLong +
+        `window.__press('f');
+         await new Promise(r => setTimeout(r, 400));
+         const off = view.getView().timeline.follow;
+         const lanes = window.__scroller();
+         lanes.scrollLeft = 0;
+         playback.play();
+         await new Promise(r => setTimeout(r, 7000));
+         playback.pause();
+         await new Promise(r => setTimeout(r, 200));
+         const l = window.__scroller();
+         const z = view.getView().timeline.zoom;
+         const where = { off, scroll: l.scrollLeft,
+                         reached: playback.getTime() * z, line: l.clientWidth * 0.75 };
+         window.__press('f');
+         await new Promise(r => setTimeout(r, 300));
+         const out = { ...where, backOn: view.getView().timeline.follow };
+         window.__parkView();
+         return out;`,
+    )
+    assert.equal(state.off, false, 'F should have turned following off')
+    assert.ok(
+      state.reached > state.line,
+      `setup: the playhead must pass the ${Math.round(state.line)}px follow line, it reached ${Math.round(state.reached)}px`,
+    )
+    assert.equal(state.scroll, 0, 'and the view must not have moved')
+    assert.equal(state.backOn, true, 'F again should turn it back on')
+  })
+
   await check('S takes the gap when there is no clip to take', async () => {
     const state = await evaluate(
       cdp,
@@ -5359,6 +5553,64 @@ try {
          dur: r3(c.duration), off: r3(c.offset), src: r3(c.sourceDuration) }));`,
     )
     assert.deepEqual(after, before, 'a trim that does not survive a save is not an edit')
+  })
+
+  await check('a project opens on the frame it was left on', async () => {
+    /*
+     * Reopening at zero makes a project look like it did not save. The clips
+     * are all there, but the viewer is showing the first frame of the first
+     * shot rather than the moment that was being worked on, and the first
+     * impression is that the work is gone.
+     *
+     * The playhead is read at save time rather than recorded as it moves —
+     * thirty reports a second, for a number nobody looks at until a save — so
+     * this is also the check that the reading happens at all.
+     *
+     * Asserted before the reload as well as after, for the reason the trimmed
+     * clip check gives: a throw between the save and the reopen leaves the app
+     * at the launcher and takes every check after it down with no summary.
+     */
+    const before = await evaluate(
+      cdp,
+      seedCuts +
+        `/* seedCuts already binds view; re-declaring it here makes the two
+            scripts, concatenated into one, a duplicate declaration. */
+         const { store, project, playback } = window.__fluxDev;
+         playback.pause();
+         playback.seek(5.5);
+         await new Promise(r => setTimeout(r, 400));
+         const left = playback.getTime();
+         if (Math.abs(left - 5.5) > 0.1) {
+           throw new Error('setup: expected the playhead at 5.5s, got ' + left);
+         }
+         const saved = await project.saveProject();
+         if (!saved.ok) throw new Error('save failed: ' + saved.error);
+         await store.flushStores();
+         const recorded = view.getView().timeline.playhead;
+         location.reload();
+         return { left, recorded };`,
+    )
+
+    await new Promise((r) => setTimeout(r, 2500))
+    await ensureProject(cdp, VERIFY_PROJECT)
+    const after = await evaluate(
+      cdp,
+      `for (let i = 0; i < 40 && !document.querySelector('.app, .launcher'); i++)
+         await new Promise(r => setTimeout(r, 250));
+       const seq = window.__fluxDev.sequence;
+       for (let i = 0; i < 40 && !seq.isSequenceLoaded(); i++) await new Promise(r => setTimeout(r, 250));
+       await new Promise(r => setTimeout(r, 400));
+       return { time: window.__fluxDev.playback.getTime(),
+                stored: window.__fluxDev.view.getView().timeline.playhead };`,
+    )
+    assert.ok(
+      Math.abs(after.time - before.left) < 0.05,
+      `the playhead should be back at ${before.left}s, it is at ${after.time}s`,
+    )
+    assert.ok(
+      Math.abs(after.stored - before.left) < 0.05,
+      `and the view should carry it, it carries ${after.stored}`,
+    )
   })
 
   await check('a link that was cut stays cut across a save and a reload', async () => {
