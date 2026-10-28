@@ -691,6 +691,100 @@ export function ViewerPanel() {
   }, [])
 
   /**
+   * The clip a backwards pass will cross into next: the one that ends where
+   * the clip in front begins, on its own track.
+   */
+  const comingBack = useMemo(() => {
+    const front = layers.at(-1)
+    if (!front) return null
+    let best: Clip | null = null
+    for (const other of sequence.clips) {
+      if (other.id === front.id || other.trackId !== front.trackId) continue
+      if (other.start + other.duration > front.start + 1e-6) continue
+      if (!best || other.start > best.start) best = other
+    }
+    return best
+  }, [sequence, layers])
+
+  /**
+   * Opens the clip behind this one and decodes its last stretch, before the
+   * playhead reverses into it.
+   *
+   * A cut costs differently in each direction and that difference is the whole
+   * of this. Forwards, a clip is entered at its first frame, which is a
+   * keyframe: one decode and the picture is there. Backwards, it is entered at
+   * its *last* frame, which is as deep inside a GOP as a frame can be — so
+   * nothing can be shown until the whole of that GOP has been decoded from its
+   * keyframe, and the source has not even been opened, because sources are
+   * opened for the clips under the playhead and this clip is not under it.
+   * Open, index and a full GOP, all at the moment the picture is wanted.
+   * Measured: 356ms backwards against 230ms forwards over the same boundaries.
+   *
+   * So it happens a beat early instead, while frames are still being served
+   * out of the current clip's runs and the thread has room. This is the trick
+   * `shownFor` already plays inside a clip — building the previous run half
+   * way through the current one — carried across a cut, which is the one
+   * boundary it could not see.
+   *
+   * The source is filed under the incoming clip's own id, so when the playhead
+   * does cross, the reconcile above finds it open and keeps it rather than
+   * opening a second.
+   */
+  const warmedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!comingBack) {
+      warmedRef.current = null
+      return
+    }
+    const target = comingBack
+    const fps = sequence.settings.frameRate || 30
+    const front = layers.at(-1)
+    if (!front) return
+
+    return subscribePlayback(() => {
+      const rate = getRate()
+      if (rate >= 0) return
+      if (warmedRef.current === target.id) return
+      /*
+       * How long until the playhead gets there, in seconds of wall clock
+       * rather than of timeline — at -4x a boundary two seconds away is half a
+       * second off. Under a second is room for an open and a GOP, and late
+       * enough not to warm clips a pass turns back from.
+       */
+      const away = (getTime() - front.start) / Math.abs(rate)
+      if (away > 1) return
+      warmedRef.current = target.id
+
+      void (async () => {
+        let source = sourcesRef.current.get(target.id)
+        if (!source) {
+          const file = assetById.get(target.assetId)
+          if (!file || file.missing || file.unreadable || file.kind !== 'video') return
+          const opened = await VideoSource.open(file.path)
+          if (!opened.ok) return
+          // Someone got there first — the playhead may simply have arrived.
+          if (sourcesRef.current.has(target.id)) {
+            opened.source.close()
+            return
+          }
+          sourcesRef.current.set(target.id, opened.source)
+          source = opened.source
+        }
+        /*
+         * Its last frame, which is where a backwards pass enters. Asking
+         * backwards is what builds the run; the picture is dropped, and the
+         * run it leaves behind is the point.
+         */
+        const last = target.offset + (target.duration - 1 / fps) * target.speed
+        await source.shownFor(last, {
+          backwards: true,
+          width: framePixels(frame, prefs.playbackResolution).width,
+        })
+      })()
+    })
+  }, [comingBack, layers, sequence.settings.frameRate, assetById, frame, prefs.playbackResolution])
+
+  /**
    * Draws the stack, bottom layer first.
    *
    * Reads the clock itself rather than taking `time` as a dependency, and skips

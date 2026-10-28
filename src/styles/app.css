@@ -929,6 +929,14 @@ kbd {
   height: 4px;
   pointer-events: none;
 }
+/* A decoder is open on it: it starts the moment you press play.
+   The brightest of the states on purpose — it is the only one that answers
+   the question an editor actually asks of this strip, and it has to be
+   distinguishable at a glance from `baked` beneath it, which every clip in a
+   scanned project has and which is why this bar used to be one flat colour. */
+.tl-ready-live {
+  background: var(--flux-ok, #5fd08a);
+}
 /* Saved to disk — ready now and still ready after a reopen. */
 .tl-ready-baked {
   background: var(--flux-accent);

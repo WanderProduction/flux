@@ -5,25 +5,36 @@
  * freshly filled timeline: *which parts of this will actually run, and which
  * are still being worked on?* Until now the only way to find out was to press
  * play and see, and a stretch that stalls looks exactly like a stretch that is
- * slow — the same confusion that cost a long session chasing the preview.
+ * slow â€” the same confusion that cost a long session chasing the preview.
  *
  * Five states, and the order they are decided in matters more than the colours:
  *
  *   broken   the file is gone, or FLUX cannot read it. No amount of waiting
- *            helps, so this outranks everything — a strip that showed a
+ *            helps, so this outranks everything â€” a strip that showed a
  *            missing file as merely unfinished would be telling the editor to
  *            be patient about something that is never going to arrive.
  *   working  something is queued or running for it right now.
+ *   live     a decoder is open on it. It starts without a pause.
  *   baked    its index is on disk, so it plays now *and* after a reopen.
  *   ready    its index is in memory. Plays now; will be rebuilt next session.
  *   unknown  nothing has looked at it yet. Not a problem, just not yet asked.
+ *
+ * `live` was added because the strip was useless without it, and the reason is
+ * worth keeping: every other state here is about the *index*, and a scanned
+ * project has an index for everything, so the strip was one unbroken colour
+ * across a hundred clips while playback plainly was not one unbroken
+ * experience. Reported from use: "the blue bar is blue everywhere... if I go
+ * on the clips that I didn't load it lags". It was telling the truth about a
+ * question nobody was asking. The question being asked is "will this start
+ * when I press play", and an open decoder is the only thing here that answers
+ * it â€” the index is necessary and nowhere near sufficient.
  *
  * `baked` and `ready` are deliberately separate. They feel like the same state
  * and are not: the difference is whether the work has been banked or is about
  * to be done again, and that is exactly what the editor wanted to know when
  * they asked why everything runs again on every project reload.
  *
- * Nothing here causes work. `trackFor` would — a miss demuxes the file — so
+ * Nothing here causes work. `trackFor` would â€” a miss demuxes the file â€” so
  * this reads only what is already known, through `cachedTrack`. A strip that
  * demuxed a hundred files in order to colour itself in would be the most
  * expensive thing on screen and would report its own progress.
@@ -31,10 +42,11 @@
 
 import { getAssets, subscribeAssets, type Asset } from './assets'
 import { cachedTrack, indexOnDisk, refusedReason } from './media/indexCache'
+import { VideoSource } from './media/videoSource'
 import { mediaWork, subscribeMediaWork, type WorkKind } from './mediaWork'
 import { getSequence, subscribeSequence } from './sequence'
 
-export type Readiness = 'broken' | 'working' | 'baked' | 'ready' | 'unknown'
+export type Readiness = 'broken' | 'working' | 'live' | 'baked' | 'ready' | 'unknown'
 
 export interface ReadySpan {
   /** The clip this covers, so the panel can line it up and name it. */
@@ -65,7 +77,7 @@ const asking = new Set<string>()
 /**
  * Work whose finish has already been acted on.
  *
- * `mediaWork()` hands back finished items too — four hundred of them, so the
+ * `mediaWork()` hands back finished items too â€” four hundred of them, so the
  * panel can say what just happened. Without this, every progress tick would
  * read the whole history, decide that four hundred paths had just finished,
  * and throw away everything the sweep had learned: a strip that re-probed the
@@ -116,9 +128,19 @@ function stateOf(asset: Asset | undefined): { state: Readiness; note: string } {
     return { state: 'working', note: `building the ${nameFor(kinds)} for ${asset.name}` }
   }
 
+  /*
+   * An open decoder beats both of the index states, because it is a claim
+   * about playing rather than about being indexable: the index is already in
+   * memory and the decoder is already configured, which is most of what a cut
+   * pays for.
+   */
+  if (VideoSource.isOpen(asset.path)) {
+    return { state: 'live', note: `${asset.name} is open and decoding — it starts without a pause` }
+  }
+
   // Banked beats in-memory: it is the stronger claim about the same clip.
   if (banked.get(asset.path)) {
-    return { state: 'baked', note: `${asset.name} is indexed on disk — ready after a reopen too` }
+    return { state: 'baked', note: `${asset.name} is indexed on disk â€” ready after a reopen too` }
   }
   if (cachedTrack(asset.path)) {
     return { state: 'ready', note: `${asset.name} is ready to play, but not yet saved to disk` }
@@ -131,7 +153,7 @@ function stateOf(asset: Asset | undefined): { state: Readiness; note: string } {
  *
  * Video clips only. The sound of a clip is on its own track and has its own
  * derived work, but the strip is one line over the time units and it is the
- * picture an editor is waiting for — two overlapping answers for one moment
+ * picture an editor is waiting for â€” two overlapping answers for one moment
  * would have to be drawn one on top of the other, and the lower one would be a
  * colour nobody could see.
  */
@@ -162,6 +184,7 @@ export function readinessSummary(): Record<Readiness, number> {
   const counts: Record<Readiness, number> = {
     broken: 0,
     working: 0,
+    live: 0,
     baked: 0,
     ready: 0,
     unknown: 0,
@@ -208,7 +231,7 @@ export async function sweepReadiness(): Promise<void> {
       learned = true
     }
     // Between batches, so a long sweep fills the strip in rather than all at
-    // the end — the strip is itself a progress report.
+    // the end â€” the strip is itself a progress report.
     if (learned) emit()
   }
 }
@@ -244,6 +267,12 @@ subscribeSequence(() => {
   emit()
   void sweepReadiness()
 })
+/*
+ * A decoder opening or closing changes `live` and nothing else, so this emits
+ * without sweeping: a sweep asks the disk whether indexes are banked, which
+ * has not changed, and is the expensive half.
+ */
+VideoSource.watchLive(emit)
 subscribeAssets(() => {
   emit()
   void sweepReadiness()
@@ -251,7 +280,7 @@ subscribeAssets(() => {
 subscribeMediaWork(() => {
   /*
    * Work finishing is the one event that can make `baked` true, and the cached
-   * answer from before it is now wrong — but only the *newly* finished, for the
+   * answer from before it is now wrong â€” but only the *newly* finished, for the
    * reason `settled` gives.
    */
   for (const item of mediaWork()) {

@@ -486,6 +486,37 @@ export class VideoSource {
   static live = new Set<VideoSource>()
 
   /**
+   * Whether a source is open on this file right now.
+   *
+   * For the readiness strip, which wants to tell the editor which clips will
+   * start without a pause. An open source means the index is in memory and the
+   * decoder is configured — the two things a cut pays for — so it is the
+   * strongest claim the strip can make about a clip, and the only one it could
+   * not make before: everything else it knows is about the *index*, which
+   * every clip in a scanned project has, which is why the strip was one
+   * unbroken colour.
+   */
+  static isOpen(path: string): boolean {
+    for (const source of VideoSource.live) if (source.path === path) return true
+    return false
+  }
+
+  /**
+   * Told when a source opens or closes, so a view of which clips are live can
+   * keep up without polling for it.
+   */
+  static watchers = new Set<() => void>()
+
+  static watchLive(listener: () => void): () => void {
+    VideoSource.watchers.add(listener)
+    return () => VideoSource.watchers.delete(listener)
+  }
+
+  private static announce() {
+    for (const listener of VideoSource.watchers) listener()
+  }
+
+  /**
    * The file this is decoding.
    *
    * So a caller can tell whether a source it already has is for the file it
@@ -528,6 +559,7 @@ export class VideoSource {
     const source = new VideoSource(url, track)
     source.path = path
     VideoSource.live.add(source)
+    VideoSource.announce()
     return { ok: true, source }
   }
 
@@ -568,6 +600,7 @@ export class VideoSource {
     this.decoder?.close()
     this.decoder = null
     VideoSource.live.delete(this)
+    VideoSource.announce()
   }
 
   private discardBuffer() {

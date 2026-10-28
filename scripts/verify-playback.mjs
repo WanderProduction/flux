@@ -3407,6 +3407,113 @@ try {
   })
 
   /*
+   * The clip on the far side of a cut is opened before a backwards pass
+   * reaches it.
+   *
+   * A cut costs differently in each direction. Forwards, a clip is entered at
+   * its first frame, a keyframe: one decode. Backwards, it is entered at its
+   * *last* frame, as deep inside a GOP as a frame gets, so nothing can be
+   * shown until the whole GOP has been decoded from its keyframe — and the
+   * source is not open, because sources are opened for the clips under the
+   * playhead and that clip is not under it. Measured: 356ms backwards against
+   * 230ms forwards over the same boundaries, and reported from use as "lags a
+   * lot on reverse, real noticeable freeze".
+   *
+   * Checked as a fact rather than a duration, deliberately. A cut into a clip
+   * is only cold once a session, so arms have to use different clips, and
+   * different clips are differently hard — the control alone read 165ms on one
+   * slice and 473ms on another, which is wider than anything the change could
+   * do. Whether the far clip is open and holding the frame about to be asked
+   * for is not a rate and does not care about the machine.
+   */
+  await check('a backwards pass opens the clip it is about to cross into', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       /*
+        * Two different files, because a razor through one hands its decoder
+        * over and would pass this without opening anything.
+        *
+        * The *incoming* clip only has to exist — a backwards pass enters it at
+        * its last frame whatever its length — so the short fixture does for
+        * it. The outgoing one needs room to reverse through for a second
+        * before the boundary, which is what the long take is for.
+        */
+       const pick = async (path) => {
+         const found = assets.getAssets().find(a => a.path === path)
+           ?? assets.importAssets([{ path, kind: 'video' }])[0];
+         await assets.ensureProbed(found.id);
+         // Re-read: probing fills the store, and the object taken before it
+         // is a snapshot from when the duration was still unknown.
+         return assets.getAssets().find(a => a.id === found.id) ?? found;
+       };
+       const incoming = await pick(${OPEN_GOP});
+       const outgoing = await pick(${LONG});
+       if (!(incoming.duration > 0.4)) {
+         return { error: 'setup: incoming fixture is ' + incoming.duration + 's' };
+       }
+       if (!(outgoing.duration > 2.5)) {
+         return { error: 'setup: the long take is ' + outgoing.duration + 's' };
+       }
+
+       const firstSpan = Math.min(incoming.duration, 2);
+       const secondSpan = 3;
+       sequence.setSequence(null);
+       sequence.addClip({ assetId: incoming.id, trackId: 'V1', start: 0, duration: firstSpan, offset: 0 });
+       sequence.addClip({ assetId: outgoing.id, trackId: 'V1', start: firstSpan, duration: secondSpan, offset: 0 });
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+
+       const canvas = document.querySelector('canvas.viewer-media');
+       if (!canvas) return { error: 'no viewer canvas' };
+
+       const boundary = firstSpan;
+       const into = incoming;
+       const openOn = () => [...videoSource.VideoSource.live].some(s => s.path === into.path);
+
+       /* Settle on the far side of the boundary, with the incoming clip shut. */
+       playback.pause();
+       playback.setRate(1);
+       playback.seek(boundary + 1.2);
+       await new Promise(r => setTimeout(r, 1500));
+       const before = openOn();
+
+       /* Reverse towards it, and look while still on this side. */
+       playback.setRate(-1);
+       playback.play();
+       let atCut = null;
+       const began = performance.now();
+       while (performance.now() - began < 2500) {
+         await new Promise(r => setTimeout(r, 8));
+         const now = playback.getTime();
+         if (atCut === null && now <= boundary + 0.3 && now > boundary) atCut = openOn();
+         if (now < boundary - 0.5) break;
+       }
+       playback.pause();
+       playback.setRate(1);
+       const crossed = playback.getTime() < boundary;
+       await new Promise(r => setTimeout(r, 300));
+       return { before, atCut, crossed };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(
+      state.before,
+      false,
+      'setup: the incoming clip was already open before the pass, so this proves nothing',
+    )
+    assert.ok(state.crossed, 'setup: the pass never reached the boundary')
+    assert.equal(
+      state.atCut,
+      true,
+      'the clip on the far side of the cut was still shut as the playhead arrived, so the cut pays for an open, an index and a whole GOP',
+    )
+  })
+
+  /*
    * Shuttling fast is served keyframes only, and the rates that counts for are
    * the ones that were measured rather than the ones that sound right.
    *
