@@ -1,6 +1,7 @@
 import { assetUrl } from '../fsBridge'
 import { keyframeAt, sampleAt } from '../../../shared/mp4.js'
 import { trackFor, type VideoTrack } from './indexCache'
+import { RangeReader } from './ranges'
 
 /**
  * One decoded video file, addressed by time.
@@ -57,14 +58,41 @@ const LOOKAHEAD_FRAMES = 8
 const MAX_FEED_AHEAD = LOOKAHEAD_FRAMES * 4
 
 /**
- * How many runs of already-shrunk frames to keep for playing backwards.
+ * The fewest runs of already-shrunk frames to keep for playing backwards.
  *
  * Two: the one being played through and the one before it, so crossing a
- * boundary backwards does not immediately throw away what is being left. A
- * third buys nothing — nothing ever asks for it — and these are the only thing
- * here that costs real memory.
+ * boundary backwards does not immediately throw away what is being left.
+ *
+ * It was also the *most*, on the grounds that a third buys nothing because
+ * nothing ever asks for it. That is true of one pass and false of two. Going
+ * back over the same moment is most of what reviewing a cut is, and measured,
+ * three passes over the same three seconds built five runs each and decoded
+ * 165 frames each — the whole 246ms-a-GOP cost, three times over. So this is
+ * now a floor and `RUN_MEMORY_BUDGET_BYTES` is the limit.
  */
 const KEPT_RUNS = 2
+
+/**
+ * How much memory the kept runs may hold between them.
+ *
+ * Knowable rather than guessed: an ImageBitmap is four bytes a pixel, so a GOP
+ * of thirty at the 480x270 the viewer plays at is about 15MB and at 960x540
+ * about 62MB. 256MB is some sixteen seconds of reverse footage at the smaller
+ * size and four at the larger — enough to rock back and forth over a cut
+ * without rebuilding, and far short of troubling a machine that holds 4K
+ * frames in a decoder pool anyway.
+ *
+ * Deliberately not a count: the same count is sixteen times the memory at one
+ * preview width as at another, and the viewer's width is whatever its panel
+ * happens to be — seen at both 480 and 1920 in one session.
+ *
+ * On its own this changes nothing, and that is worth knowing: it was tried
+ * alone first and the eviction it removes was never what was happening. It
+ * only matters alongside the one-run-per-GOP rule in `buildRun`, because
+ * without that a pass makes several overlapping runs of the same GOP and fills
+ * any budget with copies of the same pictures.
+ */
+const RUN_MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
 
 /**
  * Where the time goes, for the harness that asks.
@@ -389,15 +417,18 @@ export class VideoSource {
   private refused = new Set<number>()
 
   /**
-   * Aborts the reads when this source closes.
+   * This source's reads, and the means of stopping them when it closes.
    *
    * A span can be several megabytes off a spinning drive, and a source that
    * has been closed is one nobody will ever look at again — the clip under the
    * playhead has changed. Letting its read run to completion holds the
    * connection that the *new* clip's first frame is queueing behind, which is
    * most of what a cut costs.
+   *
+   * The reads themselves happen in a worker; see media/ranges.ts for why, and
+   * for what happens where there is no worker to be had.
    */
-  private readonly reads = new AbortController()
+  private readonly reads = new RangeReader()
 
   /**
    * The furthest sample this run has decoded and then thrown away.
@@ -530,7 +561,7 @@ export class VideoSource {
      * those were costing most of a second each at every cut, because the
      * caller was parked inside an await on a read that nobody needed any more.
      */
-    this.reads.abort()
+    this.reads.close()
     this.wake()
     this.discardBuffer()
     this.discardRuns()
@@ -757,17 +788,16 @@ export class VideoSource {
     }
   }
 
-  private async readRange(start: number, end: number): Promise<Uint8Array | null> {
-    try {
-      const res = await fetch(this.url, {
-        headers: { Range: `bytes=${start}-${end}` },
-        signal: this.reads.signal,
-      })
-      if (!res.ok && res.status !== 206) return null
-      return new Uint8Array(await res.arrayBuffer())
-    } catch {
-      return null
-    }
+  /**
+   * One span of the file.
+   *
+   * Null covers every way this can come to nothing — refused, aborted because
+   * the source closed, or no bytes at all — because the caller does the same
+   * thing with all of them, and has since before the read moved off this
+   * thread.
+   */
+  private readRange(start: number, end: number): Promise<Uint8Array | null> {
+    return this.reads.read(this.url, start, end)
   }
 
   /**
@@ -1157,9 +1187,22 @@ export class VideoSource {
     }
   }
 
-  /** The kept run covering this sample at this width, if there is one. */
+  /**
+   * The kept run that actually holds this sample at this width.
+   *
+   * By the pictures rather than by the extent. A run's `to` is the frame its
+   * build was asked for, not the end of its GOP — see the trim in `buildRun` —
+   * so a run can be asked for a frame inside its own stretch that it does not
+   * have, and a run that has since been grown holds frames past the `to` it
+   * was created with. Asking what it holds is the question the caller means.
+   */
   private runFor(at: number, width: number) {
-    return this.runs.find((run) => run.width === width && at >= run.from && at <= run.to)
+    return this.runs.find((run) => run.width === width && run.pictures.has(at))
+  }
+
+  /** The kept run built from this GOP's keyframe, whatever of it is held. */
+  private runAtKeyframe(from: number, width: number) {
+    return this.runs.find((run) => run.width === width && run.from === from)
   }
 
   /**
@@ -1230,6 +1273,32 @@ export class VideoSource {
      */
     if (at < to) to = at
 
+    /*
+     * One run per GOP, grown rather than replaced.
+     *
+     * The trim above records a run's `to` as the frame its build was asked
+     * for, so a run entered part way into a GOP holds only the keyframe side
+     * of it. A later ask at a *higher* sample in that same GOP — which is what
+     * a second pass over the same moment is — used to miss it and build a
+     * second run from the same keyframe, holding a copy of everything the
+     * first one already had. Two runs for one GOP, and with only two kept,
+     * each such build evicted a GOP the pass was about to want.
+     *
+     * Measured before this: three passes over the same three seconds, five
+     * runs built and 165 frames decoded *every* pass, and every kept run
+     * replaced by a new one covering the same samples — including runs below
+     * the stretch the pass even reached.
+     *
+     * So an existing run from this keyframe is extended: the frames it
+     * already has are not shrunk again, and the ones it lacks are added to it.
+     * The decode cannot be avoided — the frames after it are deltas and the
+     * decoder has to walk from the keyframe regardless — but it happens once
+     * per GOP rather than once per entry point.
+     */
+    const grow = this.runAtKeyframe(from, width)
+    if (grow && grow.pictures.has(at)) return
+    if (grow) to = Math.max(to, grow.to)
+
     if (this.buildingRun) {
       const span = this.buildingSpan
       if (span && span.width === width && span.from === from) await this.buildingRun
@@ -1265,6 +1334,8 @@ export class VideoSource {
         16,
         Math.round((width * this.track.height) / Math.max(1, this.track.width)),
       )
+      /* What the run from this keyframe already holds, if it is still here. */
+      const already = this.runAtKeyframe(from, width)
       for (let i = from; i <= to; i++) {
         if (this.closed) break
         // Somewhere else now; this run is nobody's business any more.
@@ -1273,6 +1344,10 @@ export class VideoSource {
         // and marked as the build's own so its restarts do not stop it.
         const frame = await this.frameFor(this.track.pts[i], true)
         if (!frame) continue
+        // Held already by the run being grown. The frame still had to be
+        // decoded — the ones after it are deltas on it — but shrinking it a
+        // second time would buy a second copy of a picture we have.
+        if (already?.pictures.has(i)) continue
         /*
          * Awaited before the next frame is asked for, because asking trims the
          * buffer and the frame this is copying lives in it.
@@ -1293,11 +1368,20 @@ export class VideoSource {
       }
 
       stats.runsBuilt += 1
-      this.runs.push({ from, to, width, pictures })
-      while (this.runs.length > KEPT_RUNS) {
-        const dropped = this.runs.shift()
-        if (dropped) for (const one of dropped.pictures.values()) one.close()
+      /*
+       * Into the run from this keyframe if one is still here, so a GOP is
+       * held once however many times a pass enters it at a different frame.
+       * Looked up again rather than captured: the build awaited a decode for
+       * every frame, and a run can have been evicted in that time.
+       */
+      const into = this.runAtKeyframe(from, width)
+      if (into) {
+        for (const [i, picture] of pictures) into.pictures.set(i, picture)
+        if (to > into.to) into.to = to
+      } else {
+        this.runs.push({ from, to, width, pictures })
       }
+      this.trimRuns()
     })()
 
     this.buildingRun = run.finally(() => {
@@ -1305,6 +1389,38 @@ export class VideoSource {
       this.buildingSpan = null
     })
     return this.buildingRun
+  }
+
+  /**
+   * Drops the oldest runs until the kept ones fit the budget.
+   *
+   * Oldest first, which for a reverse pass is the stretch it finished with
+   * longest ago: runs are made in the order the pass walks, so the one added
+   * first is the one furthest from where the playhead is going next.
+   *
+   * `KEPT_RUNS` is a floor regardless of the budget. Two runs is what crossing
+   * a GOP boundary backwards needs in hand at once, and a preview width large
+   * enough that a single GOP approached the budget would otherwise evict one
+   * of the two and turn every frame into a rebuild.
+   */
+  private trimRuns() {
+    let held = 0
+    for (const run of this.runs) held += this.runBytes(run)
+    while (this.runs.length > KEPT_RUNS && held > RUN_MEMORY_BUDGET_BYTES) {
+      const dropped = this.runs.shift()
+      if (!dropped) break
+      held -= this.runBytes(dropped)
+      for (const one of dropped.pictures.values()) one.close()
+    }
+  }
+
+  /** What a run costs to keep: four bytes a pixel, per picture it holds. */
+  private runBytes(run: { width: number; pictures: Map<number, ImageBitmap> }): number {
+    const height = Math.max(
+      1,
+      Math.round((run.width * this.track.height) / Math.max(1, this.track.width)),
+    )
+    return run.width * height * 4 * run.pictures.size
   }
 
   /** Lets go of every kept run. */

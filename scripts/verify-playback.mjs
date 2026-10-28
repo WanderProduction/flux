@@ -3323,6 +3323,90 @@ try {
   })
 
   /*
+   * One run per GOP, however many times a pass enters it.
+   *
+   * The check above is the reason this one is needed. A build is trimmed to
+   * the frame it was asked for, so a run entered part way into a GOP records
+   * a `to` short of its GOP's end — and an ask at a *higher* frame in the same
+   * GOP then misses it and builds a second run from the same keyframe, holding
+   * a second copy of everything the first one had. Two runs for one GOP, and
+   * since runs are evicted oldest-first, each such build threw away a GOP the
+   * pass was about to want.
+   *
+   * Measured before this was fixed: three reverse passes over the same three
+   * seconds built five runs and decoded 165 frames *every* pass, and every
+   * kept run was replaced by a new one covering the same samples. After:
+   * four runs and 140 decodes on the first pass, then nothing at all — the
+   * repeat passes ran at 30fps with a 43ms worst gap against 27fps and 340ms.
+   *
+   * Checked by counting the runs the source holds for one keyframe, because
+   * the counters cannot see it: five builds looks the same whether they are
+   * five GOPs or one GOP five times over.
+   */
+  await check('a GOP entered twice is held once', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { videoSource, indexCache } = window.__fluxDev;
+       const got = await indexCache.trackFor(${LONG});
+       if (!got.ok) return { error: 'no index: ' + got.reason };
+       const t = got.track;
+
+       /* A GOP with room on both sides, and two frames inside it: one part
+          way in, then one nearer its end — the order that used to rebuild. */
+       let key = -1;
+       for (let i = 0; i < t.count; i++) {
+         if (t.key[i] && t.pts[i] > t.duration / 4) { key = i; break }
+       }
+       if (key < 0) return { error: 'no keyframe past a quarter in' };
+       let end = key;
+       while (end + 1 < t.count && !t.key[end + 1]) end += 1;
+       if (end - key < 4) return { error: 'fixture GOP too short to enter twice' };
+       const earlier = key + Math.floor((end - key) / 3);
+       const later = end - 1;
+
+       const opened = await videoSource.VideoSource.open(${LONG});
+       if (!opened.ok) return { error: 'could not open the fixture: ' + opened.reason };
+       const source = opened.source;
+       try {
+         const width = Math.max(16, Math.round(source.info.width / 4));
+         await source.shownFor(t.pts[earlier], { backwards: true, width });
+         const afterFirst = (source.runs || []).filter(r => r.from === key && r.width === width).length;
+         const shown = await source.shownFor(t.pts[later], { backwards: true, width });
+         const runs = (source.runs || []).filter(r => r.from === key && r.width === width);
+         return {
+           afterFirst,
+           afterSecond: runs.length,
+           holdsEarlier: runs.some(r => r.pictures.has(earlier)),
+           holdsLater: runs.some(r => r.pictures.has(later)),
+           gotPicture: !!shown,
+           width,
+           shownWidth: shown ? shown.width : 0,
+         };
+       } finally {
+         source.close();
+       }`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(state.afterFirst, 1, 'setup: the first ask did not leave one run for that GOP')
+    assert.ok(state.gotPicture, 'the second ask served no picture at all')
+    assert.equal(
+      state.afterSecond,
+      1,
+      `entering the same GOP at a later frame left ${state.afterSecond} runs for it, so it is held twice over`,
+    )
+    assert.ok(
+      state.holdsEarlier && state.holdsLater,
+      'the one run for that GOP does not hold both frames that were asked for',
+    )
+    assert.equal(
+      state.shownWidth,
+      state.width,
+      'the picture is not the width it was asked for',
+    )
+  })
+
+  /*
    * Shuttling fast is served keyframes only, and the rates that counts for are
    * the ones that were measured rather than the ones that sound right.
    *
