@@ -782,6 +782,30 @@ export function snapToFrame(seconds: number, frameRate = sequence.settings.frame
 }
 
 /**
+ * Where a clip ends, on the frame grid.
+ *
+ * A clip's `start` is always snapped, but its `duration` is whatever the media
+ * is long — so `start + duration` lands between two frames, and the clip laid
+ * down after it starts at the *nearest* frame to that, which can be up to half
+ * a frame **before** it. Two clips that look flush on screen therefore overlap
+ * by a hair in the numbers, and every test of the form "is this clip after
+ * that one" written against the raw end quietly answers no.
+ *
+ * That is not academic: a ripple delete measured the hole with the raw end,
+ * decided the very next clip was not after it, left it where it was and slid
+ * everything beyond it back — on top of it. Half the time, since it depends on
+ * which way that last part-frame rounds.
+ *
+ * So this is the end that *matters* to the timeline: the frame the next clip
+ * can start on. It is the same number `findFreeStart` already lays clips down
+ * at and the same one `cutEdges` reports, which is what makes it the edge the
+ * rest of the model is built around.
+ */
+export function clipEnd(clip: Pick<Clip, 'start' | 'duration'>): number {
+  return snapToFrame(clip.start + clip.duration)
+}
+
+/**
  * Frame-quantise a *distance*, which unlike a position may be negative.
  *
  * snapToFrame clamps at zero because no clip starts before the sequence does.
@@ -1792,16 +1816,16 @@ export function allowedTrim(ids: string[], edge: TrimEdge, deltaSeconds: number)
     const spare = (clip.sourceDuration - clip.offset) / clip.speed - clip.duration
     if (edge === 'start') {
       const before = siblings
-        .filter((other) => other.start + other.duration <= clip.start + EPS)
-        .reduce((end, other) => Math.max(end, other.start + other.duration), 0)
+        .filter((other) => clipEnd(other) <= clip.start + EPS)
+        .reduce((end, other) => Math.max(end, clipEnd(other)), 0)
       low = Math.max(low, -clip.offset / clip.speed, before - clip.start, -clip.start)
       high = Math.min(high, clip.duration - min)
     } else {
       const after = siblings
-        .filter((other) => other.start >= clip.start + clip.duration - EPS)
+        .filter((other) => other.start >= clipEnd(clip) - EPS)
         .reduce((start, other) => Math.min(start, other.start), Infinity)
       low = Math.max(low, min - clip.duration)
-      high = Math.min(high, spare, after - clip.start - clip.duration)
+      high = Math.min(high, spare, after - clipEnd(clip))
     }
   }
 
@@ -1907,18 +1931,18 @@ export function allowedStretch(ids: string[], edge: TrimEdge, deltaSeconds: numb
 
     if (edge === 'start') {
       const before = siblings
-        .filter((other) => other.start + other.duration <= clip.start + EPS)
-        .reduce((end, other) => Math.max(end, other.start + other.duration), 0)
+        .filter((other) => clipEnd(other) <= clip.start + EPS)
+        .reduce((end, other) => Math.max(end, clipEnd(other)), 0)
       // The head moving right shortens; moving left lengthens, and it stops at
       // its neighbour and at zero.
       low = Math.max(low, before - clip.start, -clip.start, clip.duration - longest)
       high = Math.min(high, clip.duration - shortest)
     } else {
       const after = siblings
-        .filter((other) => other.start >= clip.start + clip.duration - EPS)
+        .filter((other) => other.start >= clipEnd(clip) - EPS)
         .reduce((start, other) => Math.min(start, other.start), Infinity)
       low = Math.max(low, shortest - clip.duration)
-      high = Math.min(high, longest - clip.duration, after - clip.start - clip.duration)
+      high = Math.min(high, longest - clip.duration, after - clipEnd(clip))
     }
   }
 
@@ -2055,7 +2079,9 @@ export function gapAt(trackId: string, time: number): Gap | null {
   const after = clips.find((clip) => clip.start > time + EPS)
   if (!after) return null
   const before = [...clips].reverse().find((clip) => clip.start + clip.duration <= time + EPS)
-  const start = before ? before.start + before.duration : 0
+  // On the grid, so the hole is a whole number of frames and closing it moves
+  // what follows onto a frame rather than half a one off it.
+  const start = before ? clipEnd(before) : 0
   if (after.start - start < EPS) return null
   return { trackId, start, end: after.start }
 }
@@ -2105,10 +2131,17 @@ export function rippleDeleteClips(ids: string[]): number {
   let clips = sequence.clips.filter((clip) => !doomed.has(clip.id))
   const order = [...removing].sort((a, b) => b.start - a.start)
   for (const gone of order) {
-    const end = gone.start + gone.duration
+    /*
+     * The hole is measured on the frame grid, not from the raw length — see
+     * `clipEnd`. Measured raw, the clip sitting flush against this one fails
+     * the "is it after the hole?" test about half the time, stays put, and
+     * gets buried under everything that does move.
+     */
+    const end = clipEnd(gone)
+    const length = end - gone.start
     clips = clips.map((clip) =>
       clip.trackId === gone.trackId && clip.start >= end - EPS
-        ? { ...clip, start: snapToFrame(clip.start - gone.duration) }
+        ? { ...clip, start: snapToFrame(clip.start - length) }
         : clip,
     )
   }
@@ -2321,11 +2354,14 @@ export function nudgeClips(
 
   /** The clip a member would run into, and how far away it is. */
   const ahead = chosen.map((clip) => {
-    const end = clip.start + clip.duration
+    // Grid ends, not raw ones — see `clipEnd`. The neighbour sitting flush
+    // against this clip fails a raw-end test about half the time, and the nudge
+    // then measures its room to the clip *beyond* it and walks over it.
+    const end = clipEnd(clip)
     const onTrack = others.filter((other) => other.trackId === clip.trackId)
     const touching = right
       ? onTrack.filter((other) => other.start >= end - EPS)
-      : onTrack.filter((other) => other.start + other.duration <= clip.start + EPS)
+      : onTrack.filter((other) => clipEnd(other) <= clip.start + EPS)
     if (touching.length === 0) {
       // Leftward, zero is the edge; rightward there is nothing to aim at.
       return { clip, neighbour: null, gap: right ? Infinity : clip.start }
@@ -2333,9 +2369,7 @@ export function nudgeClips(
     const neighbour = right
       ? touching.reduce((best, other) => (other.start < best.start ? other : best))
       : touching.reduce((best, other) => (other.start > best.start ? other : best))
-    const gap = right
-      ? neighbour.start - end
-      : clip.start - (neighbour.start + neighbour.duration)
+    const gap = right ? neighbour.start - end : clip.start - clipEnd(neighbour)
     return { clip, neighbour, gap }
   })
 

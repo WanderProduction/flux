@@ -3980,6 +3980,106 @@ try {
     )
   })
 
+  /*
+   * The same three checks again, on clips whose lengths are not whole frames.
+   *
+   * Every ripple check above uses fixtures that are an exact number of seconds
+   * long, which is the one shape where this cannot go wrong — and real footage
+   * never is. A clip's `start` is snapped to the frame grid; its `duration` is
+   * whatever the file is. So `start + duration` falls between two frames, the
+   * clip laid down after it starts at the nearest one, and about half the time
+   * that frame is *before* the previous clip's raw end.
+   *
+   * At 24fps a 1.02s clip ends 24.48 frames in, so the next clip starts at
+   * frame 24 — two hundredths of a second inside it. A ripple that measured
+   * the hole with the raw end then decided that clip was not after the hole,
+   * left it standing, and slid everything beyond it back on top of it.
+   *
+   * Reported from the app as a clip block stuck over another one, with the
+   * word "sometimes" doing the work of "it depends which way the last
+   * part-frame rounds".
+   */
+  const seedOffGrid = `
+    const { assets, sequence, view } = window.__fluxDev;
+    const a = assets.getAssets().find(x => x.name === 'clipA.mp4');
+    sequence.setSequence(null);
+    view.recordView({ timeline: { zoom: 30 } });
+    await new Promise(r => setTimeout(r, 200));
+    /* Laid down the way the app lays them: each asked for zero, each slid
+       right to the frame after the one before it. */
+    for (const duration of [1.02, 2, 1.5]) {
+      sequence.addClip({ assetId: a.id, trackId: 'V1', start: 0, duration });
+    }
+    await new Promise(r => setTimeout(r, 400));
+    window.__where = () => window.__fluxDev.sequence.getSequence().clips
+      .slice()
+      .sort((p, q) => p.trackId.localeCompare(q.trackId) || p.start - q.start)
+      .map(c => c.trackId + '@' + Math.round(c.start * 1000) / 1000 +
+                '+' + Math.round(c.duration * 1000) / 1000);
+    window.__overlaps = () => {
+      const fps = window.__fluxDev.sequence.getSequence().settings.frameRate;
+      const grid = t => Math.round(t * fps) / fps;
+      const on = window.__fluxDev.sequence.getSequence().clips
+        .filter(c => c.trackId === 'V1').sort((p, q) => p.start - q.start);
+      return on.filter((c, i) => i > 0 &&
+        c.start < grid(on[i - 1].start + on[i - 1].duration) - 1e-9).length;
+    };
+  `
+
+  await check('clips of an unround length still lie flush when one is rippled out', async () => {
+    const state = await evaluate(
+      cdp,
+      seedOffGrid +
+        `const laid = window.__where();
+         const { playback } = window.__fluxDev;
+         playback.seek(0.5);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('w', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 300));
+         return { laid, where: window.__where(), overlaps: window.__overlaps() };`,
+    )
+    assert.deepEqual(
+      state.laid,
+      ['V1@0+1.02', 'V1@1+2', 'V1@3+1.5'],
+      'setup: the second clip should start at frame 24, just inside the first',
+    )
+    assert.equal(state.overlaps, 0, 'no clip may be left sitting on top of another')
+    assert.deepEqual(
+      state.where,
+      ['V1@0+2', 'V1@2+1.5'],
+      'both clips after the removed one move back by the hole it left',
+    )
+  })
+
+  await check('an unround ripple closes the hole completely', async () => {
+    /*
+     * Not just "no overlap" — no gap either. The hole was one second of frames
+     * wide however the arithmetic is written, and what follows has to land on
+     * zero, not a frame either side of it.
+     */
+    const state = await evaluate(
+      cdp,
+      seedOffGrid +
+        `const { playback } = window.__fluxDev;
+         playback.seek(0.5);
+         await new Promise(r => setTimeout(r, 150));
+         window.__key('s');
+         await new Promise(r => setTimeout(r, 200));
+         window.__key('w', { shiftKey: true });
+         await new Promise(r => setTimeout(r, 300));
+         const on = sequence.getSequence().clips.filter(c => c.trackId === 'V1')
+           .sort((p, q) => p.start - q.start);
+         return { first: on[0].start, gap: on[1].start - (on[0].start + on[0].duration) };`,
+    )
+    assert.equal(state.first, 0, 'the clip behind the hole should sit at the top of the sequence')
+    assert.ok(
+      Math.abs(state.gap) < 1 / 24 / 2 + 1e-9,
+      `and the next should be flush against it, not ${state.gap}s away`,
+    )
+  })
+
   await check('S takes the gap when there is no clip to take', async () => {
     const state = await evaluate(
       cdp,
