@@ -157,6 +157,15 @@ const JUMP_FRAMES = 5
 const POOL_SIZE = 6
 
 /**
+ * How long the playhead must sit still before its neighbours are opened.
+ *
+ * A scrub crosses a clip every few frames, and opening both neighbours of each
+ * one it passes would be dozens of decoders a second. Waiting a beat is the
+ * difference between an editor arriving somewhere and passing through it.
+ */
+const WARM_NEIGHBOURS_MS = 250
+
+/**
  * Every clip to be drawn at `time`, bottom layer first.
  *
  * Tracks are stored in the order they stack, V2 above V1, so this walks them
@@ -759,6 +768,102 @@ export function ViewerPanel() {
     }
     return best
   }, [sequence, layers])
+
+  /** The clip the playhead would reach next going forwards. */
+  const comingNext = useMemo(() => {
+    const front = layers.at(-1)
+    if (!front) return null
+    const ends = front.start + front.duration
+    let best: Clip | null = null
+    for (const other of sequence.clips) {
+      if (other.id === front.id || other.trackId !== front.trackId) continue
+      if (other.start + 1e-6 < ends) continue
+      if (!best || other.start < best.start) best = other
+    }
+    return best
+  }, [sequence, layers])
+
+  /**
+   * Takes a source into the pool, dropping the least recently used.
+   *
+   * The reconcile does not use this, and deliberately. It pools every
+   * departing source first, lets the arriving layers claim what they
+   * recognise, and only then evicts — evicting as each one arrived could throw
+   * away a decoder a layer in the same tick was about to ask for, which is
+   * precisely the handover that makes a razor cheap.
+   */
+  const keep = useCallback((source: VideoSource) => {
+    const pool = poolRef.current
+    if (pool.has(source.path)) {
+      source.close()
+      return
+    }
+    pool.set(source.path, source)
+    while (pool.size > POOL_SIZE) {
+      const oldest = pool.keys().next().value
+      if (oldest === undefined) break
+      pool.get(oldest)?.close()
+      pool.delete(oldest)
+    }
+  }, [])
+
+  /**
+   * Opens the clips either side of this one, a moment after landing on it.
+   *
+   * Arriving at a clip nothing has opened costs an index read and a codec
+   * question before a frame can even be asked for — about 27ms measured, and
+   * far more when the index has never been built. Doing it while the playhead
+   * is sitting still costs nothing anybody can see, and it is the half of the
+   * cut that *forward* playback pays: entering a clip forwards lands on a
+   * keyframe, so the decode is one frame and the opening is the whole bill.
+   *
+   * Opened, not decoded. The reverse warm-up above decodes, because entering a
+   * clip backwards lands deep in a GOP and the decode is unavoidable; going
+   * forwards there is nothing worth decoding early, and decoding both
+   * neighbours of every clip would be a great deal of work for a direction the
+   * playhead will not take.
+   *
+   * Deferred, because a scrub crosses a clip every few frames and opening both
+   * neighbours of each would be dozens of decoders in a second — the pool
+   * would thrash and the thread would wear it. A beat of stillness is the
+   * signal that the editor has arrived somewhere rather than passed through.
+   */
+  const openingRef = useRef(new Set<string>())
+  useEffect(() => {
+    const near = [comingBack, comingNext].filter((c): c is Clip => c !== null)
+    if (near.length === 0) return
+    let live = true
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        for (const clip of near) {
+          if (!live) return
+          const file = assetById.get(clip.assetId)
+          if (!file || file.missing || file.unreadable || file.kind !== 'video') continue
+          // Already in hand, already kept, or already on its way.
+          if (poolRef.current.has(file.path)) continue
+          if ([...sourcesRef.current.values()].some((s) => s.path === file.path)) continue
+          if (openingRef.current.has(file.path)) continue
+          openingRef.current.add(file.path)
+          try {
+            const opened = await VideoSource.open(file.path)
+            if (!opened.ok) continue
+            // The panel went, or the playhead arrived and opened it itself.
+            if (!live || poolRef.current.has(file.path)) {
+              opened.source.close()
+              continue
+            }
+            keep(opened.source)
+          } finally {
+            openingRef.current.delete(file.path)
+          }
+        }
+      })()
+    }, WARM_NEIGHBOURS_MS)
+    return () => {
+      live = false
+      window.clearTimeout(timer)
+    }
+  }, [comingBack, comingNext, assetById, keep])
 
   /**
    * Opens the clip behind this one and decodes its last stretch, before the

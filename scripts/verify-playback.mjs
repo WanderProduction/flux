@@ -42,6 +42,9 @@ const LONG = JSON.stringify(path.join(MEDIA_DIR, 'long_take.mp4'))
 const OPEN_GOP = JSON.stringify(path.join(MEDIA_DIR, 'open_gop.mp4'))
 /** A short ordinary clip, for when a second *file* is what matters. */
 const CLIP_A = JSON.stringify(path.join(MEDIA_DIR, 'clipA.mp4'))
+/** Two more distinct files, for when several at once is what matters. */
+const LAYER_BLUE = JSON.stringify(path.join(MEDIA_DIR, 'layer_blue.mp4'))
+const LAYER_RED = JSON.stringify(path.join(MEDIA_DIR, 'layer_red.mp4'))
 const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 const { check, report } = createChecker()
@@ -3405,6 +3408,95 @@ try {
       state.shownWidth,
       state.width,
       'the picture is not the width it was asked for',
+    )
+  })
+
+  /*
+   * Landing on a clip opens the one after it, and scrubbing past does not.
+   *
+   * Arriving at a clip nothing has opened costs an index read and a codec
+   * question before a frame can be asked for — about 27ms, and far more when
+   * the index has never been built. That is the whole of what a *forward* cut
+   * pays, since entering a clip forwards lands on a keyframe and the decode is
+   * one frame. Doing it while the playhead sits still costs nothing anyone
+   * sees.
+   *
+   * The second half is the risk and is why they are checked together: a scrub
+   * crosses a clip every few frames, and opening both neighbours of each would
+   * be dozens of decoders a second. That does not fail loudly — it exhausts
+   * the machine's hardware decoders and falls back to software, 51fps against
+   * 352 on real footage.
+   *
+   * Only the clip *after* is asserted. The one before may already be open
+   * because the playhead started at zero and warmed its own neighbour, which
+   * would make a "was not open" claim about it meaningless.
+   */
+  await check('landing on a clip opens the next one, and scrubbing does not', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       /* Distinct files, so "is it open" is a question about one clip. */
+       const paths = [${CLIP_A}, ${LAYER_BLUE}, ${LONG}, ${LAYER_RED}];
+       const laid = [];
+       for (const path of paths) {
+         const found = assets.getAssets().find(a => a.path === path)
+           ?? assets.importAssets([{ path, kind: 'video' }])[0];
+         await assets.ensureProbed(found.id);
+         const probed = assets.getAssets().find(a => a.id === found.id) ?? found;
+         if (!(probed.duration > 0.4)) return { error: 'setup: ' + path + ' has no duration' };
+         laid.push(probed);
+       }
+
+       const span = 2;
+       sequence.setSequence(null);
+       laid.forEach((a, i) => {
+         sequence.addClip({ assetId: a.id, trackId: 'V1', start: i * span, duration: span, offset: 0 });
+       });
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1500));
+
+       const openOn = (path) => [...videoSource.VideoSource.live].some(s => s.path === path);
+       const next = laid[3].path;
+
+       playback.pause();
+       playback.setRate(1);
+       playback.seek(2 * span + span / 2);
+       /* Sooner than the warm delay, so this sees the before rather than the
+          after. */
+       await new Promise(r => setTimeout(r, 120));
+       const soon = openOn(next);
+       await new Promise(r => setTimeout(r, 1500));
+       const later = openOn(next);
+
+       /* And a scrub across everything, faster than the delay. */
+       let peak = videoSource.VideoSource.live.size;
+       for (let round = 0; round < 3; round++) {
+         for (let i = 0; i < laid.length; i++) {
+           playback.seek(i * span + 0.3);
+           await new Promise(r => setTimeout(r, 50));
+           if (videoSource.VideoSource.live.size > peak) peak = videoSource.VideoSource.live.size;
+         }
+       }
+       return { soon, later, peak };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(
+      state.soon,
+      false,
+      'setup: the next clip was already open on arrival, so this proves nothing',
+    )
+    assert.equal(
+      state.later,
+      true,
+      'sitting on a clip never opened the one after it, so arriving there still pays for an index and a codec question',
+    )
+    assert.ok(
+      state.peak <= 10,
+      `scrubbing opened ${state.peak} decoders at once — the wait before warming is not holding`,
     )
   })
 
