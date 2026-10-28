@@ -40,6 +40,8 @@ const dir = JSON.stringify(MEDIA_DIR)
 /** A minute of video, which is the only kind of file that can prove seeking. */
 const LONG = JSON.stringify(path.join(MEDIA_DIR, 'long_take.mp4'))
 const OPEN_GOP = JSON.stringify(path.join(MEDIA_DIR, 'open_gop.mp4'))
+/** A short ordinary clip, for when a second *file* is what matters. */
+const CLIP_A = JSON.stringify(path.join(MEDIA_DIR, 'clipA.mp4'))
 const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 const { check, report } = createChecker()
@@ -3407,6 +3409,96 @@ try {
   })
 
   /*
+   * A clip the playhead has left is kept, and not for ever.
+   *
+   * Sources used to live and die with the clips under the playhead: move away
+   * and the clip you left was closed, taking its index, its decoder and every
+   * run it had built, so coming back paid for all of it again. Reported as
+   * exactly that — a clip plays rough, plays better the second time, and is
+   * rough again after a trip elsewhere and back.
+   *
+   * Both halves are checked together because each is the other's risk. Keeping
+   * them is the point; keeping them all would exhaust the machine's hardware
+   * decoders, which does not fail loudly — it falls back to software, 51fps
+   * against 352 on this footage, and looks like a mysterious slowdown an hour
+   * into a session.
+   *
+   * By identity, not by whether something is open: a reopened source looks
+   * exactly like a kept one from outside.
+   */
+  await check('a clip survives the playhead leaving it, and the pool stays bounded', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       const asset = assets.getAssets().find(a => a.path === ${LONG})
+         ?? assets.importAssets([{ path: ${LONG}, kind: 'video' }])[0];
+       await assets.ensureProbed(asset.id);
+       const probed = assets.getAssets().find(a => a.id === asset.id) ?? asset;
+       if (!(probed.duration > 6)) return { error: 'setup: fixture too short' };
+
+       /*
+        * One file laid many times over. Every clip is a different clip, so the
+        * playhead really does leave one and arrive at another, while the pool
+        * — which is keyed by file — should hold exactly one decoder for all of
+        * them. That is the cheapest way to state both halves at once.
+        */
+       const span = Math.min(probed.duration / 2, 2);
+       const many = 12;
+       sequence.setSequence(null);
+       for (let i = 0; i < many; i++) {
+         sequence.addClip({ assetId: probed.id, trackId: 'V1', start: i * span, duration: span, offset: 0 });
+       }
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+
+       let serial = 0;
+       const tags = new WeakMap();
+       const idHere = () => {
+         const s = [...videoSource.VideoSource.live].find(x => x.path === probed.path);
+         if (!s) return null;
+         if (!tags.has(s)) tags.set(s, ++serial);
+         return tags.get(s);
+       };
+       const park = async (t) => {
+         playback.pause();
+         playback.setRate(1);
+         playback.seek(t);
+         await new Promise(r => setTimeout(r, 900));
+       };
+
+       await park(span / 2);
+       const first = idHere();
+
+       /* Away across the whole timeline, far more clips than the pool holds. */
+       let peak = 0;
+       for (let i = 1; i < many; i++) {
+         await park(i * span + span / 2);
+         if (videoSource.VideoSource.live.size > peak) peak = videoSource.VideoSource.live.size;
+       }
+
+       /* And back to where we started. */
+       await park(span / 2);
+       const back = idHere();
+       return { first, back, peak, many };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(state.first !== null, 'setup: nothing was open on the clip to begin with')
+    assert.equal(
+      state.back,
+      state.first,
+      'coming back to a clip found a different decoder, so leaving it threw its work away',
+    )
+    assert.ok(
+      state.peak <= 10,
+      `${state.peak} decoders were open at once across ${state.many} clips — the pool is not letting go`,
+    )
+  })
+
+  /*
    * The clip on the far side of a cut is opened before a backwards pass
    * reaches it.
    *
@@ -3429,7 +3521,7 @@ try {
   await check('a backwards pass opens the clip it is about to cross into', async () => {
     const state = await evaluate(
       cdp,
-      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+      `const { assets, sequence, playback, view, commands, videoSource, indexCache } = window.__fluxDev;
        await commands.run('workspace.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
@@ -3450,7 +3542,13 @@ try {
          // is a snapshot from when the duration was still unknown.
          return assets.getAssets().find(a => a.id === found.id) ?? found;
        };
-       const incoming = await pick(${OPEN_GOP});
+       /*
+        * Not the open-GOP fixture: its sync samples are not IDRs, so building
+        * a run from its last stretch walks back keyframe by keyframe learning
+        * which ones the decoder will refuse. That path is worth having and is
+        * checked elsewhere; here it only makes the clock the subject.
+        */
+       const incoming = await pick(${CLIP_A});
        const outgoing = await pick(${LONG});
        if (!(incoming.duration > 0.4)) {
          return { error: 'setup: incoming fixture is ' + incoming.duration + 's' };
@@ -3472,14 +3570,33 @@ try {
 
        const boundary = firstSpan;
        const into = incoming;
-       const openOn = () => [...videoSource.VideoSource.live].some(s => s.path === into.path);
+       /*
+        * Not "is it open" — the pool keeps it open across a seek now, so that
+        * question answers itself and proves nothing. What the warm-up adds is
+        * the *decoded* last stretch: the GOP a backwards pass lands in.
+        */
+       const got = await indexCache.trackFor(into.path);
+       if (!got.ok) return { error: 'setup: no index for the incoming clip' };
+       const t = got.track;
+       let lastSample = 0;
+       for (let i = 0; i < t.count; i++) if (t.pts[i] < firstSpan) lastSample = i;
+       /*
+        * Counted rather than asked for one exact frame: which sample a clip's
+        * last frame is depends on rounding between clip duration and frame
+        * rate, and the claim is about the GOP being decoded early, not about
+        * an index.
+        */
+       const runsOn = () => {
+         const s = [...videoSource.VideoSource.live].find(x => x.path === into.path);
+         return s ? (s.runs || []).length : 0;
+       };
 
        /* Settle on the far side of the boundary, with the incoming clip shut. */
        playback.pause();
        playback.setRate(1);
        playback.seek(boundary + 1.2);
        await new Promise(r => setTimeout(r, 1500));
-       const before = openOn();
+       const before = runsOn();
 
        /* Reverse towards it, and look while still on this side. */
        playback.setRate(-1);
@@ -3489,27 +3606,26 @@ try {
        while (performance.now() - began < 2500) {
          await new Promise(r => setTimeout(r, 8));
          const now = playback.getTime();
-         if (atCut === null && now <= boundary + 0.3 && now > boundary) atCut = openOn();
+         if (atCut === null && now <= boundary + 0.3 && now > boundary) atCut = runsOn();
          if (now < boundary - 0.5) break;
        }
        playback.pause();
        playback.setRate(1);
        const crossed = playback.getTime() < boundary;
        await new Promise(r => setTimeout(r, 300));
-       return { before, atCut, crossed };`,
+       return { before, atCut, crossed, lastSample };`,
     )
 
     assert.ok(!state.error, state.error)
     assert.equal(
       state.before,
-      false,
-      'setup: the incoming clip was already open before the pass, so this proves nothing',
+      0,
+      'setup: the incoming clip already held decoded runs, so this proves nothing',
     )
     assert.ok(state.crossed, 'setup: the pass never reached the boundary')
-    assert.equal(
-      state.atCut,
-      true,
-      'the clip on the far side of the cut was still shut as the playhead arrived, so the cut pays for an open, an index and a whole GOP',
+    assert.ok(
+      state.atCut > 0,
+      'the clip on the far side of the cut had decoded nothing as the playhead arrived, so the cut still pays for a whole GOP at the moment the picture is wanted',
     )
   })
 

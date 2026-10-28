@@ -142,6 +142,21 @@ const DRAW_TIMEOUT_MS = 2000
 const JUMP_FRAMES = 5
 
 /**
+ * How many decoders to keep for clips the playhead has left.
+ *
+ * Six, and the limit that matters is not memory. A machine has a small fixed
+ * number of hardware decoders — a handful to a dozen or so — and every open
+ * source holds one; a pool sized in megabytes could comfortably hold forty and
+ * exhaust them long before it felt large. Six covers the stretch of timeline
+ * an editor works in, which is what this is for: leaving a clip and coming
+ * back should not mean paying for its index, its decoder and its runs again.
+ *
+ * Each source caps its own frame memory already, so what this bounds is the
+ * decoders, and nothing here needs to know how big a run is.
+ */
+const POOL_SIZE = 6
+
+/**
  * Every clip to be drawn at `time`, bottom layer first.
  *
  * Tracks are stored in the order they stack, V2 above V1, so this walks them
@@ -544,6 +559,19 @@ export function ViewerPanel() {
    * what is new, close what has gone, leave the rest alone.
    */
   const sourcesRef = useRef(new Map<string, VideoSource>())
+  /**
+   * Decoders for clips the playhead has left, kept by the file they read.
+   *
+   * A source decodes a *file*; the clip around it only says which moment to
+   * ask for. So this is keyed by path rather than by clip, and a trim, a
+   * razor, a clip dragged to another track or a new clip laid over the top
+   * all leave it untouched — none of them changes which file any of this
+   * decoded. Only the composite above it has to be worked out again.
+   *
+   * Insertion order is recency: a hit deletes and re-inserts, so the first key
+   * is always the one to evict.
+   */
+  const poolRef = useRef(new Map<string, VideoSource>())
   const [ready, setReady] = useState(0)
   const [why, setWhy] = useState<string | null>(null)
 
@@ -622,29 +650,52 @@ export function ViewerPanel() {
      * decoder is worth handing over whenever the file matches, whatever the
      * clip around it says.
      */
-    const spare = new Map<string, VideoSource>()
+    const pool = poolRef.current
     for (const [id, source] of [...held]) {
       if (wanted.has(id)) continue
       held.delete(id)
-      // Only one spare per file: a second would never be claimed, because an
-      // arriving layer takes at most one.
-      if (spare.has(source.path)) source.close()
-      else spare.set(source.path, source)
+      // One per file: a second could never be claimed, because an arriving
+      // layer takes at most one.
+      if (pool.has(source.path)) source.close()
+      else pool.set(source.path, source)
     }
 
     for (const layer of layers) {
       if (held.has(layer.id)) continue
       const file = assetById.get(layer.assetId)
       if (!file) continue
-      const carried = spare.get(file.path)
+      const carried = pool.get(file.path)
       if (carried) {
         held.set(layer.id, carried)
-        spare.delete(file.path)
+        pool.delete(file.path)
       }
     }
 
-    // Whatever nothing claimed really has gone.
-    for (const source of spare.values()) source.close()
+    /*
+     * What is left in the pool is kept, not closed.
+     *
+     * This used to be the end of a decoder's life: anything no layer claimed
+     * in this same tick was shut. That made a razor cheap — the two halves of
+     * a cut clip hand the decoder between them — and made everything else
+     * expensive, because the pool only existed for the length of one
+     * reconcile. Move the playhead to another part of the timeline and the
+     * clip you left was closed, taking its index, its decoder and every run it
+     * had built; come back a second later and all of it was paid for again.
+     * Reported as exactly that: a clip plays rough, plays better the second
+     * time, and is rough again after a trip elsewhere and back.
+     *
+     * So they are kept, oldest evicted first. Bounded by count rather than by
+     * memory: each source already caps its own runs, and the real limit here
+     * is hardware decoders, of which a machine has a small fixed number — a
+     * pool measured in megabytes could hold forty of them and exhaust that
+     * long before it noticed.
+     */
+    while (pool.size > POOL_SIZE) {
+      const oldest = pool.keys().next().value
+      if (oldest === undefined) break
+      pool.get(oldest)?.close()
+      pool.delete(oldest)
+    }
 
     void Promise.all(
       layers.map(async (layer) => {
@@ -680,13 +731,16 @@ export function ViewerPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stack, assetById])
 
-  // Everything goes when the panel does; the reconcile above only closes what
-  // has left the stack.
+  // Everything goes when the panel does — the ones in use and the ones merely
+  // kept. The reconcile above never closes on the way past any more.
   useEffect(() => {
     const held = sourcesRef.current
+    const pool = poolRef.current
     return () => {
       for (const source of held.values()) source.close()
       held.clear()
+      for (const source of pool.values()) source.close()
+      pool.clear()
     }
   }, [])
 
@@ -760,15 +814,24 @@ export function ViewerPanel() {
         if (!source) {
           const file = assetById.get(target.assetId)
           if (!file || file.missing || file.unreadable || file.kind !== 'video') return
-          const opened = await VideoSource.open(file.path)
-          if (!opened.ok) return
-          // Someone got there first — the playhead may simply have arrived.
-          if (sourcesRef.current.has(target.id)) {
-            opened.source.close()
-            return
+          // Already kept from an earlier visit: then there is nothing to open
+          // and quite possibly nothing to decode either.
+          const kept = poolRef.current.get(file.path)
+          if (kept) {
+            poolRef.current.delete(file.path)
+            sourcesRef.current.set(target.id, kept)
+            source = kept
+          } else {
+            const opened = await VideoSource.open(file.path)
+            if (!opened.ok) return
+            // Someone got there first — the playhead may simply have arrived.
+            if (sourcesRef.current.has(target.id)) {
+              opened.source.close()
+              return
+            }
+            sourcesRef.current.set(target.id, opened.source)
+            source = opened.source
           }
-          sourcesRef.current.set(target.id, opened.source)
-          source = opened.source
         }
         /*
          * Its last frame, which is where a backwards pass enters. Asking
