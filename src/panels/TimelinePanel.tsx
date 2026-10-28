@@ -162,11 +162,68 @@ function wheelPixels(event: WheelEvent): number {
  * Keeps a zoom usable. Also guards the value read back from a document: a
  * hand-edited .flux with zoom 0 would give every clip zero width and an empty
  * timeline that looks like lost work.
+ *
+ * `floor` is for the one case where `MIN_ZOOM` is itself the wrong answer: see
+ * `widestUseful`.
  */
-function clampZoom(pixelsPerSecond: number): number {
+function clampZoom(pixelsPerSecond: number, floor = MIN_ZOOM): number {
   if (!Number.isFinite(pixelsPerSecond) || pixelsPerSecond <= 0) return DEFAULT_ZOOM
-  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, pixelsPerSecond))
+  return Math.min(MAX_ZOOM, Math.max(floor, pixelsPerSecond))
 }
+
+/**
+ * Seconds of empty timeline kept past the last clip, as somewhere to drop.
+ *
+ * Part of the content width, so a fit that ignored it would leave the view
+ * still scrollable by four seconds and "show me everything" would not quite.
+ */
+const CONTENT_SLACK = 4
+
+/** The zoom at which a sequence of `length` exactly fills a view `width` wide. */
+function zoomThatFits(width: number, length: number): number {
+  // The slack counts, because it is on screen. The margin is so the last clip
+  // is not flush against the right-hand edge and the end marker stays visible.
+  return (width * 0.97) / (length + CONTENT_SLACK)
+}
+
+/**
+ * How far out the zoom is allowed to go, for this sequence in this view.
+ *
+ * `MIN_ZOOM` is eight pixels a second, which stops the wheel from grinding a
+ * timeline down to an empty-looking strip. It is also, for anything long, more
+ * than enough to make the whole-sequence view impossible: two hours at eight
+ * pixels a second is fifty-seven thousand pixels, so "show me everything"
+ * could never show everything.
+ *
+ * The fix is not a smaller constant — that reintroduces the empty strip for
+ * short sequences. It is to notice that *the whole sequence filling the view*
+ * is never degenerate, whatever number it works out to, and to let the floor
+ * be whichever of the two is further out.
+ */
+function widestUseful(width: number, length: number): number {
+  if (!(width > 0) || !(length > 0)) return MIN_ZOOM
+  return Math.min(MIN_ZOOM, zoomThatFits(width, length))
+}
+
+/**
+ * How far across the view the playhead gets before the view travels with it.
+ *
+ * Not the edge. Premiere pages when the playhead reaches the right-hand side:
+ * the whole timeline jumps a screen, the clip you were watching is suddenly
+ * behind you, and you have to re-find your place at exactly the moment you
+ * were paying attention. Starting to travel at three quarters means the next
+ * clips are revealed *before* you need them and the one playing stays put.
+ *
+ * A fraction rather than a number of seconds, so it behaves at every zoom: on
+ * a timeline zoomed out far enough to fit, three quarters is minutes away and
+ * the view never moves at all, which is the right answer there.
+ *
+ * The matching figure for running backwards is a quarter, so a reverse pass
+ * reveals what is behind it with the same amount of warning. Asymmetric on
+ * purpose: the space in front of the playhead is what you are about to watch.
+ */
+const FOLLOW_AHEAD = 0.75
+const FOLLOW_BEHIND = 0.25
 
 /** Tick spacing that keeps labels readable at any zoom. */
 function tickInterval(pixelsPerSecond: number): number {
@@ -421,6 +478,7 @@ export function TimelinePanel() {
    * Recorded with the view, so a project opens the way it was left.
    */
   const [snapping, setSnapping] = useState(() => getView().timeline.snapping !== false)
+  const [follow, setFollow] = useState(() => getView().timeline.follow !== false)
   const lanesRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const headersRef = useRef<HTMLDivElement>(null)
@@ -460,6 +518,55 @@ export function TimelinePanel() {
     return { front, ids: front ? withLinked([front.id]) : [] }
   }, [])
 
+  /** Read inside `keepUp`, so toggling follow does not rebuild the placer. */
+  const followRef = useRef(follow)
+  followRef.current = follow
+
+  /**
+   * The last time `keepUp` acted on, so a render that did not move the
+   * playhead cannot scroll the view.
+   */
+  const followedAt = useRef<number | null>(null)
+
+  /**
+   * Brings the view along with the playhead, once it is far enough across.
+   *
+   * Only when the playhead has actually *moved*. `placePlayhead` runs after
+   * every render as well as on every tick, and without this a paused timeline
+   * would drag itself back to the playhead the moment anything re-rendered —
+   * so scrolling off to look at another part of the sequence would be
+   * impossible, which is half of what the follow toggle is for.
+   *
+   * Scrolling is set directly rather than animated. The playhead already moves
+   * a few pixels per frame, so holding it at a fixed fraction of the view
+   * *is* a smooth scroll — one that is exactly as smooth as playback is,
+   * which is the only pace that cannot drift away from it.
+   */
+  const keepUp = useCallback((time: number) => {
+    const lanes = lanesRef.current
+    if (!lanes || !followRef.current) {
+      // Remembered even while not following, so turning it back on mid-play
+      // catches up on the next tick rather than on the next render.
+      followedAt.current = time
+      return
+    }
+    if (followedAt.current === time) return
+    followedAt.current = time
+
+    const width = lanes.clientWidth
+    // Nothing to follow when the whole sequence is already on screen, which is
+    // what Zoom To Fit leaves it as.
+    if (width <= 0 || lanes.scrollWidth <= width + 1) return
+
+    const x = time * zoomForPlayhead.current
+    const ahead = lanes.scrollLeft + width * FOLLOW_AHEAD
+    const behind = lanes.scrollLeft + width * FOLLOW_BEHIND
+    if (x <= ahead && x >= behind) return
+
+    const wanted = x - width * (x > ahead ? FOLLOW_AHEAD : FOLLOW_BEHIND)
+    lanes.scrollLeft = Math.max(0, Math.min(wanted, lanes.scrollWidth - width))
+  }, [])
+
   /**
    * Puts the playhead where the clock says, without re-rendering anything.
    *
@@ -473,10 +580,12 @@ export function TimelinePanel() {
    * two of them cost nothing on a tick that only moved the clock.
    */
   const placePlayhead = useCallback(() => {
-    const left = `${getTime() * zoomForPlayhead.current}px`
+    const time = getTime()
+    const left = `${time * zoomForPlayhead.current}px`
     if (playheadRef.current) playheadRef.current.style.left = left
     if (gripRef.current) gripRef.current.style.left = left
-  }, [])
+    keepUp(time)
+  }, [keepUp])
 
   useEffect(
     () =>
@@ -566,8 +675,8 @@ export function TimelinePanel() {
   // Recorded, never marked dirty: zooming is not an edit. It is written out
   // with the next save. See kernel/view.ts.
   useEffect(
-    () => recordView({ timeline: { zoom, snapping, autoSelect } }),
-    [zoom, snapping, autoSelect],
+    () => recordView({ timeline: { zoom, snapping, autoSelect, follow } }),
+    [zoom, snapping, autoSelect, follow],
   )
 
   /*
@@ -589,8 +698,14 @@ export function TimelinePanel() {
       subscribeView(() => {
         setSnapping(getView().timeline.snapping !== false)
         setAutoSelect(getView().timeline.autoSelect === true)
+        setFollow(getView().timeline.follow !== false)
         const stored = getView().timeline.zoom
-        if (stored > 0 && Math.abs(stored - zoom) > 0.01) setZoom(clampZoom(stored))
+        if (stored > 0 && Math.abs(stored - zoom) > 0.01) {
+          // Read live rather than closed over: this subscription is rebuilt
+          // only when the zoom changes, and the sequence's length is not that.
+          const width = lanesRef.current?.clientWidth ?? 0
+          setZoom(clampZoom(stored, widestUseful(width, sequenceDuration())))
+        }
       }),
     [zoom],
   )
@@ -602,7 +717,7 @@ export function TimelinePanel() {
   }, [assets])
 
   const duration = sequenceDuration()
-  const contentWidth = Math.max((duration + 4) * zoom, 600)
+  const contentWidth = Math.max((duration + CONTENT_SLACK) * zoom, 600)
 
   /**
    * The span of time on screen, in seconds, widened by a screen either side.
@@ -1037,9 +1152,10 @@ export function TimelinePanel() {
           clientX: x,
         }
       }
-      setZoom((current) => clampZoom(current * factor))
+      const width = lanes?.clientWidth ?? 0
+      setZoom((current) => clampZoom(current * factor, widestUseful(width, duration)))
     },
-    [zoom],
+    [zoom, duration],
   )
 
   // Applied after the new scale has been laid out, not during the event: the
@@ -1052,6 +1168,85 @@ export function TimelinePanel() {
     const rect = lanes.getBoundingClientRect()
     lanes.scrollLeft = Math.max(0, anchor.time * zoom - (anchor.clientX - rect.left))
   }, [zoom])
+
+  /**
+   * The zoom the view was at before it was thrown wide, so there is something
+   * to come back to.
+   */
+  const zoomBeforeFit = useRef<number | null>(null)
+
+  /**
+   * Everything at once: zoom out until the whole sequence fits the view.
+   *
+   * The god view — what is where, how long the thing is, which stretch is
+   * dense and which is empty. None of that is legible at a working zoom, and
+   * hunting for it with the scrollbar is what the key exists to replace.
+   *
+   * Fitted against the content as it is actually drawn — the sequence plus the
+   * few seconds of drop slack past it — so what lands is a view with nothing
+   * left to scroll to. Fitting the clips alone would leave the slack hanging
+   * off the right-hand side, and a god view you can still scroll is not one.
+   */
+  const zoomToFit = useCallback(() => {
+    const lanes = lanesRef.current
+    if (!lanes) return
+    const width = lanes.clientWidth
+    const length = duration
+    if (width <= 0 || !(length > 0)) {
+      setNotice('Nothing on the timeline to fit')
+      return
+    }
+    // Remembered before the first fit only, so pressing it twice does not
+    // overwrite where you were working with the fitted zoom itself.
+    if (zoomBeforeFit.current === null) zoomBeforeFit.current = zoom
+    const fitted = clampZoom(zoomThatFits(width, length), widestUseful(width, length))
+    zoomAnchor.current = null
+    setZoom(fitted)
+    lanes.scrollLeft = 0
+    setNotice(`Fitted ${formatTimecode(length, sequence.settings.frameRate)} to the view`)
+  }, [duration, zoom, sequence.settings.frameRate])
+
+  /**
+   * Back to where the work was, centred on the playhead.
+   *
+   * The companion to the fit and the reason it is two keys rather than one
+   * toggle: coming back has to decide *what* to come back to. The zoom the
+   * view was thrown wide from, when there is one — otherwise the default,
+   * which is the zoom a project opens at and a reasonable answer to "close
+   * enough to work".
+   */
+  const zoomToPlayhead = useCallback(() => {
+    const lanes = lanesRef.current
+    if (!lanes) return
+    const back = zoomBeforeFit.current ?? DEFAULT_ZOOM
+    zoomBeforeFit.current = null
+    zoomAnchor.current = null
+    setZoom(clampZoom(back))
+    // After the new scale is laid out, or the arithmetic uses the old width.
+    requestAnimationFrame(() => {
+      const now = lanesRef.current
+      if (!now) return
+      const x = getTime() * clampZoom(back)
+      now.scrollLeft = Math.max(0, Math.min(x - now.clientWidth / 2, now.scrollWidth - now.clientWidth))
+      followedAt.current = null
+    })
+  }, [])
+
+  /**
+   * Whether the view travels with the playhead.
+   *
+   * Turning it on brings the playhead into view at once rather than waiting
+   * for the next tick: the gesture says "show me where we are", and a toggle
+   * that does nothing visible until something else happens reads as broken.
+   */
+  const toggleFollow = useCallback(() => {
+    setFollow((on) => {
+      const next = !on
+      if (next) followedAt.current = null
+      setNotice(next ? 'Following the playhead' : 'Not following the playhead')
+      return next
+    })
+  }, [])
 
   // ── the wheel ─────────────────────────────────────────────────
 
@@ -2103,6 +2298,27 @@ export function TimelinePanel() {
         run: rippleDelete,
       },
       {
+        id: 'timeline.zoomToFit',
+        title: 'Zoom To Fit',
+        category: 'Timeline',
+        detail: 'Zooms out until the whole sequence is on screen',
+        run: zoomToFit,
+      },
+      {
+        id: 'timeline.zoomToPlayhead',
+        title: 'Zoom Back To The Playhead',
+        category: 'Timeline',
+        detail: 'Returns to the working zoom, centred on the playhead',
+        run: zoomToPlayhead,
+      },
+      {
+        id: 'timeline.toggleFollow',
+        title: 'Follow The Playhead',
+        category: 'Timeline',
+        detail: 'Whether the view travels with the playhead as it plays',
+        run: toggleFollow,
+      },
+      {
         id: 'timeline.toPreviousEdge',
         title: 'Go To Previous Cut',
         category: 'Timeline',
@@ -2334,6 +2550,9 @@ export function TimelinePanel() {
     toggleTrackFlag,
     selected.size,
     zoomBy,
+    zoomToFit,
+    zoomToPlayhead,
+    toggleFollow,
   ])
 
   // ── rendering ─────────────────────────────────────────────────
@@ -2373,6 +2592,20 @@ export function TimelinePanel() {
               title="Snap edges to clips, the playhead and the start (N)"
             >
               Snap
+            </button>
+            <button
+              className={`cb-btn${follow ? ' cb-btn--on' : ''}`}
+              onClick={toggleFollow}
+              title="Travel with the playhead as it plays (F)"
+            >
+              Follow
+            </button>
+            <button
+              className="cb-btn"
+              onClick={zoomToFit}
+              title="Fit the whole sequence on screen (`) — Shift ` comes back"
+            >
+              Fit
             </button>
             <button
               className="cb-btn"
