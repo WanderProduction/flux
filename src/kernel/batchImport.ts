@@ -369,6 +369,10 @@ export async function runBatch(
      * its length from the clip, so a cut lands within half a frame of where the
      * source ends, where ffmpeg stops at the real end regardless.
      *
+     * `addClip` now applies this rule to every clip, so the arithmetic here is
+     * an identity rather than a correction — kept because the total below is
+     * built from it, and because this is where the reasoning was worked out.
+     *
      * Caught by scripts/verify-batch.mjs, which checks abutment rather than
      * trusting it.
      */
