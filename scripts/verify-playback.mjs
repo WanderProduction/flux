@@ -40,6 +40,11 @@ const dir = JSON.stringify(MEDIA_DIR)
 /** A minute of video, which is the only kind of file that can prove seeking. */
 const LONG = JSON.stringify(path.join(MEDIA_DIR, 'long_take.mp4'))
 const OPEN_GOP = JSON.stringify(path.join(MEDIA_DIR, 'open_gop.mp4'))
+/** A short ordinary clip, for when a second *file* is what matters. */
+const CLIP_A = JSON.stringify(path.join(MEDIA_DIR, 'clipA.mp4'))
+/** Two more distinct files, for when several at once is what matters. */
+const LAYER_BLUE = JSON.stringify(path.join(MEDIA_DIR, 'layer_blue.mp4'))
+const LAYER_RED = JSON.stringify(path.join(MEDIA_DIR, 'layer_red.mp4'))
 const VERIFY_PROJECT = path.join(os.homedir(), 'flux-verify-project')
 
 const { check, report } = createChecker()
@@ -3403,6 +3408,316 @@ try {
       state.shownWidth,
       state.width,
       'the picture is not the width it was asked for',
+    )
+  })
+
+  /*
+   * Landing on a clip opens the one after it, and scrubbing past does not.
+   *
+   * Arriving at a clip nothing has opened costs an index read and a codec
+   * question before a frame can be asked for — about 27ms, and far more when
+   * the index has never been built. That is the whole of what a *forward* cut
+   * pays, since entering a clip forwards lands on a keyframe and the decode is
+   * one frame. Doing it while the playhead sits still costs nothing anyone
+   * sees.
+   *
+   * The second half is the risk and is why they are checked together: a scrub
+   * crosses a clip every few frames, and opening both neighbours of each would
+   * be dozens of decoders a second. That does not fail loudly — it exhausts
+   * the machine's hardware decoders and falls back to software, 51fps against
+   * 352 on real footage.
+   *
+   * Only the clip *after* is asserted. The one before may already be open
+   * because the playhead started at zero and warmed its own neighbour, which
+   * would make a "was not open" claim about it meaningless.
+   */
+  await check('landing on a clip opens the next one, and scrubbing does not', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       /* Distinct files, so "is it open" is a question about one clip. */
+       const paths = [${CLIP_A}, ${LAYER_BLUE}, ${LONG}, ${LAYER_RED}];
+       const laid = [];
+       for (const path of paths) {
+         const found = assets.getAssets().find(a => a.path === path)
+           ?? assets.importAssets([{ path, kind: 'video' }])[0];
+         await assets.ensureProbed(found.id);
+         const probed = assets.getAssets().find(a => a.id === found.id) ?? found;
+         if (!(probed.duration > 0.4)) return { error: 'setup: ' + path + ' has no duration' };
+         laid.push(probed);
+       }
+
+       const span = 2;
+       sequence.setSequence(null);
+       laid.forEach((a, i) => {
+         sequence.addClip({ assetId: a.id, trackId: 'V1', start: i * span, duration: span, offset: 0 });
+       });
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1500));
+
+       const openOn = (path) => [...videoSource.VideoSource.live].some(s => s.path === path);
+       const next = laid[3].path;
+
+       playback.pause();
+       playback.setRate(1);
+       playback.seek(2 * span + span / 2);
+       /* Sooner than the warm delay, so this sees the before rather than the
+          after. */
+       await new Promise(r => setTimeout(r, 120));
+       const soon = openOn(next);
+       await new Promise(r => setTimeout(r, 1500));
+       const later = openOn(next);
+
+       /* And a scrub across everything, faster than the delay. */
+       let peak = videoSource.VideoSource.live.size;
+       for (let round = 0; round < 3; round++) {
+         for (let i = 0; i < laid.length; i++) {
+           playback.seek(i * span + 0.3);
+           await new Promise(r => setTimeout(r, 50));
+           if (videoSource.VideoSource.live.size > peak) peak = videoSource.VideoSource.live.size;
+         }
+       }
+       return { soon, later, peak };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(
+      state.soon,
+      false,
+      'setup: the next clip was already open on arrival, so this proves nothing',
+    )
+    assert.equal(
+      state.later,
+      true,
+      'sitting on a clip never opened the one after it, so arriving there still pays for an index and a codec question',
+    )
+    assert.ok(
+      state.peak <= 10,
+      `scrubbing opened ${state.peak} decoders at once — the wait before warming is not holding`,
+    )
+  })
+
+  /*
+   * A clip the playhead has left is kept, and not for ever.
+   *
+   * Sources used to live and die with the clips under the playhead: move away
+   * and the clip you left was closed, taking its index, its decoder and every
+   * run it had built, so coming back paid for all of it again. Reported as
+   * exactly that — a clip plays rough, plays better the second time, and is
+   * rough again after a trip elsewhere and back.
+   *
+   * Both halves are checked together because each is the other's risk. Keeping
+   * them is the point; keeping them all would exhaust the machine's hardware
+   * decoders, which does not fail loudly — it falls back to software, 51fps
+   * against 352 on this footage, and looks like a mysterious slowdown an hour
+   * into a session.
+   *
+   * By identity, not by whether something is open: a reopened source looks
+   * exactly like a kept one from outside.
+   */
+  await check('a clip survives the playhead leaving it, and the pool stays bounded', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       const asset = assets.getAssets().find(a => a.path === ${LONG})
+         ?? assets.importAssets([{ path: ${LONG}, kind: 'video' }])[0];
+       await assets.ensureProbed(asset.id);
+       const probed = assets.getAssets().find(a => a.id === asset.id) ?? asset;
+       if (!(probed.duration > 6)) return { error: 'setup: fixture too short' };
+
+       /*
+        * One file laid many times over. Every clip is a different clip, so the
+        * playhead really does leave one and arrive at another, while the pool
+        * — which is keyed by file — should hold exactly one decoder for all of
+        * them. That is the cheapest way to state both halves at once.
+        */
+       const span = Math.min(probed.duration / 2, 2);
+       const many = 12;
+       sequence.setSequence(null);
+       for (let i = 0; i < many; i++) {
+         sequence.addClip({ assetId: probed.id, trackId: 'V1', start: i * span, duration: span, offset: 0 });
+       }
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+
+       let serial = 0;
+       const tags = new WeakMap();
+       const idHere = () => {
+         const s = [...videoSource.VideoSource.live].find(x => x.path === probed.path);
+         if (!s) return null;
+         if (!tags.has(s)) tags.set(s, ++serial);
+         return tags.get(s);
+       };
+       const park = async (t) => {
+         playback.pause();
+         playback.setRate(1);
+         playback.seek(t);
+         await new Promise(r => setTimeout(r, 900));
+       };
+
+       await park(span / 2);
+       const first = idHere();
+
+       /* Away across the whole timeline, far more clips than the pool holds. */
+       let peak = 0;
+       for (let i = 1; i < many; i++) {
+         await park(i * span + span / 2);
+         if (videoSource.VideoSource.live.size > peak) peak = videoSource.VideoSource.live.size;
+       }
+
+       /* And back to where we started. */
+       await park(span / 2);
+       const back = idHere();
+       return { first, back, peak, many };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(state.first !== null, 'setup: nothing was open on the clip to begin with')
+    assert.equal(
+      state.back,
+      state.first,
+      'coming back to a clip found a different decoder, so leaving it threw its work away',
+    )
+    assert.ok(
+      state.peak <= 10,
+      `${state.peak} decoders were open at once across ${state.many} clips — the pool is not letting go`,
+    )
+  })
+
+  /*
+   * The clip on the far side of a cut is opened before a backwards pass
+   * reaches it.
+   *
+   * A cut costs differently in each direction. Forwards, a clip is entered at
+   * its first frame, a keyframe: one decode. Backwards, it is entered at its
+   * *last* frame, as deep inside a GOP as a frame gets, so nothing can be
+   * shown until the whole GOP has been decoded from its keyframe — and the
+   * source is not open, because sources are opened for the clips under the
+   * playhead and that clip is not under it. Measured: 356ms backwards against
+   * 230ms forwards over the same boundaries, and reported from use as "lags a
+   * lot on reverse, real noticeable freeze".
+   *
+   * Checked as a fact rather than a duration, deliberately. A cut into a clip
+   * is only cold once a session, so arms have to use different clips, and
+   * different clips are differently hard — the control alone read 165ms on one
+   * slice and 473ms on another, which is wider than anything the change could
+   * do. Whether the far clip is open and holding the frame about to be asked
+   * for is not a rate and does not care about the machine.
+   */
+  await check('a backwards pass opens the clip it is about to cross into', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource, indexCache } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       /*
+        * Two different files, because a razor through one hands its decoder
+        * over and would pass this without opening anything.
+        *
+        * The *incoming* clip only has to exist — a backwards pass enters it at
+        * its last frame whatever its length — so the short fixture does for
+        * it. The outgoing one needs room to reverse through for a second
+        * before the boundary, which is what the long take is for.
+        */
+       const pick = async (path) => {
+         const found = assets.getAssets().find(a => a.path === path)
+           ?? assets.importAssets([{ path, kind: 'video' }])[0];
+         await assets.ensureProbed(found.id);
+         // Re-read: probing fills the store, and the object taken before it
+         // is a snapshot from when the duration was still unknown.
+         return assets.getAssets().find(a => a.id === found.id) ?? found;
+       };
+       /*
+        * Not the open-GOP fixture: its sync samples are not IDRs, so building
+        * a run from its last stretch walks back keyframe by keyframe learning
+        * which ones the decoder will refuse. That path is worth having and is
+        * checked elsewhere; here it only makes the clock the subject.
+        */
+       const incoming = await pick(${CLIP_A});
+       const outgoing = await pick(${LONG});
+       if (!(incoming.duration > 0.4)) {
+         return { error: 'setup: incoming fixture is ' + incoming.duration + 's' };
+       }
+       if (!(outgoing.duration > 2.5)) {
+         return { error: 'setup: the long take is ' + outgoing.duration + 's' };
+       }
+
+       const firstSpan = Math.min(incoming.duration, 2);
+       const secondSpan = 3;
+       sequence.setSequence(null);
+       sequence.addClip({ assetId: incoming.id, trackId: 'V1', start: 0, duration: firstSpan, offset: 0 });
+       sequence.addClip({ assetId: outgoing.id, trackId: 'V1', start: firstSpan, duration: secondSpan, offset: 0 });
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+
+       const canvas = document.querySelector('canvas.viewer-media');
+       if (!canvas) return { error: 'no viewer canvas' };
+
+       const boundary = firstSpan;
+       const into = incoming;
+       /*
+        * Not "is it open" — the pool keeps it open across a seek now, so that
+        * question answers itself and proves nothing. What the warm-up adds is
+        * the *decoded* last stretch: the GOP a backwards pass lands in.
+        */
+       const got = await indexCache.trackFor(into.path);
+       if (!got.ok) return { error: 'setup: no index for the incoming clip' };
+       const t = got.track;
+       let lastSample = 0;
+       for (let i = 0; i < t.count; i++) if (t.pts[i] < firstSpan) lastSample = i;
+       /*
+        * Counted rather than asked for one exact frame: which sample a clip's
+        * last frame is depends on rounding between clip duration and frame
+        * rate, and the claim is about the GOP being decoded early, not about
+        * an index.
+        */
+       const runsOn = () => {
+         const s = [...videoSource.VideoSource.live].find(x => x.path === into.path);
+         return s ? (s.runs || []).length : 0;
+       };
+
+       /* Settle on the far side of the boundary, with the incoming clip shut. */
+       playback.pause();
+       playback.setRate(1);
+       playback.seek(boundary + 1.2);
+       await new Promise(r => setTimeout(r, 1500));
+       const before = runsOn();
+
+       /* Reverse towards it, and look while still on this side. */
+       playback.setRate(-1);
+       playback.play();
+       let atCut = null;
+       const began = performance.now();
+       while (performance.now() - began < 2500) {
+         await new Promise(r => setTimeout(r, 8));
+         const now = playback.getTime();
+         if (atCut === null && now <= boundary + 0.3 && now > boundary) atCut = runsOn();
+         if (now < boundary - 0.5) break;
+       }
+       playback.pause();
+       playback.setRate(1);
+       const crossed = playback.getTime() < boundary;
+       await new Promise(r => setTimeout(r, 300));
+       return { before, atCut, crossed, lastSample };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(
+      state.before,
+      0,
+      'setup: the incoming clip already held decoded runs, so this proves nothing',
+    )
+    assert.ok(state.crossed, 'setup: the pass never reached the boundary')
+    assert.ok(
+      state.atCut > 0,
+      'the clip on the far side of the cut had decoded nothing as the playhead arrived, so the cut still pays for a whole GOP at the moment the picture is wanted',
     )
   })
 

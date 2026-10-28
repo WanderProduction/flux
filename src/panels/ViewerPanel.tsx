@@ -142,6 +142,30 @@ const DRAW_TIMEOUT_MS = 2000
 const JUMP_FRAMES = 5
 
 /**
+ * How many decoders to keep for clips the playhead has left.
+ *
+ * Six, and the limit that matters is not memory. A machine has a small fixed
+ * number of hardware decoders — a handful to a dozen or so — and every open
+ * source holds one; a pool sized in megabytes could comfortably hold forty and
+ * exhaust them long before it felt large. Six covers the stretch of timeline
+ * an editor works in, which is what this is for: leaving a clip and coming
+ * back should not mean paying for its index, its decoder and its runs again.
+ *
+ * Each source caps its own frame memory already, so what this bounds is the
+ * decoders, and nothing here needs to know how big a run is.
+ */
+const POOL_SIZE = 6
+
+/**
+ * How long the playhead must sit still before its neighbours are opened.
+ *
+ * A scrub crosses a clip every few frames, and opening both neighbours of each
+ * one it passes would be dozens of decoders a second. Waiting a beat is the
+ * difference between an editor arriving somewhere and passing through it.
+ */
+const WARM_NEIGHBOURS_MS = 250
+
+/**
  * Every clip to be drawn at `time`, bottom layer first.
  *
  * Tracks are stored in the order they stack, V2 above V1, so this walks them
@@ -544,6 +568,19 @@ export function ViewerPanel() {
    * what is new, close what has gone, leave the rest alone.
    */
   const sourcesRef = useRef(new Map<string, VideoSource>())
+  /**
+   * Decoders for clips the playhead has left, kept by the file they read.
+   *
+   * A source decodes a *file*; the clip around it only says which moment to
+   * ask for. So this is keyed by path rather than by clip, and a trim, a
+   * razor, a clip dragged to another track or a new clip laid over the top
+   * all leave it untouched — none of them changes which file any of this
+   * decoded. Only the composite above it has to be worked out again.
+   *
+   * Insertion order is recency: a hit deletes and re-inserts, so the first key
+   * is always the one to evict.
+   */
+  const poolRef = useRef(new Map<string, VideoSource>())
   const [ready, setReady] = useState(0)
   const [why, setWhy] = useState<string | null>(null)
 
@@ -622,29 +659,52 @@ export function ViewerPanel() {
      * decoder is worth handing over whenever the file matches, whatever the
      * clip around it says.
      */
-    const spare = new Map<string, VideoSource>()
+    const pool = poolRef.current
     for (const [id, source] of [...held]) {
       if (wanted.has(id)) continue
       held.delete(id)
-      // Only one spare per file: a second would never be claimed, because an
-      // arriving layer takes at most one.
-      if (spare.has(source.path)) source.close()
-      else spare.set(source.path, source)
+      // One per file: a second could never be claimed, because an arriving
+      // layer takes at most one.
+      if (pool.has(source.path)) source.close()
+      else pool.set(source.path, source)
     }
 
     for (const layer of layers) {
       if (held.has(layer.id)) continue
       const file = assetById.get(layer.assetId)
       if (!file) continue
-      const carried = spare.get(file.path)
+      const carried = pool.get(file.path)
       if (carried) {
         held.set(layer.id, carried)
-        spare.delete(file.path)
+        pool.delete(file.path)
       }
     }
 
-    // Whatever nothing claimed really has gone.
-    for (const source of spare.values()) source.close()
+    /*
+     * What is left in the pool is kept, not closed.
+     *
+     * This used to be the end of a decoder's life: anything no layer claimed
+     * in this same tick was shut. That made a razor cheap — the two halves of
+     * a cut clip hand the decoder between them — and made everything else
+     * expensive, because the pool only existed for the length of one
+     * reconcile. Move the playhead to another part of the timeline and the
+     * clip you left was closed, taking its index, its decoder and every run it
+     * had built; come back a second later and all of it was paid for again.
+     * Reported as exactly that: a clip plays rough, plays better the second
+     * time, and is rough again after a trip elsewhere and back.
+     *
+     * So they are kept, oldest evicted first. Bounded by count rather than by
+     * memory: each source already caps its own runs, and the real limit here
+     * is hardware decoders, of which a machine has a small fixed number — a
+     * pool measured in megabytes could hold forty of them and exhaust that
+     * long before it noticed.
+     */
+    while (pool.size > POOL_SIZE) {
+      const oldest = pool.keys().next().value
+      if (oldest === undefined) break
+      pool.get(oldest)?.close()
+      pool.delete(oldest)
+    }
 
     void Promise.all(
       layers.map(async (layer) => {
@@ -680,15 +740,217 @@ export function ViewerPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stack, assetById])
 
-  // Everything goes when the panel does; the reconcile above only closes what
-  // has left the stack.
+  // Everything goes when the panel does — the ones in use and the ones merely
+  // kept. The reconcile above never closes on the way past any more.
   useEffect(() => {
     const held = sourcesRef.current
+    const pool = poolRef.current
     return () => {
       for (const source of held.values()) source.close()
       held.clear()
+      for (const source of pool.values()) source.close()
+      pool.clear()
     }
   }, [])
+
+  /**
+   * The clip a backwards pass will cross into next: the one that ends where
+   * the clip in front begins, on its own track.
+   */
+  const comingBack = useMemo(() => {
+    const front = layers.at(-1)
+    if (!front) return null
+    let best: Clip | null = null
+    for (const other of sequence.clips) {
+      if (other.id === front.id || other.trackId !== front.trackId) continue
+      if (other.start + other.duration > front.start + 1e-6) continue
+      if (!best || other.start > best.start) best = other
+    }
+    return best
+  }, [sequence, layers])
+
+  /** The clip the playhead would reach next going forwards. */
+  const comingNext = useMemo(() => {
+    const front = layers.at(-1)
+    if (!front) return null
+    const ends = front.start + front.duration
+    let best: Clip | null = null
+    for (const other of sequence.clips) {
+      if (other.id === front.id || other.trackId !== front.trackId) continue
+      if (other.start + 1e-6 < ends) continue
+      if (!best || other.start < best.start) best = other
+    }
+    return best
+  }, [sequence, layers])
+
+  /**
+   * Takes a source into the pool, dropping the least recently used.
+   *
+   * The reconcile does not use this, and deliberately. It pools every
+   * departing source first, lets the arriving layers claim what they
+   * recognise, and only then evicts — evicting as each one arrived could throw
+   * away a decoder a layer in the same tick was about to ask for, which is
+   * precisely the handover that makes a razor cheap.
+   */
+  const keep = useCallback((source: VideoSource) => {
+    const pool = poolRef.current
+    if (pool.has(source.path)) {
+      source.close()
+      return
+    }
+    pool.set(source.path, source)
+    while (pool.size > POOL_SIZE) {
+      const oldest = pool.keys().next().value
+      if (oldest === undefined) break
+      pool.get(oldest)?.close()
+      pool.delete(oldest)
+    }
+  }, [])
+
+  /**
+   * Opens the clips either side of this one, a moment after landing on it.
+   *
+   * Arriving at a clip nothing has opened costs an index read and a codec
+   * question before a frame can even be asked for — about 27ms measured, and
+   * far more when the index has never been built. Doing it while the playhead
+   * is sitting still costs nothing anybody can see, and it is the half of the
+   * cut that *forward* playback pays: entering a clip forwards lands on a
+   * keyframe, so the decode is one frame and the opening is the whole bill.
+   *
+   * Opened, not decoded. The reverse warm-up above decodes, because entering a
+   * clip backwards lands deep in a GOP and the decode is unavoidable; going
+   * forwards there is nothing worth decoding early, and decoding both
+   * neighbours of every clip would be a great deal of work for a direction the
+   * playhead will not take.
+   *
+   * Deferred, because a scrub crosses a clip every few frames and opening both
+   * neighbours of each would be dozens of decoders in a second — the pool
+   * would thrash and the thread would wear it. A beat of stillness is the
+   * signal that the editor has arrived somewhere rather than passed through.
+   */
+  const openingRef = useRef(new Set<string>())
+  useEffect(() => {
+    const near = [comingBack, comingNext].filter((c): c is Clip => c !== null)
+    if (near.length === 0) return
+    let live = true
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        for (const clip of near) {
+          if (!live) return
+          const file = assetById.get(clip.assetId)
+          if (!file || file.missing || file.unreadable || file.kind !== 'video') continue
+          // Already in hand, already kept, or already on its way.
+          if (poolRef.current.has(file.path)) continue
+          if ([...sourcesRef.current.values()].some((s) => s.path === file.path)) continue
+          if (openingRef.current.has(file.path)) continue
+          openingRef.current.add(file.path)
+          try {
+            const opened = await VideoSource.open(file.path)
+            if (!opened.ok) continue
+            // The panel went, or the playhead arrived and opened it itself.
+            if (!live || poolRef.current.has(file.path)) {
+              opened.source.close()
+              continue
+            }
+            keep(opened.source)
+          } finally {
+            openingRef.current.delete(file.path)
+          }
+        }
+      })()
+    }, WARM_NEIGHBOURS_MS)
+    return () => {
+      live = false
+      window.clearTimeout(timer)
+    }
+  }, [comingBack, comingNext, assetById, keep])
+
+  /**
+   * Opens the clip behind this one and decodes its last stretch, before the
+   * playhead reverses into it.
+   *
+   * A cut costs differently in each direction and that difference is the whole
+   * of this. Forwards, a clip is entered at its first frame, which is a
+   * keyframe: one decode and the picture is there. Backwards, it is entered at
+   * its *last* frame, which is as deep inside a GOP as a frame can be — so
+   * nothing can be shown until the whole of that GOP has been decoded from its
+   * keyframe, and the source has not even been opened, because sources are
+   * opened for the clips under the playhead and this clip is not under it.
+   * Open, index and a full GOP, all at the moment the picture is wanted.
+   * Measured: 356ms backwards against 230ms forwards over the same boundaries.
+   *
+   * So it happens a beat early instead, while frames are still being served
+   * out of the current clip's runs and the thread has room. This is the trick
+   * `shownFor` already plays inside a clip — building the previous run half
+   * way through the current one — carried across a cut, which is the one
+   * boundary it could not see.
+   *
+   * The source is filed under the incoming clip's own id, so when the playhead
+   * does cross, the reconcile above finds it open and keeps it rather than
+   * opening a second.
+   */
+  const warmedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!comingBack) {
+      warmedRef.current = null
+      return
+    }
+    const target = comingBack
+    const fps = sequence.settings.frameRate || 30
+    const front = layers.at(-1)
+    if (!front) return
+
+    return subscribePlayback(() => {
+      const rate = getRate()
+      if (rate >= 0) return
+      if (warmedRef.current === target.id) return
+      /*
+       * How long until the playhead gets there, in seconds of wall clock
+       * rather than of timeline — at -4x a boundary two seconds away is half a
+       * second off. Under a second is room for an open and a GOP, and late
+       * enough not to warm clips a pass turns back from.
+       */
+      const away = (getTime() - front.start) / Math.abs(rate)
+      if (away > 1) return
+      warmedRef.current = target.id
+
+      void (async () => {
+        let source = sourcesRef.current.get(target.id)
+        if (!source) {
+          const file = assetById.get(target.assetId)
+          if (!file || file.missing || file.unreadable || file.kind !== 'video') return
+          // Already kept from an earlier visit: then there is nothing to open
+          // and quite possibly nothing to decode either.
+          const kept = poolRef.current.get(file.path)
+          if (kept) {
+            poolRef.current.delete(file.path)
+            sourcesRef.current.set(target.id, kept)
+            source = kept
+          } else {
+            const opened = await VideoSource.open(file.path)
+            if (!opened.ok) return
+            // Someone got there first — the playhead may simply have arrived.
+            if (sourcesRef.current.has(target.id)) {
+              opened.source.close()
+              return
+            }
+            sourcesRef.current.set(target.id, opened.source)
+            source = opened.source
+          }
+        }
+        /*
+         * Its last frame, which is where a backwards pass enters. Asking
+         * backwards is what builds the run; the picture is dropped, and the
+         * run it leaves behind is the point.
+         */
+        const last = target.offset + (target.duration - 1 / fps) * target.speed
+        await source.shownFor(last, {
+          backwards: true,
+          width: framePixels(frame, prefs.playbackResolution).width,
+        })
+      })()
+    })
+  }, [comingBack, layers, sequence.settings.frameRate, assetById, frame, prefs.playbackResolution])
 
   /**
    * Draws the stack, bottom layer first.
