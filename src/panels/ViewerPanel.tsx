@@ -750,9 +750,32 @@ export function ViewerPanel() {
                  * symmetric; see `showKeyframesOnly`.
                  */
                 coarse: showKeyframesOnly(getRate()),
-                // The size it will actually be drawn at, so the copies kept
-                // for playing backwards are neither soft nor wasteful.
-                width: pixels.width,
+                /*
+                 * The size it will actually be drawn at, so the copies kept
+                 * for playing backwards are neither soft nor wasteful — and
+                 * asked of the transport rather than of React.
+                 *
+                 * A backwards ask always takes the *playing* width, because a
+                 * run is only ever read back during playback — a paused frame
+                 * comes from the decoder, never from a run.
+                 *
+                 * `pixels` follows `playing`, which is React state fed by a
+                 * subscription, while `backwards` above is read from
+                 * `getRate()` as it is now. The two disagree for one draw
+                 * either side of the transport changing, and the expensive
+                 * direction is stopping: the rate is still negative while
+                 * React still thinks it is paused, so the ask builds a run at
+                 * *full* resolution. Thirty 1920-wide pictures is about 250MB
+                 * against 15MB at the playing width — sixteen times the
+                 * memory — and it evicted every preview-width run the next
+                 * pass was about to want. Measured before this: runs held at
+                 * 1920px in 84 samples of a pass, peak run memory 252MB, and
+                 * every kept run replaced on every repeat pass.
+                 */
+                width: framePixels(
+                  frame,
+                  getRate() < 0 ? prefs.playbackResolution : resolution,
+                ).width,
               },
             )
             /*
