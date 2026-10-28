@@ -1,6 +1,6 @@
 {
   "name": "flux",
-  "version": "0.0.35",
+  "version": "0.0.36",
   "private": true,
   "type": "module",
   "description": "A keyboard-driven media engine - timeline and node graph as two lenses on one project.",

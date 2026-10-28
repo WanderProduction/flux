@@ -225,6 +225,40 @@ function widestUseful(width: number, length: number): number {
 const FOLLOW_AHEAD = 0.75
 const FOLLOW_BEHIND = 0.25
 
+/**
+ * How near the edge a scrub has to get before the view starts travelling, and
+ * how fast it goes when the hand is right at the edge.
+ *
+ * A dragged playhead cannot follow the same rule as a playing one. The time is
+ * read from where the pointer is *plus* how far the view has scrolled, so a
+ * view that scrolls underneath a still hand changes the answer — and then that
+ * later time scrolls it further. Measured, a drag that should have read 1.67
+ * seconds per hundred pixels of hand movement read 6.72, and the playhead hit
+ * the end of a two-minute sequence before the hand was a quarter of the way
+ * across the ruler.
+ *
+ * So a scrub does not follow; it auto-scrolls at the edge, which is what every
+ * editor does and what has no loop in it. In the middle of the view the hand
+ * moves the playhead and nothing else moves. Within a band of the edge the
+ * view travels, at a speed set by how far into the band the hand is, and the
+ * time comes along because the pointer is now over later timeline.
+ */
+const SCRUB_EDGE_BAND = 56
+
+/**
+ * How fast the edge carries the scrub, in view-widths per second, with the
+ * hand right at the edge.
+ *
+ * A width per second rather than a number of pixels: a pixel rate reads as a
+ * different speed on every window and at every zoom, and what the hand is
+ * actually asking for is "keep going" — which is naturally measured in
+ * screenfuls. One a second is about a second of warning before anything
+ * crosses the view, which is enough to see what is going past. Twenty-eight
+ * pixels a frame, the first thing tried, worked out at four screens a second
+ * and was unusable: a two-minute sequence went by in half of one.
+ */
+const SCRUB_EDGE_SPEED = 1
+
 /** Tick spacing that keeps labels readable at any zoom. */
 function tickInterval(pixelsPerSecond: number): number {
   const candidates = [1 / 4, 1 / 2, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
@@ -529,6 +563,12 @@ export function TimelinePanel() {
   const followedAt = useRef<number | null>(null)
 
   /**
+   * True while the playhead is being dragged, which turns following off for
+   * the duration — see `SCRUB_EDGE_BAND` for why a drag cannot follow.
+   */
+  const scrubbing = useRef(false)
+
+  /**
    * Brings the view along with the playhead, once it is far enough across.
    *
    * Only when the playhead has actually *moved*. `placePlayhead` runs after
@@ -544,9 +584,10 @@ export function TimelinePanel() {
    */
   const keepUp = useCallback((time: number) => {
     const lanes = lanesRef.current
-    if (!lanes || !followRef.current) {
+    if (!lanes || !followRef.current || scrubbing.current) {
       // Remembered even while not following, so turning it back on mid-play
-      // catches up on the next tick rather than on the next render.
+      // catches up on the next tick rather than on the next render — and so a
+      // finished drag does not get yanked about by the time it ended on.
       followedAt.current = time
       return
     }
@@ -1667,8 +1708,73 @@ export function TimelinePanel() {
        */
       pause()
       seek(snapToFrame(timeAt(event.clientX)))
-      const onMove = (move: PointerEvent) => seek(snapToFrame(timeAt(move.clientX)))
+
+      /*
+       * Where the hand is, kept current by the moves and read by the frame
+       * loop below. The loop needs it because the view can travel while the
+       * hand is perfectly still — that is the whole point of an edge scrub.
+       */
+      let pointerAt = event.clientX
+      scrubbing.current = true
+
+      /*
+       * One frame of travel: scroll if the hand is in the edge band, then put
+       * the playhead wherever the pointer now points.
+       *
+       * The seek happens every frame rather than only on movement, so holding
+       * at the edge keeps scrubbing instead of stopping the moment the hand
+       * does. `timeAt` reads the scroll it has just set, which is exactly the
+       * coupling that made following a drag run away — here it is wanted, and
+       * it cannot run away because the scrolling is driven by the hand's
+       * distance into the band rather than by the time it produced.
+       */
+      let frame = 0
+      let last = performance.now()
+      const travel = (now: number) => {
+        const lanes = lanesRef.current
+        if (!lanes) return
+        // Elapsed time rather than a per-frame step, so the speed is the same
+        // on a display that cannot keep up as on one that can.
+        const elapsed = Math.min(now - last, 100) / 1000
+        last = now
+        const rect = lanes.getBoundingClientRect()
+        const pastRight = pointerAt - (rect.right - SCRUB_EDGE_BAND)
+        const pastLeft = rect.left + SCRUB_EDGE_BAND - pointerAt
+        const into = pastRight > 0 ? pastRight : pastLeft > 0 ? -pastLeft : 0
+        if (into !== 0) {
+          const share = Math.max(-1, Math.min(1, into / SCRUB_EDGE_BAND))
+          const travelled = share * rect.width * SCRUB_EDGE_SPEED * elapsed
+          lanes.scrollLeft = Math.max(
+            0,
+            Math.min(lanes.scrollLeft + travelled, lanes.scrollWidth - lanes.clientWidth),
+          )
+        }
+        seek(snapToFrame(timeAt(pointerAt)))
+        frame = requestAnimationFrame(travel)
+      }
+      frame = requestAnimationFrame(travel)
+
+      /*
+       * Seeking here as well as in the loop, not instead of it.
+       *
+       * The loop alone makes the playhead wait for a frame, and a quick flick
+       * — press, move, release inside one — never gets one: the release
+       * cancels the loop before it runs and the playhead never moves at all.
+       * Caught by the check that drags the handle 120 pixels in one go, which
+       * is exactly that shape.
+       *
+       * It cannot reintroduce the runaway, because nothing scrolls while the
+       * hand is in the middle of the view. In the edge band the view does
+       * scroll under the hand and this reads a later time — which is the
+       * behaviour being asked for there.
+       */
+      const onMove = (move: PointerEvent) => {
+        pointerAt = move.clientX
+        seek(snapToFrame(timeAt(move.clientX)))
+      }
       const onUp = () => {
+        cancelAnimationFrame(frame)
+        scrubbing.current = false
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
       }
