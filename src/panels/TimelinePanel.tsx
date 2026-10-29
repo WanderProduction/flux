@@ -102,6 +102,7 @@ import { activeTool, subscribeTool, type ToolId } from '../kernel/tools'
 import { getAssets as allAssets } from '../kernel/assets'
 import { PanelFrame } from './PanelFrame'
 import { ReadinessStrip, READINESS_HEIGHT } from './ReadinessStrip'
+import { PerformanceDialog } from './PerformanceDialog'
 import { SequenceSettingsDialog } from './SequenceSettingsDialog'
 import { useThumbnail } from './useThumbnail'
 
@@ -2404,6 +2405,13 @@ export function TimelinePanel() {
         run: rippleDelete,
       },
       {
+        id: 'app.performance',
+        title: 'Performance Settings',
+        category: 'App',
+        detail: 'How much of this machine FLUX may spend on playback',
+        run: () => setPerformanceOpen(true),
+      },
+      {
         id: 'timeline.zoomToFit',
         title: 'Zoom To Fit',
         category: 'Timeline',
@@ -2667,6 +2675,7 @@ export function TimelinePanel() {
   const tickCount = Math.ceil(contentWidth / (step * zoom)) + 1
   const allSequences = listSequences()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [performanceOpen, setPerformanceOpen] = useState(false)
 
   return (
     <PanelFrame
@@ -2720,6 +2729,13 @@ export function TimelinePanel() {
             >
               Settings
             </button>
+            <button
+              className="cb-btn"
+              onClick={() => setPerformanceOpen(true)}
+              title="How much of this machine FLUX may spend on playback"
+            >
+              Performance
+            </button>
             {selected.size > 0 && (
               <button className="cb-btn" onClick={deleteSelected}>
                 Delete {selected.size}
@@ -2749,6 +2765,7 @@ export function TimelinePanel() {
         activeId={sequence.id}
         onRename={(id, name) => renameSequence(id, name)}
       />
+      {performanceOpen && <PerformanceDialog onClose={() => setPerformanceOpen(false)} />}
       {settingsOpen && (
         <SequenceSettingsDialog sequence={sequence} onClose={() => setSettingsOpen(false)} />
       )}

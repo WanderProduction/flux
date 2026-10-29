@@ -4,6 +4,7 @@ import { commands } from '../kernel/commands'
 import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
 import { VideoSource, showKeyframesOnly, type Shown } from '../kernel/media/videoSource'
+import { getPerformance, subscribePerformance } from '../kernel/performance'
 import { audioInfoFor, type AudioInfo } from '../kernel/media/peaks'
 import {
   formatTimecode,
@@ -141,20 +142,22 @@ const DRAW_TIMEOUT_MS = 2000
 
 const JUMP_FRAMES = 5
 
-/**
- * How many decoders to keep for clips the playhead has left.
+/*
+ * How many decoders to keep for clips the playhead has left, and how far
+ * either side of the playhead to open them before they are needed, now both
+ * live in kernel/performance.ts — scaled to the machine and adjustable.
  *
- * Six, and the limit that matters is not memory. A machine has a small fixed
- * number of hardware decoders — a handful to a dozen or so — and every open
- * source holds one; a pool sized in megabytes could comfortably hold forty and
- * exhaust them long before it felt large. Six covers the stretch of timeline
- * an editor works in, which is what this is for: leaving a clip and coming
- * back should not mean paying for its index, its decoder and its runs again.
+ * What used to stand here was a constant of six, justified like this:
  *
- * Each source caps its own frame memory already, so what this bounds is the
- * decoders, and nothing here needs to know how big a run is.
+ *   "A machine has a small fixed number of hardware decoders — a handful to a
+ *   dozen or so — and every open source holds one."
+ *
+ * That was never measured. Measured, sixty-four sources opened at once, all
+ * sixty-four delivered frames, and a warm frame cost 0ms with sixty-four open
+ * against 0.1ms with four. Six was guarding a ceiling that was not there, on a
+ * timeline of a hundred short clips where six decoders is six seconds of work
+ * before everything ahead is cold again.
  */
-const POOL_SIZE = 6
 
 /**
  * How long the playhead must sit still before its neighbours are opened.
@@ -581,6 +584,19 @@ export function ViewerPanel() {
    * is always the one to evict.
    */
   const poolRef = useRef(new Map<string, VideoSource>())
+
+  /**
+   * How much machine to spend, and a ref beside it.
+   *
+   * The ref is what the pool-trimming callbacks read: they are built once and
+   * would otherwise hold whatever the setting was when they were made, so
+   * raising the pool would not take effect until something else happened to
+   * rebuild them.
+   */
+  const [perf, setPerf] = useState(getPerformance)
+  const poolLimit = useRef(perf.decoderPool)
+  poolLimit.current = perf.decoderPool
+  useEffect(() => subscribePerformance(() => setPerf(getPerformance())), [])
   const [ready, setReady] = useState(0)
   const [why, setWhy] = useState<string | null>(null)
 
@@ -699,7 +715,7 @@ export function ViewerPanel() {
      * pool measured in megabytes could hold forty of them and exhaust that
      * long before it noticed.
      */
-    while (pool.size > POOL_SIZE) {
+    while (pool.size > poolLimit.current) {
       const oldest = pool.keys().next().value
       if (oldest === undefined) break
       pool.get(oldest)?.close()
@@ -769,19 +785,35 @@ export function ViewerPanel() {
     return best
   }, [sequence, layers])
 
-  /** The clip the playhead would reach next going forwards. */
-  const comingNext = useMemo(() => {
+  /**
+   * The clips within reach either side, nearest first.
+   *
+   * One either side covers a cut, which is what the warm-up was built for.
+   * It does not cover an *edit*: trimming a clip means watching the three
+   * around it, jumping back a beat means the two behind, and each of those is
+   * a decoder that could already have been open. How far to reach is
+   * `warmRadius`, because the answer depends on how much machine there is —
+   * and nearest first so that if the beat of stillness ends early, what got
+   * opened is what was most likely to be wanted.
+   */
+  const warmAround = useMemo(() => {
     const front = layers.at(-1)
-    if (!front) return null
-    const ends = front.start + front.duration
-    let best: Clip | null = null
-    for (const other of sequence.clips) {
-      if (other.id === front.id || other.trackId !== front.trackId) continue
-      if (other.start + 1e-6 < ends) continue
-      if (!best || other.start < best.start) best = other
+    if (!front) return [] as Clip[]
+    const onTrack = sequence.clips
+      .filter((clip) => clip.trackId === front.trackId)
+      .sort((a, b) => a.start - b.start)
+    const here = onTrack.findIndex((clip) => clip.id === front.id)
+    if (here < 0) return []
+    const reach = Math.max(1, perf.warmRadius)
+    const near: Clip[] = []
+    for (let step = 1; step <= reach; step++) {
+      const next = onTrack[here + step]
+      const back = onTrack[here - step]
+      if (next) near.push(next)
+      if (back) near.push(back)
     }
-    return best
-  }, [sequence, layers])
+    return near
+  }, [sequence, layers, perf.warmRadius])
 
   /**
    * Takes a source into the pool, dropping the least recently used.
@@ -799,7 +831,7 @@ export function ViewerPanel() {
       return
     }
     pool.set(source.path, source)
-    while (pool.size > POOL_SIZE) {
+    while (pool.size > poolLimit.current) {
       const oldest = pool.keys().next().value
       if (oldest === undefined) break
       pool.get(oldest)?.close()
@@ -830,7 +862,7 @@ export function ViewerPanel() {
    */
   const openingRef = useRef(new Set<string>())
   useEffect(() => {
-    const near = [comingBack, comingNext].filter((c): c is Clip => c !== null)
+    const near = warmAround
     if (near.length === 0) return
     let live = true
     const timer = window.setTimeout(() => {
@@ -863,7 +895,7 @@ export function ViewerPanel() {
       live = false
       window.clearTimeout(timer)
     }
-  }, [comingBack, comingNext, assetById, keep])
+  }, [warmAround, assetById, keep])
 
   /**
    * Opens the clip behind this one and decodes its last stretch, before the

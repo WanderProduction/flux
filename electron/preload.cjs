@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('flux', {
     get: (name) => ipcRenderer.invoke('store:get', name),
     set: (name, value) => ipcRenderer.invoke('store:set', name, value),
   },
+  /** How much machine there is to spend — see kernel/performance.ts. */
+  machine: () => ipcRenderer.invoke('machine:specs'),
   fs: {
     places: () => ipcRenderer.invoke('fs:places'),
     list: (dirPath) => ipcRenderer.invoke('fs:list', dirPath),
