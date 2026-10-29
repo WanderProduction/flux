@@ -26,6 +26,7 @@ import * as view from './kernel/view'
 import * as playback from './kernel/playback'
 import * as importPipeline from './kernel/importPipeline'
 import * as videoSource from './kernel/media/videoSource'
+import * as performance from './kernel/performance'
 import * as indexCache from './kernel/media/indexCache'
 import * as ranges from './kernel/media/ranges'
 import * as peaks from './kernel/media/peaks'
@@ -115,6 +116,7 @@ if (import.meta.env.DEV) {
       keymap,
       renderBridge,
       media: { audioSource },
+      performance,
     },
   })
 }
@@ -135,3 +137,13 @@ createRoot(container).render(<App />)
  * begins.
  */
 indexAhead.indexAhead()
+
+/*
+ * How much machine to spend, read before anything starts spending it.
+ *
+ * Not awaited: everything that reads these settings subscribes to them, and
+ * they begin at a modest laptop's worth — so the worst a slow answer costs is
+ * a moment of behaving like a smaller computer, rather than a boot that waits
+ * on an IPC round trip to draw anything.
+ */
+void performance.loadPerformance()

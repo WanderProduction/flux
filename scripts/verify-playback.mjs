@@ -3432,11 +3432,21 @@ try {
    * would make a "was not open" claim about it meaningless.
    */
   await check('landing on a clip opens the next one, and scrubbing does not', async () => {
+    /*
+     * The reach is pinned for the length of this check, because what it is
+     * about is *when* the warm-up fires rather than how far it goes — and how
+     * far it goes now depends on how much memory the machine has. Left to the
+     * machine, a workstation reaches three clips either side, the clip this
+     * check wants to find closed is open before the playhead lands, and the
+     * setup guard below rightly refuses to prove anything. It did exactly
+     * that, which is the guard working.
+     */
     const state = await evaluate(
       cdp,
-      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+      `const { assets, sequence, playback, view, commands, videoSource, performance: perf } = window.__fluxDev;
        await commands.run('workspace.switch.edit');
        await new Promise(r => setTimeout(r, 500));
+       perf.setPerformance({ warmRadius: 1 });
 
        /* Distinct files, so "is it open" is a question about one clip. */
        const paths = [${CLIP_A}, ${LAYER_BLUE}, ${LONG}, ${LAYER_RED}];
@@ -3480,6 +3490,7 @@ try {
            if (videoSource.VideoSource.live.size > peak) peak = videoSource.VideoSource.live.size;
          }
        }
+       perf.setPerformance({ warmRadius: null });
        return { soon, later, peak };`,
     )
 
@@ -3518,6 +3529,103 @@ try {
    * By identity, not by whether something is open: a reopened source looks
    * exactly like a kept one from outside.
    */
+  await check('how much machine to spend is read from the machine', async () => {
+    /*
+     * Every number in kernel/performance.ts used to be a constant chosen for a
+     * computer nobody had measured. The decoder pool was six, justified by a
+     * claim that a machine has "a handful to a dozen" hardware decoders —
+     * measured, sixty-four opened at once and every one delivered a frame.
+     *
+     * So the defaults are derived from what the machine reports, and this
+     * checks the derivation rather than the numbers: more memory never asks
+     * for less, and nothing drops below what these were before they were
+     * settings.
+     */
+    const state = await evaluate(
+      cdp,
+      `const perf = window.__fluxDev.performance;
+       const machine = perf.getMachine();
+       const scale = [2, 8, 16, 32, 64, 128].map(gb => ({
+         gb,
+         ...perf.defaultsFor({ totalMemoryBytes: gb * 1024 * 1024 * 1024, cpuCount: 8 }),
+       }));
+       return { machine, scale, limits: perf.LIMITS, live: perf.getPerformance() };`,
+    )
+    assert.ok(
+      state.machine.totalMemoryBytes > 0 && state.machine.cpuCount > 0,
+      `the machine should have answered, it said ${JSON.stringify(state.machine)}`,
+    )
+    for (let i = 1; i < state.scale.length; i++) {
+      const smaller = state.scale[i - 1]
+      const bigger = state.scale[i]
+      for (const key of ['decoderPool', 'warmRadius', 'frameMemoryMb', 'diskCacheMb']) {
+        assert.ok(
+          bigger[key] >= smaller[key],
+          `a ${bigger.gb}GB machine should never ask for less ${key} than a ${smaller.gb}GB one: ${bigger[key]} against ${smaller[key]}`,
+        )
+      }
+    }
+    const smallest = state.scale[0]
+    assert.ok(
+      smallest.decoderPool >= 6 && smallest.frameMemoryMb >= 256 && smallest.diskCacheMb >= 256,
+      `even the smallest machine must not do worse than the old constants, got ${JSON.stringify(smallest)}`,
+    )
+  })
+
+  await check('a setting can be pinned, and put back to following the machine', async () => {
+    /*
+     * Pinned is a state, not a number that happens to match. A laptop that
+     * gains memory, or a project opened on a bigger machine, should move with
+     * it unless somebody said otherwise — so "following" has to survive being
+     * equal to the default, and clearing has to restore it.
+     */
+    const state = await evaluate(
+      cdp,
+      `const perf = window.__fluxDev.performance;
+       perf.resetPerformance();
+       const machinesAnswer = perf.getPerformance().decoderPool;
+
+       perf.setPerformance({ decoderPool: 11 });
+       const pinned = { value: perf.getPerformance().decoderPool, chosen: perf.getChosen() };
+
+       /* Pinned to exactly what the machine would have said: still pinned. */
+       perf.setPerformance({ decoderPool: machinesAnswer });
+       const pinnedToSame = Object.prototype.hasOwnProperty.call(perf.getChosen(), 'decoderPool');
+
+       perf.setPerformance({ decoderPool: null });
+       const released = { value: perf.getPerformance().decoderPool, chosen: perf.getChosen() };
+
+       /* Out of range is brought back in rather than taken. */
+       perf.setPerformance({ decoderPool: 100000 });
+       const tooBig = perf.getPerformance().decoderPool;
+       perf.setPerformance({ decoderPool: -5 });
+       const tooSmall = perf.getPerformance().decoderPool;
+
+       perf.resetPerformance();
+       return { machinesAnswer, pinned, pinnedToSame, released, tooBig, tooSmall,
+                limits: perf.LIMITS };`,
+    )
+    assert.equal(state.pinned.value, 11, 'a pinned value should be what was asked for')
+    assert.equal(state.pinned.chosen.decoderPool, 11, 'and should be remembered as chosen')
+    assert.equal(
+      state.pinnedToSame,
+      true,
+      'pinning to the machine\'s own answer is still pinning, not following',
+    )
+    assert.equal(
+      state.released.value,
+      state.machinesAnswer,
+      'releasing should go back to what the machine asks for',
+    )
+    assert.equal(
+      state.released.chosen.decoderPool,
+      undefined,
+      'and should stop being remembered at all',
+    )
+    assert.equal(state.tooBig, state.limits.decoderPool.max, 'too big is clamped, not taken')
+    assert.equal(state.tooSmall, state.limits.decoderPool.min, 'and so is too small')
+  })
+
   await check('a clip survives the playhead leaving it, and the pool stays bounded', async () => {
     const state = await evaluate(
       cdp,

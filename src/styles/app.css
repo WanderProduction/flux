@@ -3690,3 +3690,59 @@ kbd {
 .layout-row-drop:hover {
   color: var(--flux-warn);
 }
+
+/* ── performance settings ───────────────────────────────────────────────
+   The sequence dialog's two-column field grid does not fit a row that has a
+   number, a unit, whether it is pinned and a sentence explaining it. These
+   lay that out without disturbing .seq-field, which every other dialog row
+   still uses. */
+.perf-field {
+  display: grid;
+  grid-template-columns: 11rem 6rem auto 1fr;
+  align-items: center;
+  column-gap: 0.5rem;
+  row-gap: 0.15rem;
+}
+
+.perf-unit {
+  color: var(--flux-dim, #8b93a1);
+  font-size: 0.85em;
+}
+
+.perf-note {
+  justify-self: end;
+  font-size: 0.85em;
+}
+
+.perf-following {
+  color: var(--flux-dim, #8b93a1);
+}
+
+/* Spans the whole row, under the control it explains. */
+.perf-detail {
+  grid-column: 1 / -1;
+  color: var(--flux-dim, #8b93a1);
+  font-size: 0.85em;
+  line-height: 1.35;
+  padding-bottom: 0.35rem;
+}
+
+.perf-prose {
+  margin: 0 0 0.6rem;
+  color: var(--flux-dim, #8b93a1);
+  font-size: 0.85em;
+  line-height: 1.45;
+  max-width: 52ch;
+}
+
+.cb-btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--flux-dim, #8b93a1);
+  padding: 0 0.3rem;
+}
+
+.cb-btn--quiet:hover {
+  border-color: var(--flux-line, #2a3140);
+  color: inherit;
+}

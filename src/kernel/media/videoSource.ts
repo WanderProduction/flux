@@ -1,4 +1,5 @@
 import { assetUrl } from '../fsBridge'
+import { getPerformance } from '../performance'
 import { keyframeAt, sampleAt } from '../../../shared/mp4.js'
 import { trackFor, type VideoTrack } from './indexCache'
 import { RangeReader } from './ranges'
@@ -82,6 +83,11 @@ const KEPT_RUNS = 2
  * without rebuilding, and far short of troubling a machine that holds 4K
  * frames in a decoder pool anyway.
  *
+ * Adjustable, and scaled to the machine — see kernel/performance.ts. 256MB
+ * is the floor rather than the answer: it was chosen for a computer nobody
+ * had measured, and a workstation with ninety-four gigabytes has no reason
+ * to hold sixteen seconds of reverse footage when it could hold ninety.
+ *
  * Deliberately not a count: the same count is sixteen times the memory at one
  * preview width as at another, and the viewer's width is whatever its panel
  * happens to be — seen at both 480 and 1920 in one session.
@@ -92,7 +98,9 @@ const KEPT_RUNS = 2
  * without that a pass makes several overlapping runs of the same GOP and fills
  * any budget with copies of the same pictures.
  */
-const RUN_MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
+function runMemoryBudgetBytes(): number {
+  return getPerformance().frameMemoryMb * 1024 * 1024
+}
 
 /**
  * Where the time goes, for the harness that asks.
@@ -1439,7 +1447,8 @@ export class VideoSource {
   private trimRuns() {
     let held = 0
     for (const run of this.runs) held += this.runBytes(run)
-    while (this.runs.length > KEPT_RUNS && held > RUN_MEMORY_BUDGET_BYTES) {
+    const budget = runMemoryBudgetBytes()
+    while (this.runs.length > KEPT_RUNS && held > budget) {
       const dropped = this.runs.shift()
       if (!dropped) break
       held -= this.runBytes(dropped)

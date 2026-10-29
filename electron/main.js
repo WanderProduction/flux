@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
+import os from 'node:os'
 
 import { DIALOG_FILTERS, mediaKindOf } from '../shared/mediaTypes.js'
 import {
@@ -435,6 +436,18 @@ Run "npm run dev" and try again.`,
   return win
 }
 
+/*
+ * What this machine has, so the app can size its own appetite.
+ *
+ * `navigator.deviceMemory` is the web answer and is useless for this: Chromium
+ * caps it at 8GB and rounds to a power of two, so a 94GB workstation and a
+ * 9GB laptop report the same number. The main process can simply ask.
+ */
+ipcMain.handle('machine:specs', () => ({
+  totalMemoryBytes: os.totalmem(),
+  cpuCount: os.cpus().length,
+}))
+
 ipcMain.handle('store:get', (_e, name) => readStore(name))
 ipcMain.handle('store:set', (_e, name, value) => writeStore(name, value))
 
@@ -696,10 +709,25 @@ app.whenReady().then(() => {
 
   createWindow()
 
-  // After the window, and not awaited: the cache working is not a condition of
-  // the app starting, and a directory full of indexes to stat is exactly the
-  // kind of thing that has no business happening before the first paint.
-  pruneCache(mediaCachePath()).catch(() => {})
+  /*
+   * After the window, and not awaited: the cache working is not a condition of
+   * the app starting, and a directory full of indexes to stat is exactly the
+   * kind of thing that has no business happening before the first paint.
+   *
+   * The budget is read here rather than sent from the renderer, because this
+   * side owns the store and the prune happens before the renderer could have
+   * told us anything. Same key the renderer writes — see
+   * src/kernel/performance.ts — and the default stands when it is absent,
+   * which is every machine that has never opened the settings.
+   */
+  void (async () => {
+    const chosen = await readStore('performance')
+    const mb = Number(chosen?.diskCacheMb)
+    await pruneCache(
+      mediaCachePath(),
+      Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : undefined,
+    ).catch(() => {})
+  })()
 
   // Same reasoning, one step further: whether a newer FLUX exists is never a
   // reason to make this one slower to appear.
