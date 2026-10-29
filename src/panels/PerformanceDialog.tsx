@@ -15,12 +15,14 @@ import {
 /**
  * How much of this machine FLUX is allowed to spend.
  *
- * Every one of these was a constant until it was measured. The decoder pool
- * is the one worth opening this dialog for: it was six, because of a line of
- * reasoning about hardware decoders that turned out not to hold, and on real
- * 97 Mbps camera footage the first pass over a timeline it had not seen
- * dropped to 23fps with a 1.2-second freeze. At thirty-two it is 32fps and
- * the worst gap is 84 milliseconds. Nothing else about the app changed.
+ * Every one of these was a constant until it was measured, and the decoder
+ * pool has now been measured twice in opposite directions. It was six, on the
+ * reasoning that hardware decoders are few; that was overruled by opening
+ * sixty-four sources at once for one frame each, which cost nothing; and that
+ * in turn was wrong, because sixty-four held open is not sixty-four
+ * streaming. On HEVC, twenty-four open lose a tenth of the frame rate by the
+ * third pass over the same timeline. Twelve is the default and the ceiling
+ * belongs to the GPU, not to this machine.
  *
  * Each row says what the machine would choose, so "Follow this machine" is a
  * visible state rather than a number that happens to match today. Something
@@ -60,7 +62,7 @@ export function PerformanceDialog({ onClose }: { onClose: () => void }) {
       key: 'decoderPool',
       label: 'Clips kept open',
       detail:
-        'Decoders held for clips the playhead has left. The one that decides whether arriving somewhere new costs a freeze.',
+        'Decoders held for clips the playhead has left. Bounded by how many streams the GPU will decode at once — past about a dozen, HEVC loses frames the longer it plays.',
       unit: 'clips',
       step: 1,
     },
@@ -158,15 +160,17 @@ export function PerformanceDialog({ onClose }: { onClose: () => void }) {
           <div className="seq-settings-group">
             <span className="seq-settings-legend">Why these numbers</span>
             <p className="perf-prose">
-              Measured on real camera footage rather than chosen: a first pass over a timeline
-              nothing had opened yet ran at 23 fps with a 1.2 second freeze when six clips were
-              kept open, and at 32 fps with an 84 ms worst gap when thirty-two were. Sixty-four
-              decoders opened at once with no measurable cost per frame, so the old limit of six
-              was guarding a ceiling that was not there.
+              Measured on real camera footage rather than chosen. Playback delivers 98% of what
+              the footage holds — 29.7 of 29.97 fps on 30p, 49.3 of 50 on 50p — so these are
+              about keeping that, not about reaching for more.
             </p>
             <p className="perf-prose">
-              Playing the same stretch twice was always smooth, which is why this reads as
-              occasional rather than constant — it is the cost of arriving somewhere new.
+              Clips kept open is the one with a real ceiling, and it is the GPU's rather than
+              this machine's: how many streams it will decode at once, which is far fewer for
+              HEVC than for H.264 and cannot be asked for from in here. Measured on HEVC, seven
+              and thirteen open held 49 fps flat over three passes, while twenty-four fell to
+              44 by the third with ten gaps over 100 ms. Raising it does not fail, it slowly
+              gets worse, so twelve sits below the cliff instead of on it.
             </p>
             <div className="seq-field">
               <span />

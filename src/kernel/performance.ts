@@ -8,11 +8,27 @@
  *   "A machine has a small fixed number of hardware decoders — a handful to a
  *   dozen or so — and every open source holds one."
  *
- * Measured on an ordinary workstation, sixty-four sources opened at once, all
- * sixty-four delivered frames, and a warm frame cost nothing measurable
- * either way: 0.1ms each with four open, 0ms with sixty-four, with the JS heap
- * flat at about twenty megabytes throughout. The ceiling the pool was sized
- * against was not there.
+ * **That was right, and the measurement that overruled it asked the wrong
+ * question.** Sixty-four sources were opened at once and each asked for one
+ * frame; all sixty-four answered, at no measurable cost. So the first version
+ * of this file scaled the pool with memory and this machine got fifty-three.
+ *
+ * Holding sixty-four decoders open is not the same as sixty-four decoders
+ * streaming, and streaming is the state playback is in. Measured again on
+ * rotated HEVC 50p — forty clips, three passes over the same timeline, one
+ * fresh app per arm:
+ *
+ *   | open | pass 1 | pass 2 | pass 3 | gaps over 100ms |
+ *   |------|--------|--------|--------|-----------------|
+ *   |    7 |  49.4  |  49.4  |  49.2  | 0 -> 1          |
+ *   |   13 |  49.2  |  49.3  |  49.2  | 0 -> 1          |
+ *   |   24 |  48.7  |  44.6  |  43.8  | 0 -> 10         |
+ *
+ * The cliff is between thirteen and twenty-four concurrent HEVC decoders, and
+ * it shows up as *degradation with use*: the first pass is fine and the third
+ * has lost a tenth of its frames. On H.264 the same sweep is flat from six to
+ * twenty-four, which is why the original error survived — it was measured on
+ * H.264. The pool therefore does not scale with anything; see `defaultsFor`.
  *
  * It belongs in the *installation* store rather than in a project, for the
  * same reason the viewer's preview resolutions do: it is about this computer
@@ -35,6 +51,12 @@ export interface PerformanceSettings {
    * coming back should not mean paying for its index, its decoder and its
    * first keyframe again — and on a timeline of a hundred short clips, six is
    * about six seconds of work before everything is cold again.
+   *
+   * It is bounded from above by something this process cannot ask about: how
+   * many streams the GPU will decode at once, which differs by codec and is
+   * far smaller for HEVC than for H.264. Raising it past that does not fail,
+   * it degrades — and only after a minute of playing, which is the hardest
+   * kind of cost to attribute. The header has the numbers.
    */
   decoderPool: number
   /**
@@ -94,11 +116,30 @@ export const LIMITS = {
    * than it was is a trap, and a machine small enough to want less than this
    * is a machine that will not be playing 4K either way.
    */
+  /*
+   * The ceiling here is deliberately above what measured well. Twenty-four
+   * concurrent HEVC decoders cost a tenth of the frame rate on the GPU this
+   * was measured on, but that is one GPU and one codec, and a bound that
+   * refused what some hardware can do would be a worse answer than a default
+   * that does not reach for it. The default is twelve; see `defaultsFor`.
+   */
   decoderPool: { min: 6, max: 96 },
   warmRadius: { min: 0, max: 8 },
   frameMemoryMb: { min: 256, max: 8192 },
   diskCacheMb: { min: 256, max: 262144 },
 } as const
+
+/**
+ * Clips that keep a decoder open, on every machine.
+ *
+ * Twelve rather than thirteen because the cliff was measured between thirteen
+ * and twenty-four open HEVC decoders and a default should sit below a cliff,
+ * not on it. Twelve measured identical to six on both H.264 and HEVC — flat
+ * across three passes, no gaps over 100ms — so the headroom above the seven
+ * that a warm radius of three keeps open costs nothing and is there for
+ * moving back and forth across a few cuts while editing.
+ */
+const DECODER_POOL = 12
 
 function clamp(value: number, { min, max }: { min: number; max: number }, fallback: number): number {
   if (!Number.isFinite(value)) return fallback
@@ -113,17 +154,18 @@ function clamp(value: number, { min, max }: { min: number; max: number }, fallba
  * computer is closely enough for this purpose — nobody puts ninety-four
  * gigabytes in a machine they do not intend to work on.
  *
- * The decoder pool is scaled against it too, although decoders are not really
- * memory-bound. That is a deliberate approximation rather than an oversight:
- * what a decoder costs is driver and GPU resource, which cannot be asked for
- * from here, and memory is the best-correlated thing that can be. Sixty-four
- * was measured to be free on a 94GB machine, and the scale below asks for
- * fewer than that on every machine, so it stays inside what was proven.
+ * **The decoder pool is deliberately not scaled against it.** It was, and that
+ * was the one real mistake in this file: system memory says nothing about how
+ * many streams a GPU will decode at once, so scaling a decode-session count
+ * by gigabytes gave this machine fifty-three and cost it a tenth of its frame
+ * rate on HEVC. A number that cannot be derived from anything knowable here
+ * is better left at the largest value measured to be safe on the heavier
+ * codec, with the setting there for anyone whose hardware does more.
  */
 export function defaultsFor(spec: Machine = machine): PerformanceSettings {
   const gb = spec.totalMemoryBytes / GB
   return {
-    decoderPool: clamp(6 + gb / 2, LIMITS.decoderPool, 8),
+    decoderPool: DECODER_POOL,
     warmRadius: clamp(gb >= 32 ? 3 : gb >= 16 ? 2 : 1, LIMITS.warmRadius, 1),
     frameMemoryMb: clamp(gb * 16, LIMITS.frameMemoryMb, 256),
     diskCacheMb: clamp(gb * 64, LIMITS.diskCacheMb, 256),
