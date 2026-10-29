@@ -3570,6 +3570,27 @@ try {
       smallest.decoderPool >= 6 && smallest.frameMemoryMb >= 256 && smallest.diskCacheMb >= 256,
       `even the smallest machine must not do worse than the old constants, got ${JSON.stringify(smallest)}`,
     )
+
+    /*
+     * The decoder pool must NOT follow memory, which is the one thing the
+     * first version of these defaults got wrong. What bounds it is how many
+     * streams the GPU will decode at once; measured, HEVC degrades somewhere
+     * between thirteen and twenty-four open — and degrades with *use*, so a
+     * two-gigabyte laptop and a 128-gigabyte workstation wanting different
+     * numbers here is not a scale, it is a guess with a cliff behind it.
+     */
+    const pools = [...new Set(state.scale.map((one) => one.decoderPool))]
+    assert.equal(
+      pools.length,
+      1,
+      `the decoder pool must not scale with memory — GPU decode sessions are not memory. Got ${state.scale
+        .map((one) => `${one.gb}GB:${one.decoderPool}`)
+        .join(' ')}`,
+    )
+    assert.ok(
+      pools[0] <= 13,
+      `the default pool must stay below the measured HEVC cliff of ~13 open, got ${pools[0]}`,
+    )
   })
 
   await check('a setting can be pinned, and put back to following the machine', async () => {
