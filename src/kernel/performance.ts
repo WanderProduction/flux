@@ -69,12 +69,16 @@ export interface PerformanceSettings {
    */
   warmRadius: number
   /**
-   * Megabytes of already-shrunk frames each source may keep for playing
-   * backwards.
+   * Megabytes of already-shrunk frames kept for playing backwards, across
+   * every clip that holds any.
    *
-   * Per source rather than in total, because that is where the eviction
-   * decision is made. Only sources that have actually been played backwards
-   * hold any, so the worst case is far below this times the pool.
+   * In total rather than per source, since 0.0.40. It was per source, on the
+   * grounds that only clips actually played backwards hold any and so the
+   * worst case was far below this times the pool. A reverse pass crosses the
+   * whole pool and plays every clip in it backwards, which makes the worst
+   * case exactly this times the pool: measured at 14.8GB held against a
+   * 1498MB budget. A number that bounds one clip while twelve are alive is
+   * not a memory limit, whatever it is called.
    */
   frameMemoryMb: number
   /**
@@ -161,6 +165,14 @@ function clamp(value: number, { min, max }: { min: number; max: number }, fallba
  * rate on HEVC. A number that cannot be derived from anything knowable here
  * is better left at the largest value measured to be safe on the heavier
  * codec, with the setting there for anyone whose hardware does more.
+ *
+ * **Frame memory still is**, and the difference is the point. The kept runs
+ * are `ImageBitmap`s and they land in the renderer's own working set: in the
+ * arm that held 14.8GB of them, the process grew by 11.7GB while the GPU grew
+ * by 1.8GB. So gigabytes of system memory is the right thing to read for this
+ * one and the wrong thing to read for the pool, whose decode sessions live on
+ * the card. Two settings in the same struct, scaled from the same number, and
+ * only one of them was entitled to it.
  */
 export function defaultsFor(spec: Machine = machine): PerformanceSettings {
   const gb = spec.totalMemoryBytes / GB

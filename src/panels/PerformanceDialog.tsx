@@ -78,7 +78,7 @@ export function PerformanceDialog({ onClose }: { onClose: () => void }) {
       key: 'frameMemoryMb',
       label: 'Frames held in memory',
       detail:
-        'Per clip, for playing backwards. Only clips actually played backwards hold any.',
+        'For playing backwards, across every clip that holds any. Playing forwards holds none.',
       unit: 'MB',
       step: 64,
     },

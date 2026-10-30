@@ -3720,6 +3720,119 @@ try {
   })
 
   /*
+   * The frame budget bounds the app, not one clip at a time.
+   *
+   * It did not, until 0.0.40. `trimRuns` could only see its own source's runs,
+   * so every clip in the pool sat politely under the budget and the app sat at
+   * twelve times it. Worse, `KEPT_RUNS` is a floor beneath the budget, so a
+   * pooled clip kept two whole GOPs however small the budget was set: measured
+   * on fourteen rotated HEVC clips reversed at full preview width, 14.8GB of
+   * kept pictures against a 1498MB setting, and 10GB even with the setting at
+   * its 256MB minimum.
+   *
+   * Several *different* files, because the pool is keyed by path and one file
+   * laid many times is one source — which is exactly why the suite did not
+   * catch this. Backwards, because forwards builds no runs at all.
+   */
+  await check('the frame budget is a total, not a budget each clip gets', async () => {
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, performance: perf, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       const names = ['clipA.mp4', 'long_take.mp4', 'open_gop.mp4', 'layer_blue.mp4',
+                      'layer_red.mp4', 'shot_B.mp4', 'rotated.mp4', 'voice_over.mp4'];
+       const paths = names.map(n => ${JSON.stringify(MEDIA_DIR)} + '\\\\' + n);
+       const known = new Set(assets.getAssets().map(a => a.path));
+       const missing = paths.filter(p => !known.has(p));
+       if (missing.length) {
+         assets.importAssets(missing.map(p => ({ path: p, kind: 'video' })));
+         await new Promise(r => setTimeout(r, 1500));
+       }
+       const usable = [];
+       for (const a of assets.getAssets()) {
+         if (a.kind !== 'video' || !paths.includes(a.path)) continue;
+         try { await assets.ensureProbed(a.id); } catch (e) {}
+         const probed = assets.getAssets().find(x => x.id === a.id) ?? a;
+         if ((probed.duration ?? 0) > 1.6) usable.push(probed);
+       }
+       if (usable.length < 4) return { error: 'setup: only ' + usable.length + ' usable fixtures' };
+
+       /* Small enough that the trim has to do something, and the floor alone
+          would blow past it. */
+       const budget = 256;
+       perf.setPerformance({ frameMemoryMb: budget, decoderPool: 12, warmRadius: 3 });
+
+       const span = 1.5;
+       sequence.setSequence(null);
+       view.recordView({ viewer: { playbackResolution: 0.5, pausedResolution: 1 } });
+       for (let i = 0; i < usable.length; i++) {
+         sequence.addClip({ assetId: usable[i].id, trackId: 'V1',
+                            start: i * span, duration: span, offset: 0 });
+       }
+       await new Promise(r => setTimeout(r, 1200));
+
+       const held = () => {
+         let bytes = 0, holders = 0, largest = 0;
+         for (const s of videoSource.VideoSource.live) {
+           const runs = s && s.runs;
+           if (!Array.isArray(runs) || runs.length === 0) continue;
+           holders++;
+           let mine = 0;
+           for (const r of runs) {
+             const tw = (s.track && s.track.width) || 1920;
+             const th = (s.track && s.track.height) || 1080;
+             const h = Math.max(1, Math.round((r.width * th) / Math.max(1, tw)));
+             mine += r.width * h * 4 * ((r.pictures && r.pictures.size) || 0);
+           }
+           bytes += mine;
+           if (mine > largest) largest = mine;
+         }
+         return { mb: bytes / 1048576, holders, largestMb: largest / 1048576 };
+       };
+
+       const end = usable.length * span;
+       playback.pause(); playback.setRate(1); playback.seek(end - 0.2);
+       await new Promise(r => setTimeout(r, 900));
+
+       let peak = { mb: 0, holders: 0 };
+       playback.setRate(-1);
+       playback.play();
+       const began = performance.now();
+       while (performance.now() - began < (end + 1) * 1000) {
+         await new Promise(r => setTimeout(r, 120));
+         const now = held();
+         if (now.mb > peak.mb) peak = now;
+       }
+       playback.pause(); playback.setRate(1);
+       perf.resetPerformance();
+       return { budget, peak, clips: usable.length };`,
+    )
+    assert.ok(!state.error, state.error ?? '')
+    assert.ok(
+      state.peak.holders >= 3,
+      `only ${state.peak.holders} clips ever held frames, so this proves nothing about a total`,
+    )
+    /*
+     * The exact invariant `trimLive` promises, rather than a round number:
+     * everything except the clip being read is trimmed to fit the budget, and
+     * that one clip keeps its two-run floor however small the budget is. So
+     * the total may exceed the budget by one clip's worth and no more — which
+     * holds at any preview width and any GOP length, where `budget * 2` would
+     * depend on both. Before the fix this was 10,093MB against a budget of 256
+     * and a largest clip of 776.
+     */
+    const allowed = state.budget + state.peak.largestMb
+    assert.ok(
+      state.peak.mb <= allowed * 1.05,
+      `${Math.round(state.peak.mb)}MB of frames were held across ${state.peak.holders} clips, ` +
+        `against a ${state.budget}MB budget and a largest clip of ${Math.round(state.peak.largestMb)}MB — ` +
+        `the budget is being applied per clip, not in total`,
+    )
+  })
+
+  /*
    * The clip on the far side of a cut is opened before a backwards pass
    * reaches it.
    *
