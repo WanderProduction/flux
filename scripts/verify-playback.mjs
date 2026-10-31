@@ -3963,6 +3963,105 @@ try {
     )
   })
 
+  await check('a shuttle served keyframes builds no runs for the cut ahead', async () => {
+    /*
+     * The other half of the check above, and the warm-up has to be *off* here.
+     *
+     * Above the backward line a clip is entered at the keyframe before the
+     * playhead and costs one decode, so the run that warm-up builds is never
+     * read by anyone. It is not merely wasted: the build and the keyframe
+     * serves share one decoder and the serves arrive sixty-five times a
+     * second, so each serve tears down a decoder with work in flight and the
+     * build restarts from its keyframe and decodes the GOP again.
+     *
+     * Measured at -8x over fourteen real clips before this was gated: four
+     * builds begun, none finished, 44 decoder teardowns and 1225 frames
+     * decoded to show 32. After: 104 decoded, one teardown, and the same 8
+     * pictures a second — which is the ceiling, one GOP per picture.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
+       await commands.run('workspace.switch.edit');
+       await new Promise(r => setTimeout(r, 500));
+
+       const pick = async (path) => {
+         const found = assets.getAssets().find(a => a.path === path)
+           ?? assets.importAssets([{ path, kind: 'video' }])[0];
+         await assets.ensureProbed(found.id);
+         return assets.getAssets().find(a => a.id === found.id) ?? found;
+       };
+       const incoming = await pick(${CLIP_A});
+       const outgoing = await pick(${LONG});
+       if (!(outgoing.duration > 2.5)) return { error: 'setup: the long take is ' + outgoing.duration + 's' };
+
+       /* The premise, stated rather than assumed: if the backward line moves
+          above 8 this check is measuring the ordinary path and would pass for
+          the wrong reason. */
+       const coarseAt8 = videoSource.showKeyframesOnly(-8);
+
+       const firstSpan = Math.min(incoming.duration, 2);
+       sequence.setSequence(null);
+       sequence.addClip({ assetId: incoming.id, trackId: 'V1', start: 0, duration: firstSpan, offset: 0 });
+       sequence.addClip({ assetId: outgoing.id, trackId: 'V1', start: firstSpan, duration: 3, offset: 0 });
+       view.recordView({ viewer: { playbackResolution: 0.25, pausedResolution: 1 } });
+       await new Promise(r => setTimeout(r, 1200));
+       if (!document.querySelector('canvas.viewer-media')) return { error: 'no viewer canvas' };
+
+       const boundary = firstSpan;
+       const runsOn = () => {
+         const s = [...videoSource.VideoSource.live].find(x => x.path === incoming.path);
+         return s ? (s.runs || []).length : 0;
+       };
+
+       playback.pause();
+       playback.setRate(1);
+       playback.seek(boundary + 1.2);
+       await new Promise(r => setTimeout(r, 1500));
+       const before = Object.assign({}, videoSource.sourceStats());
+
+       /* Reverse at a rate that is served keyframes, and look while still on
+          this side of the cut — which is exactly when the warm-up would fire. */
+       playback.setRate(-8);
+       playback.play();
+       let atCut = null;
+       const began = performance.now();
+       while (performance.now() - began < 2500) {
+         await new Promise(r => setTimeout(r, 8));
+         const now = playback.getTime();
+         if (atCut === null && now <= boundary + 0.3 && now > boundary) atCut = runsOn();
+         if (now < boundary - 0.3) break;
+       }
+       const crossed = playback.getTime() < boundary;
+       playback.pause();
+       playback.setRate(1);
+       await new Promise(r => setTimeout(r, 300));
+       const now = videoSource.sourceStats();
+       return {
+         coarseAt8, crossed, atCut,
+         started: (now.buildsStarted ?? 0) - (before.buildsStarted ?? 0),
+         served: (now.askedCoarse ?? 0) - (before.askedCoarse ?? 0),
+       };`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(state.coarseAt8, true, 'setup: -8x is no longer a keyframe-only rate, so this checks nothing')
+    assert.ok(state.crossed, 'setup: the pass never reached the boundary')
+    assert.ok(state.served > 0, 'setup: nothing was served through the keyframe-only path')
+    assert.equal(
+      state.started,
+      0,
+      `${state.started} run build(s) began while shuttling at a rate that is served keyframes only, so the decoder is being fought over for runs nothing will read`,
+    )
+    /* Null means the sampling never landed inside the window, which at -8x is
+       a third of a second wide — not a failure, and the build count above is
+       the claim either way. */
+    assert.ok(
+      !state.atCut,
+      `the incoming clip held ${state.atCut} decoded run(s) at the cut, which at this rate nothing will read`,
+    )
+  })
+
   /*
    * Shuttling fast is served keyframes only, and the rates that counts for are
    * the ones that were measured rather than the ones that sound right.

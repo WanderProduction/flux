@@ -167,6 +167,43 @@ const stats = {
   restarts: 0,
   /** Runs of frames shrunk and kept so they can be played backwards. */
   runsBuilt: 0,
+  /**
+   * Builds that decoded and then threw everything away.
+   *
+   * `runsBuilt` counts only the ones that finished, which made the expensive
+   * failure invisible: a build abandoned part way has already decoded every
+   * frame it walked past, and discards the lot. So a reverse pass could read
+   * `runsBuilt: 0` while a thousand frames were decoded on its behalf, and
+   * nothing in these counters said where they went.
+   */
+  buildsAbandoned: 0,
+  /**
+   * Which way in a picture was asked for, counted per entry point.
+   *
+   * Four ways into the decoder and they cost two orders of magnitude apart, so
+   * a total of `decoded` says nothing about which one is doing it. Chasing the
+   * reverse cost without these meant two wrong guesses in a row — abandoned
+   * builds, then the warm-radius prefetch — each of which took a measurement
+   * to rule out and neither of which was it.
+   *
+   *   coarse    a keyframe-only serve: one decode, by construction
+   *   exact     forward streaming: one decode amortised over a lookahead
+   *   back      a run served a frame it already held: no decode at all
+   *   fallback  backwards with no run to serve it, so a whole GOP for one
+   *             frame. This is the expensive one, and the one worth counting.
+   */
+  askedCoarse: 0,
+  askedExact: 0,
+  askedFromRun: 0,
+  askedFallback: 0,
+  /**
+   * Builds that began, which with `runsBuilt` and `buildsAbandoned` says
+   * whether one is still in flight. That gap is what hid the reverse cost: at
+   * -8x the counters read four started, none finished and none abandoned,
+   * because all four were mid-build and fighting the keyframe serves for the
+   * decoder.
+   */
+  buildsStarted: 0,
   /** Pictures handed back from one of those runs rather than decoded. */
   fromRun: 0,
 }
@@ -1359,6 +1396,7 @@ export class VideoSource {
      * which is the behaviour being replaced rather than a way to serve it.
      */
     if (options.coarse) {
+      stats.askedCoarse += 1
       const frame = await this.keyframeOnly(time)
       if (!frame) return null
       return {
@@ -1370,6 +1408,7 @@ export class VideoSource {
     }
 
     if (!options.backwards) {
+      stats.askedExact += 1
       const frame = await this.frameFor(time)
       if (!frame) return null
       return {
@@ -1388,6 +1427,7 @@ export class VideoSource {
       const picture = held.pictures.get(at)
       if (picture) {
         stats.fromRun += 1
+        stats.askedFromRun += 1
         /*
          * Build the run *before* this one while there is still some of this
          * one left to play. Not awaited: the point is that it happens while
@@ -1408,6 +1448,7 @@ export class VideoSource {
     if (!picture) {
       // Nothing to hand back from a run, so fall back to decoding the one
       // frame. Slow, and right: a picture late beats a picture missing.
+      stats.askedFallback += 1
       const frame = await this.frameFor(time)
       if (!frame) return null
       return {
@@ -1418,6 +1459,7 @@ export class VideoSource {
       }
     }
     stats.fromRun += 1
+    stats.askedFromRun += 1
     return {
       picture,
       width: picture.width,
@@ -1544,6 +1586,7 @@ export class VideoSource {
       return
     }
 
+    stats.buildsStarted += 1
     this.buildingSpan = { from, to, width }
     const run = (async () => {
       /*
@@ -1602,6 +1645,7 @@ export class VideoSource {
       // answer for frames it does not hold and send every one of them to the
       // slow path.
       if (pictures.size === 0 || this.away !== mine) {
+        stats.buildsAbandoned += 1
         for (const one of pictures.values()) one.close()
         return
       }
