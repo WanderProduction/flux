@@ -36,8 +36,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 
 import {
-  EXPECTED_PIX_FMT,
-  EXPECTED_PROFILE,
+  archiveFormat,
   cutArgs,
   probeArgs,
 } from '../shared/renderFormat.js'
@@ -366,11 +365,26 @@ export async function verify(ffprobe, job, source) {
     problems.push(`duration is ${facts.duration.toFixed(2)}s, expected ${job.duration.toFixed(2)}s`)
   }
 
-  if (facts.profile !== EXPECTED_PROFILE) {
-    problems.push(`profile is ${facts.profile}, expected ${EXPECTED_PROFILE}`)
-  }
-  if (facts.pixFmt !== EXPECTED_PIX_FMT) {
-    problems.push(`pixel format is ${facts.pixFmt}, expected ${EXPECTED_PIX_FMT}`)
+  /*
+   * Profile and pixel format, as a pair, against what this source should keep.
+   *
+   * One check rather than two, because the two answers are not independent: a
+   * 4:2:2 archive output is profile `Rext` and a 4:2:0 one is `Main 10`, so
+   * comparing each against a constant of its own would fail every output that
+   * was in fact correct. See `archiveFormat`.
+   *
+   * More than one pair is accepted for a 4:2:2 source, so the outputs already
+   * in the archive — all of them from before 4:2:2 was kept — still pass. This
+   * is `alreadyDone`'s question on resume, and an archive that re-encoded
+   * itself because the format improved would be a surprise, not a feature.
+   */
+  const format = archiveFormat(source.pixFmt)
+  const asWritten = `${facts.profile}/${facts.pixFmt}`
+  if (!format.accept.some((one) => asWritten === `${one.profile}/${one.pixFmt}`)) {
+    problems.push(
+      `profile and pixel format are ${asWritten}, expected ` +
+        format.accept.map((one) => `${one.profile}/${one.pixFmt}`).join(' or '),
+    )
   }
 
   /*
@@ -455,7 +469,15 @@ export async function encodeCut({ job, onProgress, signal, options = {} }) {
    * "rename" is a copy, which is minutes for a large file and not atomic at all.
    */
   const partial = `${job.output}.flux-part`
-  const args = cutArgs({ ...job, output: partial }, options)
+  /*
+   * The source's own pixel format goes in, so the encode keeps its chroma and
+   * the verifier below expects what the encode just wrote. Both read it through
+   * `archiveFormat`, which is the only way those two can be kept in step.
+   */
+  const args = cutArgs(
+    { ...job, output: partial },
+    { ...options, sourcePixFmt: source.pixFmt },
+  )
 
   const encoded = await new Promise((resolve) => {
     const child = spawn(found.ffmpeg, args, { windowsHide: true })
