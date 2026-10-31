@@ -229,6 +229,22 @@ export function setFramesAhead(frames: number): void {
  * footage, so the faster the shuttle the *more* of them arrive, which is the
  * right way round for scrubbing.
  *
+ * **That paragraph was true of the intent and false of the code until 0.0.41.**
+ * The serve went through `frameFor`, which streams, so a keyframe-only picture
+ * cost a whole GOP of decoding — 48 frames per picture on 1080p50, which is
+ * exactly what showing every frame costs. `keyframeOnly` is what finally makes
+ * it one, and what that buys is the ceiling: 16x forward went from 8.2
+ * pictures a second to 15.7 on fourteen rotated HEVC clips, and the backward
+ * rungs, already at their ceiling, now reach it for half the decoding and half
+ * the bytes.
+ *
+ * The ceiling is `rate * fps / GOP`, because one picture per GOP is what this
+ * service *is*: sixteen a second at 16x on 50p footage with 50-frame GOPs,
+ * eight at -8x. All three coarse rungs now sit within 2% of it. That is also
+ * the reason the lines cannot be moved *down* to help 4x or 8x — those rungs
+ * deliver 72 and 61 pictures a second by showing every frame, and one picture
+ * per GOP would be a cut of four fifths rather than a repair.
+ *
  * Where the lines sit was swept rather than reasoned about, and the answer was
  * not the obvious one. Three seconds a pass, three rounds, every threshold
  * measured in the same app as the unchanged behaviour (median gap / worst gap
@@ -365,6 +381,18 @@ export class VideoSource {
   /** Next sample index to submit, or -1 when the decoder needs a keyframe. */
   private next = -1
   private feeding: Promise<void> | null = null
+  /**
+   * Whether this decoder has been flushed and so demands a keyframe next.
+   *
+   * `flush()` drains a decoder and then refuses anything but a key chunk —
+   * `feed` says so where it explains why it never flushes. But a flushed
+   * decoder is still `configured`, so the rewind guard in `feed`, which looks
+   * for one that is `closed`, cannot see this state. Tracked rather than
+   * inferred, because the failure is a delta frame submitted to a decoder that
+   * will not take it: DataError, `failed` set, and a source that stays alive
+   * producing nothing.
+   */
+  private flushed = false
   private closed = false
   private failed = false
   /** Resolved each time the decoder hands back a frame. */
@@ -791,7 +819,17 @@ export class VideoSource {
        * range read on a path that only runs after something has already gone
        * wrong.
        */
-      if ((!this.decoder || this.decoder.state === 'closed') && !track.key[from]) {
+      /*
+       * ...and a decoder that has been *flushed* wants one for the same
+       * reason, though it reports itself as configured rather than closed. A
+       * keyframe-only serve flushes after every picture, so the rate at which
+       * this matters is now "every time the shuttle drops out of the top of
+       * the ladder" rather than never.
+       */
+      if (
+        (!this.decoder || this.decoder.state === 'closed' || this.flushed) &&
+        !track.key[from]
+      ) {
         this.next = keyframeAt(track, track.pts[from])
         this.runFrom = this.next
         continue
@@ -812,6 +850,9 @@ export class VideoSource {
               data: bytes.subarray(at, at + track.bytes[i]),
             }),
           )
+          // A key chunk is what a flushed decoder was waiting for, so the debt
+          // is settled by submitting one rather than by anything else.
+          if (track.key[i]) this.flushed = false
           stats.submitted += 1
           this.counts.submitted += 1
           submitted += 1
@@ -1127,6 +1168,7 @@ export class VideoSource {
            * had succeeded.
            */
           const mine = this.generation
+          this.flushed = true
           void decoder.flush().catch(() => {
             if (this.decoder === decoder && this.generation === mine) this.failed = true
           })
@@ -1141,6 +1183,132 @@ export class VideoSource {
     if (frame) this.repairs = 0
     this.trim()
     return frame
+  }
+
+  /**
+   * The keyframe at or before a moment, decoded by itself.
+   *
+   * This is what the keyframe-only path always claimed to do. It did not: it
+   * asked `frameFor` for the keyframe's timestamp, and `frameFor` is the
+   * streaming path — it submits a lookahead past whatever it is asked for and
+   * decodes everything in between. So a shuttle that shows one picture per GOP
+   * decoded the whole GOP to produce it, which is the cost of showing every
+   * frame for a fiftieth of the pictures.
+   *
+   * Measured on one source directly, no viewer and no pool, asking for 24
+   * moments one GOP apart on 1080p50 HEVC with 50-frame GOPs:
+   *
+   *            got  ms/pic  decoded  dec/pic  fetched
+   *   keyframes  24    58.3     1151       48  219.7MB
+   *   every frame 24   56.1     1151       48  224.2MB
+   *
+   * Identical, to the submitted chunk. The two paths were doing the same work
+   * and the coarse one was throwing 47 of every 48 frames away.
+   *
+   * A keyframe needs nothing before it, so the honest cost is one range read
+   * and one decode. What it takes to actually get that is a flush: a decoder
+   * emits nothing until enough chunks are queued behind the one wanted — 14
+   * for a 1080p camera clip, per `frameFor` — and submitting those is exactly
+   * the waste being removed. `flush()` drains it instead, and the reason
+   * `feed` must never flush does not apply here: the next thing this path
+   * submits is another keyframe, which is the only thing a flushed decoder
+   * will take. See `flushed` for what keeps that true when the shuttle slows
+   * down and the streaming path takes over again.
+   */
+  private async keyframeOnly(time: number): Promise<VideoFrame | null> {
+    if (this.closed) return null
+    const want = keyframeAt(this.track, time)
+    // Straight past a sync sample this decoder has already refused, the same
+    // way a restart does; see `startBefore`.
+    const at = this.refused.has(want) ? this.startBefore(want) : want
+    const stamp = this.track.pts[at]
+
+    const already = this.pick(stamp)
+    if (already) {
+      stats.hits += 1
+      return already
+    }
+    stats.misses += 1
+    this.wantTime = stamp
+
+    /*
+     * Any feed still in flight belongs to a moment this call has left, and it
+     * would submit delta frames on top of the one keyframe wanted. Abandoning
+     * it by generation is what `restartAt` does; the decoder itself is kept,
+     * because a teardown per picture is the cost this method exists to avoid.
+     */
+    this.generation += 1
+    if (this.feeding) await this.feeding
+
+    /*
+     * A decoder still carrying streamed chunks is thrown away rather than
+     * flushed, because a flush *drains* a queue instead of skipping it.
+     *
+     * Dropping from 1x into the top of the ladder leaves a lookahead's worth
+     * of chunks in flight, and the flush below then decodes every one of them
+     * before the keyframe wanted comes out. Measured at 5.0 seconds for that
+     * one picture against a median of 20ms for the ones after it — a single
+     * five-second freeze on the way into a fast shuttle, which is precisely
+     * the gesture this path exists to serve.
+     *
+     * One teardown on the way in, counted as the restart it is. Every serve
+     * after it flushes a decoder whose only outstanding work is its own
+     * keyframe, which is why the median is 20ms.
+     */
+    const stale = this.decoder
+    if (stale && stale.state !== 'closed' && stale.decodeQueueSize > 0) {
+      stats.restarts += 1
+      stale.close()
+      this.decoder = null
+      this.flushed = false
+    }
+
+    this.discardBuffer()
+    this.next = at
+    this.runFrom = at
+    this.dropped = -1
+
+    // Exactly one sample: `feed` submits from `next` up to sampleAt(time) plus
+    // the lookahead, and a lookahead of zero at a keyframe's own timestamp is
+    // that keyframe alone.
+    await this.feed(stamp, 0)
+    if (this.closed || this.failed) return null
+
+    const decoder = this.decoder
+    if (!decoder || decoder.state !== 'configured') return this.pick(stamp)
+
+    /*
+     * Started and *not awaited*, which is the one thing this must get right.
+     *
+     * `frameFor` says why at its own flush: frames come out *during* a flush,
+     * and awaiting it means a flush that does not settle takes the whole call
+     * with it. Awaiting it here cost 12 seconds a picture going backwards,
+     * against 35 milliseconds forwards — the same hang, reached by stepping
+     * down the keyframes instead of off the end of the file.
+     *
+     * So the frame is waited for, not the flush: the output callback wakes
+     * this loop, and the deadline belongs to the picture rather than to the
+     * decoder's bookkeeping.
+     */
+    const mine = this.generation
+    this.flushed = true
+    void decoder.flush().catch(() => {
+      // Abandoned by a later call rather than broken: the same distinction
+      // the end-of-file flush in `frameFor` draws, and for the same reason.
+      if (this.decoder === decoder && this.generation === mine) this.failed = true
+    })
+
+    const deadline = performance.now() + FRAME_TIMEOUT_MS
+    while (!this.closed && !this.failed && this.generation === mine) {
+      const frame = this.pick(stamp)
+      if (frame) return frame
+      if (performance.now() > deadline) break
+      const waitAt = performance.now()
+      const arrived = new Promise<void>((resolve) => this.waiters.push(resolve))
+      await Promise.race([arrived, new Promise((r) => setTimeout(r, 30))])
+      stats.waitMs += performance.now() - waitAt
+    }
+    return this.pick(stamp)
   }
 
   /**
@@ -1191,8 +1359,7 @@ export class VideoSource {
      * which is the behaviour being replaced rather than a way to serve it.
      */
     if (options.coarse) {
-      const want = keyframeAt(this.track, time)
-      const frame = await this.frameFor(this.track.pts[want])
+      const frame = await this.keyframeOnly(time)
       if (!frame) return null
       return {
         picture: frame,
