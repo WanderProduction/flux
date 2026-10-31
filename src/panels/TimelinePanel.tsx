@@ -785,8 +785,33 @@ export function TimelinePanel() {
       if (width <= 0) return
       const from = (lanes.scrollLeft - width) / zoom
       const to = (lanes.scrollLeft + width * 2) / zoom
+      /*
+       * Moved far enough to matter, not moved at all.
+       *
+       * This window is padded by a whole viewport either side, so it does not
+       * need to be exact — but `from` and `to` are continuous, so comparing
+       * them for equality meant every pixel of scroll set state and
+       * re-rendered the panel, which at a hundred clips is the most expensive
+       * thing on the thread.
+       *
+       * And following the playhead scrolls *every tick*: `keepUp` lands the
+       * playhead at `FOLLOW_AHEAD`, which is the line it tests against, so
+       * once playback passes three quarters of the view every frame is a
+       * scroll. So this ran 75 times a second during playback.
+       *
+       * Measured on a 107-clip 50p sequence, Compress, quarter preview, six
+       * seconds a pass: following cost 46.0 pictures a second against 49.8
+       * with the timeline absent, and the worst gap between pictures was
+       * 174ms against 44ms. Nothing showed as a long task — it is a few
+       * milliseconds of React per frame, not one stall.
+       *
+       * Half a viewport of drift still leaves half a viewport of padding on
+       * the leading side, so a clip is still built well before it could be
+       * seen.
+       */
+      const slack = width / 2 / zoom
       setOnScreen((held) =>
-        held && Math.abs(held.from - from) < 1e-6 && Math.abs(held.to - to) < 1e-6
+        held && Math.abs(held.from - from) < slack && Math.abs(held.to - to) < slack
           ? held
           : { from, to },
       )
