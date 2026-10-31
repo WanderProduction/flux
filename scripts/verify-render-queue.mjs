@@ -638,21 +638,44 @@ try {
 
   // ── fields that follow until they are touched ─────────────────
 
-  /** Everything about a written file's streams that a field could have moved. */
+  /**
+   * Everything about a written file's streams that a field could have moved.
+   *
+   * The size is the **displayed** size, with any rotation applied, and that is
+   * not a detail. Two files in five in this library are coded landscape with a
+   * quarter-turn matrix, and an export bakes the rotation in — so an unscaled
+   * export of a rotated source is coded 1080x1920 where its source is coded
+   * 1920x1080, which is correct and is the whole point.
+   *
+   * This read coded dimensions and compared them straight across that boundary,
+   * so two checks below failed on every rotated folder with "the picture
+   * changed size on its own, 1080 !== 1920" while the exporter was doing
+   * exactly the right thing. They passed on unrotated footage, which is how it
+   * went unnoticed. `sourceFacts` in electron/render.js has always applied
+   * rotation for the same reason; this is the harness catching up with it.
+   */
   async function factsOf(file) {
     const { stdout } = await run(
       tools.ffprobe,
       ['-v', 'error', '-show_entries',
-       'stream=codec_type,codec_name,width,height,sample_rate,channels,r_frame_rate',
+       'stream=codec_type,codec_name,width,height,sample_rate,channels,r_frame_rate:' +
+         'stream_side_data=rotation',
        '-print_format', 'json', '--', file],
       { maxBuffer: 8 << 20 },
     )
     const streams = JSON.parse(stdout).streams ?? []
     const v = streams.find((s) => s.codec_type === 'video')
     const a = streams.find((s) => s.codec_type === 'audio')
+    const spin = Number(
+      (v?.side_data_list ?? []).find((d) => d.rotation !== undefined)?.rotation ?? 0,
+    )
+    // A quarter turn swaps what the viewer sees; a half turn does not.
+    const turned = Math.abs(((spin % 360) + 360) % 360) % 180 === 90
     return {
-      width: v?.width ?? 0,
-      height: v?.height ?? 0,
+      width: (turned ? v?.height : v?.width) ?? 0,
+      height: (turned ? v?.width : v?.height) ?? 0,
+      /** Kept so a check can say what was on disk, not just what it displays. */
+      coded: { width: v?.width ?? 0, height: v?.height ?? 0, rotation: spin },
       // `30000/1001`, not a decimal — a rate is a ratio in the container.
       rate: v ? rateOf(v.r_frame_rate) : 0,
       sampleRate: a ? Number(a.sample_rate) : 0,
@@ -704,6 +727,28 @@ try {
     const [out, src] = [await factsOf(state.output), await factsOf(state.source)]
     assert.equal(out.width, src.width, 'the picture changed size on its own')
     assert.equal(out.height, src.height)
+    /*
+     * And the rotation was baked in rather than carried over as a matrix,
+     * which is the stronger claim and the one worth holding: a file that
+     * merely forwarded the source's side data would have the same *displayed*
+     * size and still be wrong, because the archive must not depend on a
+     * player honouring a rotation flag.
+     */
+    if (src.coded.rotation !== 0) {
+      assert.equal(
+        out.coded.rotation,
+        0,
+        `the output still carries a ${out.coded.rotation} degree rotation matrix`,
+      )
+      // Upright means coded and displayed are the same thing, so the output's
+      // coded shape should be the source's *displayed* shape.
+      assert.deepEqual(
+        { width: out.coded.width, height: out.coded.height },
+        { width: src.width, height: src.height },
+        `coded ${out.coded.width}x${out.coded.height}, expected the upright ` +
+          `${src.width}x${src.height}`,
+      )
+    }
     assert.equal(
       out.sampleRate,
       src.sampleRate,
@@ -711,7 +756,10 @@ try {
     )
     assert.equal(out.channels, src.channels, 'the channels were changed on their own')
     console.log(
-      `       ${src.width}x${src.height} ${src.sampleRate}Hz ${src.channels}ch — unchanged`,
+      `       ${src.width}x${src.height} ${src.sampleRate}Hz ${src.channels}ch — unchanged` +
+        (src.coded.rotation !== 0
+          ? ` (source coded ${src.coded.width}x${src.coded.height} rot ${src.coded.rotation}, baked in)`
+          : ''),
     )
   })
 
@@ -742,6 +790,14 @@ try {
     assert.equal(state.status, 'done')
     const [out, src] = [await factsOf(state.output), await factsOf(state.source)]
     assert.equal(out.width, src.width, 'it scaled anyway')
+    assert.equal(out.height, src.height, 'the height moved on its own')
+    /*
+     * Named explicitly, because 640 is the number that would appear if half a
+     * size were ever honoured, and asserting only "unchanged" would pass on a
+     * source that happened to be 640 wide.
+     */
+    assert.notEqual(out.width, 640, 'the typed width was used on its own')
+    console.log(`       stayed ${out.width}x${out.height} with only a width typed`)
   })
 
   await check('typed audio settings reach the file', async () => {
