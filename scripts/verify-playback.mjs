@@ -4040,6 +4040,82 @@ try {
     )
   })
 
+  await check('a keyframe-only picture costs one decode, not a whole GOP', async () => {
+    /*
+     * The claim in `coarseForward` is that serving keyframes "costs one decode
+     * per picture at any rate". It did not, and nothing noticed, because the
+     * old path asked `frameFor` for the keyframe's timestamp — and `frameFor`
+     * is the streaming path, which submits a lookahead past whatever it is
+     * asked for. Measured on 1080p50 HEVC with 50-frame GOPs: 48 decodes per
+     * picture, identical to the number for showing every frame.
+     *
+     * So the two paths are priced against each other on the same file, which
+     * is what makes this robust to the fixture's GOP. Different stretches of
+     * it, because a frame the other arm left in the decoder would be served
+     * out of the buffer and cost nothing.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const opened = await videoSource.VideoSource.open(${LONG});
+       if (!opened.ok) return { error: 'could not open the fixture: ' + opened.reason };
+       const source = opened.source;
+       try {
+         const track = source.track;
+         const syncs = [];
+         for (let i = 0; i < track.key.length; i++) if (track.key[i]) syncs.push(i);
+         if (syncs.length < 12) return { error: 'the fixture has only ' + syncs.length + ' keyframes' };
+
+         /* The first call pays for the index and the decoder, and that cost
+            belongs to neither arm. */
+         await source.shownFor(track.pts[syncs[0]], { coarse: true });
+
+         const arm = async (coarse, from, steps) => {
+           videoSource.resetSourceStats();
+           let got = 0;
+           for (let i = 0; i < steps; i++) {
+             const at = syncs[from + i];
+             if (at === undefined) break;
+             const shown = coarse
+               ? await source.shownFor(track.pts[at], { coarse: true })
+               : await source.shownFor(track.pts[at], { width: Math.round(track.width / 2) });
+             if (shown) {
+               got++;
+               if (shown.picture.close) shown.picture.close();
+             }
+           }
+           const s = videoSource.sourceStats();
+           return { got, decoded: s.decoded, perPicture: s.decoded / Math.max(1, got) };
+         };
+
+         const steps = 8;
+         const coarse = await arm(true, 1, steps);
+         const exact = await arm(false, Math.floor(syncs.length / 2), steps);
+         return { steps, coarse, exact, gop: track.count / syncs.length };
+       } finally {
+         source.close();
+       }`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.equal(state.coarse.got, state.steps, `only ${state.coarse.got} keyframe pictures came back`)
+    assert.equal(state.exact.got, state.steps, `setup: only ${state.exact.got} ordinary pictures came back`)
+
+    /*
+     * Two decodes of slack per picture rather than one: a decoder may emit the
+     * frame before the one asked for as it drains, and a fixture whose GOP
+     * changes length would otherwise make this flap.
+     */
+    assert.ok(
+      state.coarse.perPicture <= 3,
+      `a keyframe-only picture cost ${state.coarse.perPicture.toFixed(1)} decodes, so it is decoding past the keyframe it was asked for`,
+    )
+    assert.ok(
+      state.coarse.decoded * 4 < state.exact.decoded,
+      `keyframe-only decoded ${state.coarse.decoded} against ${state.exact.decoded} for showing every frame over a ${state.gop.toFixed(0)}-frame GOP — the two paths are doing the same work, which is the bug this check exists for`,
+    )
+  })
+
   await check('the page logged no console errors or uncaught exceptions', () => {
     assert.deepEqual(cdp.consoleErrors, [])
   })
