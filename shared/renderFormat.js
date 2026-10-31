@@ -65,15 +65,59 @@ export const CQ = 26
 export const AUDIO_BITRATE = '192k'
 
 /**
- * What a verified output must be.
+ * What the archive keeps, given what the source has.
  *
- * Checked by the verifier after every encode, because the failure this catches
- * is silent: an Adobe export in the same test run produced 1108 frames at
- * 29.97fps from an 1850-frame 50fps source, and the file looked perfectly
- * healthy. Nothing about it announced that two thirds of the motion was gone.
+ * The chroma follows the source. A 4:2:2 source is archived 4:2:2; everything
+ * else is archived 4:2:0, which is what every output before this was.
+ *
+ * This used to be two constants, and the comment on the pixel format said the
+ * archive was 4:2:0 "to halve the chroma cost". Measured on 2026-11-01 across
+ * four Fujifilm 4:2:2 clips, same arguments but the pixel format: keeping 4:2:2
+ * costs **3–4% more weight** and no extra encode time. It does not halve
+ * anything. The quality it buys back is small too — chroma SSIM +0.0003 to
+ * +0.0007, luma identical — so both sides of that trade were small, and the
+ * reason to take this side is the one the file already gives for keeping ten
+ * bits: this footage is re-encoded when it is reused, and what survives the
+ * second generation is what was kept in the first.
+ *
+ * It is also newly possible. `p210le` needs 4:2:2 NVENC encoding, which arrived
+ * with the Blackwell generation — the ffmpeg `findTools` resolves advertises
+ * `p210le` and `p216le` on `hevc_nvenc`, and the card here is an RTX 5060.
+ *
+ * **`profile` and `pixFmt` move together or not at all.** A 4:2:2 encode
+ * reports profile `Rext`, not `Main 10` — the same profile the Fujifilm sources
+ * themselves carry — so a verifier holding `Main 10` as a constant would reject
+ * every 4:2:2 output it had just correctly written. That is why this returns
+ * pairs and why the encode and the check read them from one function.
+ *
+ * `accept` is wider than `write` for a 4:2:2 source, and deliberately so. Every
+ * output already in the archive came from the 4:2:0 era, and the verifier is
+ * what `alreadyDone` asks on resume — demanding the new format would quietly
+ * condemn the whole existing archive to a re-encode the moment anything touched
+ * it. A 4:2:0 output of a 4:2:2 source is older than this change, not broken.
+ * Re-encoding the archive to 4:2:2 is a thing to decide and run on purpose, not
+ * a side effect of opening a project.
+ *
+ * The rest of the verification is unchanged, and it is there because the failure
+ * it catches is silent: an Adobe export in the same test run produced 1108
+ * frames at 29.97fps from an 1850-frame 50fps source, and the file looked
+ * perfectly healthy. Nothing about it announced that two thirds of the motion
+ * was gone.
+ *
+ * @param {string} [sourcePixFmt] the source's pixel format, from `sourceFacts`.
+ *   Absent for the sequence render, which composites many sources into one
+ *   frame and has no single answer — it stays 4:2:0, as it always was.
  */
-export const EXPECTED_PROFILE = 'Main 10'
-export const EXPECTED_PIX_FMT = 'yuv420p10le'
+export function archiveFormat(sourcePixFmt = '') {
+  /** What ffprobe reports for each, which is not what ffmpeg is asked for. */
+  const main10 = { profile: 'Main 10', pixFmt: 'yuv420p10le' }
+  const rext422 = { profile: 'Rext', pixFmt: 'yuv422p10le' }
+  // Nothing else in this library contains "422", and 4:4:4 is not archived
+  // differently because nothing here is 4:4:4.
+  return /422/.test(sourcePixFmt)
+    ? { encode: 'p210le', write: rext422, accept: [rext422, main10] }
+    : { encode: 'p010le', write: main10, accept: [main10] }
+}
 
 /**
  * The encoder arguments, in order.
@@ -108,8 +152,9 @@ export const EXPECTED_PIX_FMT = 'yuv420p10le'
  * field nobody touched has to produce *no flag*, not a flag carrying the
  * number the source already had. See `resolveOutput` in kernel/renderSettings.
  *
- * @param {{ cq?: number, gop?: number, audio?: { codec?: string,
- *   bitrate?: number, sampleRate?: number, channels?: number } }} [options]
+ * @param {{ cq?: number, gop?: number, sourcePixFmt?: string,
+ *   audio?: { codec?: string, bitrate?: number, sampleRate?: number,
+ *   channels?: number } }} [options]
  * @returns {string[]}
  */
 export function encodeArgs(options = {}) {
@@ -123,12 +168,19 @@ export function encodeArgs(options = {}) {
     '-b:v', '0',
     '-g', String(options.gop ?? GOP_FRAMES),
     /*
-     * 10-bit out, from 10-bit in. The source is 10-bit 4:2:2; the archive is
-     * 4:2:0 to halve the chroma cost, but keeping ten bits of luma matters
-     * because this footage gets re-encoded again when it is reused, and 10-bit
-     * survives that second generation far better than 8-bit does.
+     * Ten bits out whatever came in, and the chroma the source had.
+     *
+     * Ten bits because this footage gets re-encoded again when it is reused,
+     * and 10-bit survives that second generation far better than 8-bit does —
+     * which is true of the chroma for the same reason, and is why 4:2:2 is no
+     * longer flattened on the way in. See `archiveFormat` for what that costs
+     * (3–4%) and for why the profile has to be read from the same place.
+     *
+     * `sourcePixFmt` is a fact about the source rather than a setting, so it is
+     * not something the panel offers. The sequence render does not pass it and
+     * gets 4:2:0, as it always did.
      */
-    '-pix_fmt', 'p010le',
+    '-pix_fmt', archiveFormat(options.sourcePixFmt).encode,
     '-tag:v', 'hvc1',
     '-c:a', audio.codec ?? 'aac',
     '-b:a', audio.bitrate ? `${audio.bitrate}k` : AUDIO_BITRATE,

@@ -8,6 +8,11 @@
  * around it:
  *
  *   - a cut comes out the length and frame count it was asked for
+ *   - the archive keeps the **chroma** the source had, the decision reaches the
+ *     ffmpeg arguments, and a 4:2:0 output written before that was true still
+ *     verifies — otherwise resume re-encodes the whole archive
+ *   - an **8-bit** output is still refused, because widening what the format
+ *     check accepts is how a format check stops working
  *   - a **rotated** source comes out upright, and the verifier accepts it
  *     rather than failing it for changing shape
  *   - a corrupted output is **rejected**, which is the canary: a verifier that
@@ -32,6 +37,7 @@ import {
   sourceFacts,
   verify,
 } from '../electron/render.js'
+import { archiveFormat, encodeArgs } from '../shared/renderFormat.js'
 
 const SOURCE = process.argv[2]
 const OUT_DIR =
@@ -100,8 +106,15 @@ try {
     assert.equal(result.facts.frameRate.toFixed(3), facts.frameRate.toFixed(3), 'rate changed')
     assert.equal(result.facts.width, facts.display.width, 'width is not the displayed width')
     assert.equal(result.facts.height, facts.display.height, 'height is not the displayed height')
-    assert.equal(result.facts.profile, 'Main 10')
-    assert.equal(result.facts.pixFmt, 'yuv420p10le')
+    /*
+     * Not `Main 10` as a constant any more. The archive keeps the chroma the
+     * source had, so a 4:2:2 source is written Rext/yuv422p10le and everything
+     * else Main 10/yuv420p10le — and this suite is usually pointed at
+     * DSCF2308.MOV, which is 4:2:2, so a hardcoded pair failed here first.
+     */
+    const want = archiveFormat(facts.pixFmt).write
+    assert.equal(result.facts.profile, want.profile)
+    assert.equal(result.facts.pixFmt, want.pixFmt)
 
     const wanted = Math.round(CUT * facts.frameRate)
     assert.ok(
@@ -114,6 +127,126 @@ try {
         `(${((result.bytes * 8) / CUT / 1e6).toFixed(1)} Mbps), ` +
         `${result.facts.frames} frames @ ${result.facts.frameRate.toFixed(3)}fps`,
     )
+  })
+
+  await check('the archive keeps the chroma the source had', async () => {
+    /*
+     * The policy, and the two ways it can go wrong in opposite directions.
+     *
+     * Forwards: a 4:2:2 source must not be flattened, and a 4:2:0 source must
+     * not be inflated into bytes carrying nothing. `archiveFormat` is asked
+     * directly as well as through an encode, because a correct decision that
+     * never reaches ffmpeg is the failure this guards — the format has to
+     * travel from `sourceFacts` through `cutArgs` into `encodeArgs`.
+     *
+     * Backwards: the pair has to be read from one place. A 4:2:2 encode reports
+     * profile `Rext`, so a verifier holding `Main 10` would reject output it
+     * had just correctly written, and every clip would fail after a flawless
+     * encode. That is why the assertion below is on the pair.
+     */
+    assert.deepEqual(
+      archiveFormat('yuv422p10le').write,
+      { profile: 'Rext', pixFmt: 'yuv422p10le' },
+      '4:2:2 in should mean 4:2:2 out',
+    )
+    assert.deepEqual(
+      archiveFormat('yuv420p').write,
+      { profile: 'Main 10', pixFmt: 'yuv420p10le' },
+      '4:2:0 in should stay 4:2:0 out, at ten bits',
+    )
+    assert.equal(
+      archiveFormat(undefined).encode,
+      'p010le',
+      'with no source format known — the sequence render — it must stay as it was',
+    )
+    assert.ok(
+      encodeArgs({ sourcePixFmt: 'yuv422p10le' }).includes('p210le'),
+      'the decision has to reach the ffmpeg arguments, not just be made',
+    )
+    assert.ok(
+      encodeArgs({}).includes('p010le'),
+      'and with nothing passed the arguments must be what they always were',
+    )
+
+    /*
+     * The outputs already in the archive were written 4:2:0 from these very
+     * sources. The verifier is what `alreadyDone` asks on resume, so if it
+     * stopped accepting them, opening a project would quietly condemn the whole
+     * archive to a re-encode. Upgrading it is a thing to decide and run, not a
+     * side effect.
+     */
+    const legacy = path.join(OUT_DIR, 'legacy-420.mp4')
+    const asFourTwoZero = ['-pix_fmt', 'p010le']
+    const args = [
+      '-hide_banner', '-nostdin', '-loglevel', 'error',
+      '-ss', String(OFFSET), '-t', String(CUT), '-i', SOURCE,
+      '-c:v', 'hevc_nvenc', '-preset', 'p6', '-rc', 'vbr', '-cq', '26',
+      '-b:v', '0', '-g', '30', ...asFourTwoZero, '-tag:v', 'hvc1', '-an',
+      '-f', 'mp4', '-y', legacy,
+    ]
+    const { spawn } = await import('node:child_process')
+    const wrote = await new Promise((resolve) => {
+      const child = spawn(found.ffmpeg, args, { windowsHide: true })
+      child.on('error', () => resolve(false))
+      child.on('close', (code) => resolve(code === 0))
+    })
+    assert.ok(wrote, 'could not write a 4:2:0 output to check the old archive against')
+
+    const checked = await verify(
+      found.ffprobe,
+      { output: legacy, duration: CUT, silent: true, video: true },
+      facts,
+    )
+    assert.ok(
+      checked.ok,
+      `a 4:2:0 output of this source no longer verifies, so resume would re-encode ` +
+        `everything already archived: ${checked.error}`,
+    )
+    await fs.rm(legacy, { force: true })
+    console.log(
+      `       ${facts.pixFmt} source -> writes ${archiveFormat(facts.pixFmt).write.pixFmt}, ` +
+        `accepts ${archiveFormat(facts.pixFmt).accept.map((o) => o.pixFmt).join(' or ')}`,
+    )
+  })
+
+  await check('CANARY: an 8-bit output is rejected whatever the source', async () => {
+    /*
+     * Widening what the verifier accepts is how a format check stops working,
+     * and it was widened for the 4:2:2 change. Ten bits is the one thing this
+     * archive is not allowed to lose quietly, so it is asserted from the other
+     * side: a deliberately 8-bit encode must still be refused.
+     */
+    const eightBit = path.join(OUT_DIR, 'eight-bit.mp4')
+    const { spawn } = await import('node:child_process')
+    const wrote = await new Promise((resolve) => {
+      const child = spawn(
+        found.ffmpeg,
+        [
+          '-hide_banner', '-nostdin', '-loglevel', 'error',
+          '-ss', String(OFFSET), '-t', String(CUT), '-i', SOURCE,
+          '-c:v', 'hevc_nvenc', '-preset', 'p6', '-rc', 'vbr', '-cq', '26',
+          '-b:v', '0', '-g', '30', '-pix_fmt', 'yuv420p', '-tag:v', 'hvc1', '-an',
+          '-f', 'mp4', '-y', eightBit,
+        ],
+        { windowsHide: true },
+      )
+      child.on('error', () => resolve(false))
+      child.on('close', (code) => resolve(code === 0))
+    })
+    assert.ok(wrote, 'could not write an 8-bit file to be rejected')
+
+    const checked = await verify(
+      found.ffprobe,
+      { output: eightBit, duration: CUT, silent: true, video: true },
+      facts,
+    )
+    assert.ok(!checked.ok, 'an 8-bit output passed the format check, so it has stopped working')
+    assert.match(
+      checked.error,
+      /pixel format/,
+      `it was rejected, but not for its format: ${checked.error}`,
+    )
+    await fs.rm(eightBit, { force: true })
   })
 
   await check('a rotated source comes out upright rather than failing verification', async () => {
