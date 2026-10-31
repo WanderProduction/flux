@@ -712,6 +712,117 @@ try {
     assert.ok(box.scrollH > box.clientH, `no vertical overflow: ${JSON.stringify(box)}`)
   })
 
+  await check('a clip scrolled into view is drawn, however small the scroll', async () => {
+    /*
+     * The virtualisation window is allowed to be stale, and this is the bound
+     * on how stale.
+     *
+     * Only the clips near the viewport are built, and the window that decides
+     * "near" used to be recomputed on every pixel of scroll — which meant the
+     * whole panel re-rendered 75 times a second while the playhead was being
+     * followed, because following scrolls every tick. Measured on a 107-clip
+     * 50p sequence: 46.0 pictures a second against 49.8 with no timeline on
+     * screen, and ten gaps over 50ms in 25 seconds against none.
+     *
+     * So the window now only moves once the scroll has used up half a
+     * viewport of the padding it carries. The risk that buys is this: a clip
+     * that scrolls into view while the window is stale and is never built. It
+     * cannot happen, because the window is padded a whole viewport either side
+     * and the slack is half of one — but "cannot happen" is the kind of claim
+     * this suite exists to hold to account, so it is checked at several scroll
+     * distances, including ones far smaller than the slack.
+     */
+    const result = await evaluate(
+      cdp,
+      `const { sequence, assets, view } = window.__fluxDev;
+       const asset = assets.getAssets().find(a => a.kind === 'video' && (a.duration ?? 0) > 1);
+       if (!asset) return { error: 'no usable video asset' };
+
+       /*
+        * Borrowed, not taken. This check needs its own timeline -- sixty clips
+        * so most are off screen -- but it sits inside the scroll group, which
+        * depends on tracks an earlier check added to force vertical overflow.
+        * Wiping the sequence took those with it and failed three later checks
+        * for reasons that had nothing to do with them.
+        */
+       const savedSeq = JSON.parse(JSON.stringify(sequence.getSequence()));
+       const savedView = JSON.parse(JSON.stringify(view.getView().timeline));
+
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 200));
+       const span = 2;
+       const count = 60;
+       for (let i = 0; i < count; i++) {
+         sequence.addClip({ assetId: asset.id, trackId: 'V1', start: i * span, duration: span, offset: 0 });
+       }
+       view.recordView({ timeline: { zoom: 60, follow: false } });
+       await new Promise(r => setTimeout(r, 900));
+
+       const lanes = window.__lanes();
+       if (lanes.scrollWidth <= lanes.clientWidth + 1) {
+         return { error: 'the lanes do not overflow, so nothing is virtualised' };
+       }
+
+       const drawnIds = () =>
+         new Set([...document.querySelectorAll('[data-clip-id]')].map(el => el.dataset.clipId));
+       /* Which clips the viewport genuinely shows, from the sequence rather
+          than from the DOM — the DOM is the thing under test. */
+       const visible = () => {
+         const from = lanes.scrollLeft / 60;
+         const to = (lanes.scrollLeft + lanes.clientWidth) / 60;
+         return sequence.getSequence().clips
+           .filter(c => c.start < to && c.start + c.duration > from)
+           .map(c => c.id);
+       };
+
+       const steps = [];
+       /* Deliberately mixed: a few pixels, then under the slack, then over it. */
+       for (const by of [8, 40, 200, 600, 1500, 60, 4000]) {
+         lanes.scrollLeft = Math.min(lanes.scrollLeft + by, lanes.scrollWidth - lanes.clientWidth);
+         /* One frame, which is all a scroll handler gets during playback. */
+         await new Promise(r => requestAnimationFrame(() => r()));
+         await new Promise(r => setTimeout(r, 60));
+         const drawn = drawnIds();
+         const missing = visible().filter(id => !drawn.has(id));
+         steps.push({ by, scrollLeft: Math.round(lanes.scrollLeft), visible: visible().length, missing });
+       }
+       /* Put back exactly what was here, including the tracks and the zoom the
+          rest of the group is relying on. */
+       sequence.setSequence(savedSeq);
+       view.recordView({ timeline: savedView });
+       await new Promise(r => setTimeout(r, 400));
+       const lanesAfter = window.__lanes();
+       return {
+         steps, count,
+         restored: {
+           tracks: sequence.getSequence().tracks.length,
+           clips: sequence.getSequence().clips.length,
+           overflowsDown: lanesAfter.scrollHeight > lanesAfter.clientHeight,
+           overflowsAcross: lanesAfter.scrollWidth > lanesAfter.clientWidth,
+         },
+       };`,
+    )
+
+    assert.ok(!result.error, result.error)
+    for (const step of result.steps) {
+      assert.ok(
+        step.visible > 0,
+        `setup: after scrolling ${step.by}px nothing was visible, so this step checked nothing`,
+      )
+      assert.deepEqual(
+        step.missing,
+        [],
+        `after scrolling ${step.by}px to ${step.scrollLeft}, ${step.missing.length} clip(s) in view were not drawn — the virtualisation window is staler than its padding allows`,
+      )
+    }
+    /* The restore is part of the check: without it the three that follow fail
+       on overflow this one removed, which is a confusing way to learn it. */
+    assert.ok(
+      result.restored.overflowsDown && result.restored.overflowsAcross,
+      `this check did not put the timeline back as it found it: ${JSON.stringify(result.restored)}`,
+    )
+  })
+
   await check('scrolling with no modifier travels time, not tracks', async () => {
     // The bare gesture is horizontal because a timeline is a horizontal
     // surface — the axis you move along all day should not need a modifier.
