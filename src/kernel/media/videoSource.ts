@@ -69,12 +69,21 @@ const MAX_FEED_AHEAD = LOOKAHEAD_FRAMES * 4
  * back over the same moment is most of what reviewing a cut is, and measured,
  * three passes over the same three seconds built five runs each and decoded
  * 165 frames each — the whole 246ms-a-GOP cost, three times over. So this is
- * now a floor and `RUN_MEMORY_BUDGET_BYTES` is the limit.
+ * now a floor and `runMemoryBudgetBytes` is the limit.
+ *
+ * A floor for the source being read, and only that one. Held by every pooled
+ * source it is not a floor but a leak: two runs is 775MB at 1920-wide pictures
+ * on a 49-frame GOP, and twelve pooled sources each keeping two put 9.1GB
+ * beyond the reach of any budget. Measured with the budget at its 256MB
+ * minimum, thirteen sources sat at exactly 2.0 runs each and held 10,093MB —
+ * three times the budget per source, forty times it in total. Nothing is about
+ * to cross the GOP boundary of a source nothing is reading, so `trimLive`
+ * applies no floor to the ones the playhead has left.
  */
 const KEPT_RUNS = 2
 
 /**
- * How much memory the kept runs may hold between them.
+ * How much memory the kept runs may hold between them, across every source.
  *
  * Knowable rather than guessed: an ImageBitmap is four bytes a pixel, so a GOP
  * of thirty at the 480x270 the viewer plays at is about 15MB and at 960x540
@@ -91,6 +100,20 @@ const KEPT_RUNS = 2
  * Deliberately not a count: the same count is sixteen times the memory at one
  * preview width as at another, and the viewer's width is whatever its panel
  * happens to be — seen at both 480 and 1920 in one session.
+ *
+ * **Across every source, and that is the correction.** This was a per-source
+ * budget until 0.0.40, on the stated grounds that per-source "is where the
+ * eviction decision is made" and that "only sources that have actually been
+ * played backwards hold any, so the worst case is far below this times the
+ * pool". The second half is what makes the first half wrong. The viewer keeps
+ * an LRU pool of `decoderPool` sources, a reverse pass over a timeline crosses
+ * all of them, and each one it crosses has by then been played backwards. So
+ * every source in the pool holds runs, and the worst case is not far below
+ * this times the pool — it *is* this times the pool.
+ *
+ * Measured on fourteen rotated HEVC 50p clips reversed at full preview width:
+ * 14.8GB of kept pictures and an 18GB working set, against a budget that said
+ * 1498MB. The setting bounded nothing it claimed to bound.
  *
  * On its own this changes nothing, and that is worth knowing: it was tried
  * alone first and the eviction it removes was never what was happening. It
@@ -362,6 +385,13 @@ export class VideoSource {
     width: number
     pictures: Map<number, ImageBitmap>
   }[] = []
+  /**
+   * When a picture was last asked of this source, for `trimLive`'s order.
+   *
+   * Asked rather than served: a request that misses and has to build is still
+   * the playhead being here, and that is the question the order is asking.
+   */
+  private usedAt = 0
   /** The run being built, so two requests never build the same one twice. */
   private buildingRun: Promise<void> | null = null
   /**
@@ -1150,6 +1180,7 @@ export class VideoSource {
     time: number,
     options: { backwards?: boolean; width?: number; coarse?: boolean } = {},
   ): Promise<Shown | null> {
+    this.usedAt = Date.now()
     /*
      * Shuttling fast: the keyframe at or before the moment wanted, and nothing
      * else. See coarseFrom for why, and why not below 4x.
@@ -1445,14 +1476,57 @@ export class VideoSource {
    * of the two and turn every frame into a rebuild.
    */
   private trimRuns() {
-    let held = 0
-    for (const run of this.runs) held += this.runBytes(run)
+    let held = this.heldBytes()
     const budget = runMemoryBudgetBytes()
     while (this.runs.length > KEPT_RUNS && held > budget) {
       const dropped = this.runs.shift()
       if (!dropped) break
       held -= this.runBytes(dropped)
       for (const one of dropped.pictures.values()) one.close()
+    }
+    VideoSource.trimLive(this)
+  }
+
+  /** What this source's kept runs cost between them. */
+  private heldBytes(): number {
+    let held = 0
+    for (const run of this.runs) held += this.runBytes(run)
+    return held
+  }
+
+  /**
+   * Drops runs from the sources the playhead left longest ago, until every
+   * kept run in the app fits the budget between them.
+   *
+   * The per-source trim above cannot do this, and that is the whole bug it is
+   * here to fix: it sees `this.runs` and nothing else, so twelve pooled
+   * sources each politely under the budget are twelve times over it together.
+   *
+   * Least recently used first, and with no `KEPT_RUNS` floor for any of them.
+   * The floor exists so that crossing a GOP boundary backwards does not throw
+   * away the GOP being left, which is a statement about the source under the
+   * playhead; a source three cuts away is not about to cross anything. Passing
+   * `keep` rather than reading a flag because the caller always knows: the
+   * source that just built a run is by definition the one being read.
+   */
+  private static trimLive(keep: VideoSource) {
+    const budget = runMemoryBudgetBytes()
+    let held = 0
+    for (const source of VideoSource.live) held += source.heldBytes()
+    if (held <= budget) return
+
+    const cold = [...VideoSource.live]
+      .filter((source) => source !== keep && source.runs.length > 0)
+      .sort((a, b) => a.usedAt - b.usedAt)
+
+    for (const source of cold) {
+      while (source.runs.length > 0 && held > budget) {
+        const dropped = source.runs.shift()
+        if (!dropped) break
+        held -= source.runBytes(dropped)
+        for (const one of dropped.pictures.values()) one.close()
+      }
+      if (held <= budget) return
     }
   }
 
