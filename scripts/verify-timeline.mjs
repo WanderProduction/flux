@@ -823,6 +823,135 @@ try {
     )
   })
 
+  await check('the ruler is ruled all the way across the viewport', async () => {
+    /*
+     * The ruler draws only the ticks near the viewport, and this is what that
+     * is not allowed to cost: a hole.
+     *
+     * It used to draw the whole sequence. That is easy to under-estimate,
+     * because the count does not fall as you zoom out — the spacing is kept
+     * readable, so the content and the gaps grow together and the count is
+     * duration/step, with step a staircase. On a 32-minute sequence it is 386
+     * ticks at 26 pixels a second and 962 at 34, with nine on screen.
+     *
+     * They are cheap to draw and expensive to scroll, and following the
+     * playhead scrolls every tick. Profiled over a 25-second pass at 1x,
+     * following cost 39ms of every second with 386 ticks in the box and 67ms
+     * with 962; at 962 the pass dropped four frames over 50ms, at 386 none.
+     *
+     * So the failure this guards is a stretch of ruler with no ticks in it —
+     * either a window staler than its padding, or an off-by-one at the ends.
+     * Rather than recomputing the expected tick times here, which would just
+     * copy `tickInterval` and agree with itself, it asserts the properties a
+     * ruler must have whatever the spacing: the drawn ticks reach past both
+     * edges of the viewport, they are evenly spaced with no gap missing, and
+     * their labels increase.
+     */
+    const result = await evaluate(
+      cdp,
+      `const { sequence, assets, view } = window.__fluxDev;
+       const asset = assets.getAssets().find(a => a.kind === 'video' && (a.duration ?? 0) > 1);
+       if (!asset) return { error: 'no usable video asset' };
+
+       /* Borrowed and put back, for the same reason as the check above. */
+       const savedSeq = JSON.parse(JSON.stringify(sequence.getSequence()));
+       const savedView = JSON.parse(JSON.stringify(view.getView().timeline));
+
+       sequence.setSequence(null);
+       await new Promise(r => setTimeout(r, 200));
+       /* Long enough that the whole ruler is far wider than the viewport. */
+       for (let i = 0; i < 80 ; i++) {
+         sequence.addClip({ assetId: asset.id, trackId: 'V1', start: i * 3, duration: 3, offset: 0 });
+       }
+       view.recordView({ timeline: { zoom: 40, follow: false } });
+       await new Promise(r => setTimeout(r, 900));
+
+       const lanes = window.__lanes();
+       const content = document.querySelector('.tl-content');
+       if (!content) return { error: 'no timeline content box' };
+       if (lanes.scrollWidth <= lanes.clientWidth + 1) {
+         return { error: 'the lanes do not overflow, so nothing is virtualised' };
+       }
+
+       const read = () => {
+         const ticks = [...document.querySelectorAll('.tl-tick')];
+         return {
+           lefts: ticks.map(el => Math.round(parseFloat(el.style.left) * 100) / 100)
+                       .sort((a, b) => a - b),
+           labels: ticks.map(el => el.querySelector('span')?.textContent ?? ''),
+         };
+       };
+
+       const steps = [];
+       for (const by of [6, 30, 150, 500, 1400, 40, 3000]) {
+         lanes.scrollLeft = Math.min(lanes.scrollLeft + by, lanes.scrollWidth - lanes.clientWidth);
+         await new Promise(r => requestAnimationFrame(() => r()));
+         await new Promise(r => setTimeout(r, 60));
+         const { lefts, labels } = read();
+         const gaps = [];
+         for (let i = 1; i < lefts.length; i++) gaps.push(Math.round((lefts[i] - lefts[i - 1]) * 100) / 100);
+         const spacing = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : 0;
+         steps.push({
+           by,
+           scrollLeft: Math.round(lanes.scrollLeft),
+           viewRight: Math.round(lanes.scrollLeft + lanes.clientWidth),
+           drawn: lefts.length,
+           first: lefts[0] ?? null,
+           last: lefts[lefts.length - 1] ?? null,
+           spacing,
+           /* Any gap wider than one spacing is a hole in the ruler. */
+           holes: gaps.filter(g => g > spacing + 0.5).length,
+           blanks: labels.filter(t => t.trim() === '').length,
+           /* What drawing the whole sequence would have cost, for comparison. */
+           whole: spacing > 0 ? Math.round(content.getBoundingClientRect().width / spacing) : 0,
+         });
+       }
+
+       sequence.setSequence(savedSeq);
+       view.recordView({ timeline: savedView });
+       await new Promise(r => setTimeout(r, 400));
+       const lanesAfter = window.__lanes();
+       return {
+         steps,
+         restored: {
+           tracks: sequence.getSequence().tracks.length,
+           overflowsDown: lanesAfter.scrollHeight > lanesAfter.clientHeight,
+           overflowsAcross: lanesAfter.scrollWidth > lanesAfter.clientWidth,
+         },
+       };`,
+    )
+
+    assert.ok(!result.error, result.error)
+    for (const step of result.steps) {
+      const where = `after scrolling ${step.by}px to ${step.scrollLeft}`
+      assert.ok(step.drawn > 1, `${where} the ruler drew ${step.drawn} tick(s), so it is not a ruler`)
+      assert.ok(
+        step.first <= step.scrollLeft,
+        `${where} the first tick is at ${step.first}, inside the view, so the ruler starts late`,
+      )
+      assert.ok(
+        step.last >= step.viewRight,
+        `${where} the last tick is at ${step.last} but the view reaches ${step.viewRight} — the right-hand end of the ruler is blank`,
+      )
+      assert.equal(step.holes, 0, `${where} the ruler has ${step.holes} gap(s) wider than its own spacing`)
+      assert.equal(step.blanks, 0, `${where} ${step.blanks} tick(s) carry no label`)
+      /*
+       * And it is genuinely virtualised. Without this the check passes just as
+       * well on a ruler that draws all of them, which is the thing being
+       * changed — a third is slack enough not to fail on a viewport that is
+       * unexpectedly wide.
+       */
+      assert.ok(
+        step.drawn < step.whole / 3,
+        `${where} the ruler drew ${step.drawn} of the ${step.whole} the sequence spans, which is not virtualised`,
+      )
+    }
+    assert.ok(
+      result.restored.overflowsDown && result.restored.overflowsAcross,
+      `this check did not put the timeline back as it found it: ${JSON.stringify(result.restored)}`,
+    )
+  })
+
   await check('scrolling with no modifier travels time, not tracks', async () => {
     // The bare gesture is horizontal because a timeline is a horizontal
     // surface — the axis you move along all day should not need a modifier.

@@ -2698,6 +2698,34 @@ export function TimelinePanel() {
 
   const step = tickInterval(zoom)
   const tickCount = Math.ceil(contentWidth / (step * zoom)) + 1
+  /**
+   * Which ticks to draw: the same window the clips and the readiness strip use.
+   *
+   * The ruler was the one list in this panel that drew the whole sequence. It
+   * is easy to miss how many that is, because `tickCount` does not depend on
+   * the zoom — the spacing is kept readable, so zooming in makes the content
+   * wider and the ticks further apart in step. It is `duration / step`, and
+   * `step` is a staircase: a tick every five seconds up to 32 pixels a second,
+   * every two seconds above it. On the Compress project that is 386 ticks at
+   * the zoom it was saved at and 962 one notch in, with nine on screen.
+   *
+   * They are not expensive to draw. They are expensive to *scroll*, and
+   * following the playhead scrolls the content box every tick — `keepUp` lands
+   * the playhead on its own trigger line, so it is always a hair past it on the
+   * next one. Profiled over a 25-second pass at 1x, following cost 39ms of
+   * every second with 386 ticks in the box and 67ms with 962, and at 962 the
+   * pass had three frames over 50ms where at 386 it had none. Taking the ticks
+   * out of the DOM mid-playback, which is the same experiment from the other
+   * side, put the animation-frame rate back to the display's own.
+   *
+   * So this buys little at the zoom the project is saved at and a great deal
+   * one notch in, which is the cliff it is here to remove.
+   */
+  const firstTick = onScreen ? Math.max(0, Math.floor(onScreen.from / step)) : 0
+  const lastTick = onScreen
+    ? Math.min(tickCount - 1, Math.ceil(onScreen.to / step))
+    : tickCount - 1
+  const drawnTicks = Math.max(0, lastTick - firstTick + 1)
   const allSequences = listSequences()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [performanceOpen, setPerformanceOpen] = useState(false)
@@ -2837,7 +2865,11 @@ export function TimelinePanel() {
           <div className="tl-content" style={{ width: contentWidth }}>
             <ReadinessStrip zoom={zoom} onScreen={onScreen} />
             <div className="tl-ruler" onPointerDown={beginScrub}>
-              {Array.from({ length: tickCount }, (_, i) => {
+              {Array.from({ length: drawnTicks }, (_, n) => {
+                // Keyed and positioned by its absolute index, not its place in
+                // the drawn run, so scrolling moves the window rather than
+                // renumbering every tick in it.
+                const i = firstTick + n
                 const seconds = i * step
                 return (
                   <div className="tl-tick" key={i} style={{ left: seconds * zoom }}>
