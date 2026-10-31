@@ -935,6 +935,29 @@ export function ViewerPanel() {
     return subscribePlayback(() => {
       const rate = getRate()
       if (rate >= 0) return
+      /*
+       * Nothing to warm at a rate that is served keyframes only.
+       *
+       * The whole premise below is that entering a clip backwards lands deep
+       * in a GOP, so the GOP has to be decoded before anything can be shown.
+       * Above the backward line that is simply not what happens: the clip is
+       * entered at the keyframe before the playhead and costs one decode, so
+       * the run this would build is never read by anybody.
+       *
+       * Worse than useless, because the build and the keyframe serves share
+       * one decoder and the serves come sixty-five times a second. Each serve
+       * tears down a decoder with work in flight, the build's next frame
+       * restarts it from its own keyframe and decodes the GOP again, and the
+       * next serve tears that down in turn — the same thrash `buildRun`
+       * describes at its in-flight guard, reached from the other side.
+       *
+       * Measured at -8x over fourteen clips, four seconds, fresh app: four
+       * builds begun, none finished, 44 decoder teardowns and **1225 frames
+       * decoded to show 32**. The coarse path itself submitted 36 chunks for
+       * those 32 pictures, so every one of the other ~1190 decodes belonged to
+       * runs that nothing would ever read.
+       */
+      if (showKeyframesOnly(rate)) return
       if (warmedRef.current === target.id) return
       /*
        * How long until the playhead gets there, in seconds of wall clock
