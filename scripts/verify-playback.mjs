@@ -4139,6 +4139,81 @@ try {
     )
   })
 
+  await check('an ask outside an in-flight build does not tear down its decoder', async () => {
+    /*
+     * The fallback in the backwards path decodes a GOP for one frame, and it
+     * used to do that while a build was in flight — which tears down the
+     * decoder the build is using, abandons it, and leaves the next ask to
+     * start another one for the next fallback to abandon. `buildRun` describes
+     * the thrash at its in-flight guard; what the guard fixed was the
+     * deadlock, not this.
+     *
+     * It is bistable rather than rare. Nine runs of -4x over fourteen real
+     * clips, fresh app each, split with nothing in between: four at 43-52
+     * pictures a second with no fallbacks, five at 5-6 a second with 23-28 of
+     * them and one build finished out of three. Ten of ten land in the good
+     * band now.
+     *
+     * Checked by the invariant rather than the timing, because the timing is
+     * exactly what varies: ask for two frames in *different* GOPs at once, so
+     * the second lands while the first is building, and require that no
+     * fallback is taken. If the build happens to finish first the second ask
+     * is served from its run, which is also no fallback — so this passes
+     * honestly either way, and fails on the old code whenever the build is
+     * still running, which over six pairs on a minute-long file it will be.
+     */
+    const state = await evaluate(
+      cdp,
+      `const { videoSource } = window.__fluxDev;
+       const opened = await videoSource.VideoSource.open(${LONG});
+       if (!opened.ok) return { error: 'could not open the fixture: ' + opened.reason };
+       const source = opened.source;
+       try {
+         const track = source.track;
+         const syncs = [];
+         for (let i = 0; i < track.key.length; i++) if (track.key[i]) syncs.push(i);
+         if (syncs.length < 14) return { error: 'the fixture has only ' + syncs.length + ' keyframes' };
+
+         const width = Math.round(track.width / 2);
+         /* Warm the index and a decoder, so the first pair is not paying for
+            those instead of measuring this. */
+         await source.shownFor(track.pts[syncs[1]], { backwards: true, width });
+
+         videoSource.resetSourceStats();
+         const pairs = 6;
+         for (let i = 0; i < pairs; i++) {
+           /* Two GOPs apart, and the far one asked for without awaiting the
+              near one, which is what puts a build in flight under it. */
+           const near = syncs[2 + i] + 3;
+           const far = syncs[2 + i + 2] + 3;
+           if (far >= track.count) break;
+           const first = source.shownFor(track.pts[near], { backwards: true, width });
+           const second = await source.shownFor(track.pts[far], { backwards: true, width });
+           await first;
+           if (second && second.picture && second.picture.close) second.picture.close();
+         }
+         const s = videoSource.sourceStats();
+         return {
+           pairs,
+           fallback: s.askedFallback,
+           held: s.heldForBuild,
+           started: s.buildsStarted,
+           done: s.runsBuilt,
+         };
+       } finally {
+         source.close();
+       }`,
+    )
+
+    assert.ok(!state.error, state.error)
+    assert.ok(state.started > 0, 'setup: no build ever began, so nothing was in flight to protect')
+    assert.equal(
+      state.fallback,
+      0,
+      `${state.fallback} ask(s) fell back to decoding a whole GOP while a build was in flight, which abandons that build — the thrash that makes a reverse pass bistable`,
+    )
+  })
+
   await check('a keyframe-only picture costs one decode, not a whole GOP', async () => {
     /*
      * The claim in `coarseForward` is that serving keyframes "costs one decode

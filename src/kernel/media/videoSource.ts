@@ -204,6 +204,28 @@ const stats = {
    * decoder.
    */
   buildsStarted: 0,
+  /**
+   * Frames a build walked, and pictures it kept from them.
+   *
+   * The floor for playing backwards is set by GOPs crossed rather than by
+   * pictures drawn: every frame shown had to be decoded from its keyframe,
+   * and a run holds the whole GOP so that happens once per GOP. At -4x on
+   * 50p with 50-frame GOPs the playhead crosses four GOPs a second, so 200
+   * decodes a second is free of waste and drawing fewer pictures saves
+   * nothing. These two say how far above that floor the builds are, and
+   * whether the gap is frames walked twice or pictures kept and never read.
+   */
+  buildFrames: 0,
+  buildKept: 0,
+  /**
+   * Asks answered with nothing because a build was in flight.
+   *
+   * The alternative was the fallback below it, which decodes a GOP for one
+   * frame *and* abandons the build. These are repeated frames, and at a
+   * reverse rate they are invisible; `askedFallback` beside this one says
+   * whether the trade is being taken.
+   */
+  heldForBuild: 0,
   /** Pictures handed back from one of those runs rather than decoded. */
   fromRun: 0,
 }
@@ -1446,6 +1468,42 @@ export class VideoSource {
     const built = this.runFor(at, width)
     const picture = built?.pictures.get(at)
     if (!picture) {
+      /*
+       * Not while a build is in flight, though.
+       *
+       * `buildRun` explains at its in-flight guard why this fallback is "the
+       * worst of both": it tears down the decoder the build is using, which
+       * abandons the build, and the next ask starts another one that the next
+       * fallback abandons in turn. The guard stopped the *deadlock* and left
+       * the thrash, and the thrash turns out to be bistable rather than rare.
+       *
+       * Nine runs of -4x over fourteen real clips, a fresh app each, split
+       * into two groups with nothing in between:
+       *
+       *   good   4 runs   43.5-51.7 pictures/s   13ms median   0-1 fallbacks
+       *   bad    5 runs    5.2-6.5  pictures/s   82-88ms       23-28
+       *
+       * In the bad group three builds began and one finished, the run cache
+       * served two pictures in four seconds, and every picture drawn was a
+       * fallback decoding a whole GOP for one frame. A coin flip between a
+       * smooth reverse and a slideshow, decided by whether a fallback or a
+       * build landed first.
+       *
+       * So nothing is handed back instead. The draw keeps its previous picture
+       * when every layer returns null — see the comment on that branch — so
+       * the cost is a frame held a few milliseconds too long, which is
+       * invisible at this rate, where pictures are already 2.7 frames apart.
+       * The build then finishes and the next ask is served out of it.
+       *
+       * This cannot stall: `buildingRun` is cleared in a `finally`, so a build
+       * that fails or is abandoned clears the way for the fallback below on the
+       * very next ask.
+       */
+      if (this.buildingRun) {
+        stats.heldForBuild += 1
+        return null
+      }
+
       // Nothing to hand back from a run, so fall back to decoding the one
       // frame. Slow, and right: a picture late beats a picture missing.
       stats.askedFallback += 1
@@ -1624,6 +1682,7 @@ export class VideoSource {
         if (this.away !== mine) break
         // Walking forwards, which is the direction the decoder is good at,
         // and marked as the build's own so its restarts do not stop it.
+        stats.buildFrames += 1
         const frame = await this.frameFor(this.track.pts[i], true)
         if (!frame) continue
         // Held already by the run being grown. The frame still had to be
@@ -1639,7 +1698,10 @@ export class VideoSource {
           resizeHeight: height,
           resizeQuality: 'low',
         }).catch(() => null)
-        if (picture) pictures.set(i, picture)
+        if (picture) {
+          stats.buildKept += 1
+          pictures.set(i, picture)
+        }
       }
       // Nothing worth keeping, or abandoned part way: a half-built run would
       // answer for frames it does not hold and send every one of them to the
