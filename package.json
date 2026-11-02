@@ -30,6 +30,7 @@
     "verify:launch": "node scripts/verify-launch.mjs",
     "verify:playback": "node scripts/verify-playback.mjs",
     "verify:demux": "node scripts/verify-demux.mjs",
+    "verify:edit-import": "node scripts/verify-edit-import.mjs",
     "verify:footage": "node scripts/verify-footage.mjs",
     "verify:batch": "node scripts/verify-batch.mjs",
     "verify:render": "node scripts/verify-render.mjs",

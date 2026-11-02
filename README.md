@@ -183,6 +183,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
 | **HEVC** | 4:2:2 10-bit included — the profile the cameras in this archive shoot. |
 | **Rotation** | Footage shot with the body turned lands and renders upright, not on its side. |
+| **Import an edit** | A Premiere or Resolve sequence XML, as clips on a new timeline. |
+| **Markers** | Named moments and spans. `M` to drop one; they survive an XML import. |
 | **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
 | **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
 | **Sequence render** | Or the whole sequence as *one* file: layers composited, audio mixed down, gaps black. |
@@ -1167,6 +1169,112 @@ compressed track in memory.
 
 Not yet: any UI for removing a track (the kernel refuses to remove the last one, since a sequence
 with none has nowhere to drop).
+
+### Importing an edit: Premiere, Resolve, or a model
+
+A timeline can arrive from three places now — an XML out of Premiere or Resolve, a cut list
+written by a language model, and FLUX itself later. All three become an **edit document**
+first, and exactly one converter turns that into a sequence.
+
+That split is the whole design. Converting each format straight into a sequence would be three
+copies of the same awkward arithmetic — frames to seconds, timeline position against source
+in-point, which track is a layer on top of which — and three places for it to be subtly
+different. A reader's job is to be right about its own format; it is never also right about
+FLUX.
+
+Everything in a document is in **seconds** and **bottom track first**. Seconds because frames
+are meaningless without the rate, and the rate is exactly what interchange formats get wrong.
+Bottom-first because that is the compositor's order and xmeml's, and it is *not* FLUX's — a
+sequence holds `[V2, V1]`. The flip happens once, in the converter.
+
+#### Six things that are wrong if you read xmeml naively
+
+Every one of these is in the single real sequence this was built against — a 25-second vertical
+reel with graphics. They are not edge cases; they are what a normal export contains. Every one
+also produces a timeline that *plays*, which is what makes them worth a harness.
+
+1. **A file appears once and is then referenced empty.** The second music clip is
+   `<file id="file-6"/>` with no body — path, rate and duration are up in the first clip that
+   used it. Taking each `<file>` at face value loses the media on every repeat use, which in a
+   music bed split around a stop is half the soundtrack.
+2. **`timebase` is not the frame rate.** `<timebase>30</timebase>` with `<ntsc>TRUE</ntsc>`
+   means 29.97, and the same integer frame numbers then land at different seconds.
+3. **`start`/`end` and `in`/`out` are different coordinate systems.** The graphics insert
+   starts at frame 168 with an in-point of 0. Confusing them puts every clip at the wrong
+   moment, trimmed to the wrong range, and it still looks plausible.
+4. **Geometry comes from a filter.** The talking head is a 2160x3840 file in a 1080x1920
+   sequence with a Basic Motion scale of 50. Scaling to fit instead gets the framing wrong on
+   exactly the clips someone bothered to reframe. It maps onto FLUX's own `Transform`.
+5. **Paths are percent-encoded URLs, and not in ASCII.** `file://localhost/C:/...` with Hebrew
+   and Russian filenames in it — and pointing at the machine that wrote them.
+6. **A clip can contain a whole sequence.** Premiere's nest. FLUX has no sequence inside a
+   sequence, so this is **refused by name** rather than dropped: a nest that vanished silently
+   would take a third of that reel's graphics with it and leave a timeline that looked complete.
+
+`scripts/verify-edit-import.mjs` builds a fixture containing all six at once — the real export
+is a client's work and does not belong in the repository — and pins each. It takes a real file
+as an argument too, as a smoke test.
+
+#### The cut list a model writes
+
+Not XML, and the reason is token cost. That sample sequence is **450 lines for nine clips**, so
+a two-hundred-cut reel in the same form is ten thousand lines the model would have to emit
+without one malformed tag. The same cuts here are two hundred short objects:
+
+```json
+{
+  "name": "Oleg reel 10", "frameRate": 30, "width": 1080, "height": 1920,
+  "sources": ["E:/FOOTAGE/.../talking_01.mp4"],
+  "video": [[{ "src": 0, "in": 12.4, "out": 18.9, "why": "clean, facing camera" },
+             { "src": 0, "in": 31.0, "out": 36.2 }]]
+}
+```
+
+`src` is an **index into `sources`**, not a path: a reel cut from one interview repeats the same
+path on every cut, and these paths are long and non-ASCII. Cuts lay **end to end** unless they
+carry `at`, because almost every cut list is takes in order. `why` rides along as a note on the
+clip — a few tokens, and the only record of what the model was thinking.
+
+A bad list reports **every** problem at once rather than the first, because making a model
+discover four mistakes one round trip at a time is the slowest possible way to converge.
+
+#### Paths, which are the hard part
+
+The arithmetic is dull; resolving media is not. An XML written elsewhere names files that do not
+exist here. Import widens its search in three steps — the path as written if the project already
+has it, the path as written if it is on disk, then the path with a prefix swapped — and
+**reports what is still missing rather than placing clips that cannot play**. A timeline full of
+offline clips wastes a review pass before anyone notices.
+
+### Markers
+
+A named moment, or a named span. `M` drops one at the playhead — or over the marked range when
+there is one, because someone who has just marked in and out and reaches for a marker means that
+span. `Shift M` and `Ctrl Shift M` walk between them, which is Premiere's own pair. Not
+`Ctrl M`: that is already Send to Render, which is reached far more often.
+
+Markers are the only part of an edit that says what it is *about*. That reel carries five —
+"ХУК: вышел в 25" over the first 168 frames, "ДОЛГ 280 000 ₪" over the next 132 — each with a
+comment describing the beat. Nothing in the clips says any of that; the filenames are camera
+names. They import even when **none of the media resolves**, which is exactly when they are most
+useful: the structure of someone else's edit, readable without their drives.
+
+That is also why they exist before anything automated touches a timeline. A model asked to
+tighten a reel can read "this is the hook"; without markers the same model is guessing from
+`DSCF1906.MOV`.
+
+**A point and a span are one type.** `end === start` is a point. Two types would mean every
+consumer asking which it had before it could do anything, and the only code that cares is the one
+drawing the ruler.
+
+**No name is drawn on the ruler**, and that is measured rather than assumed: the ruler is 22px
+tall and the tick labels already occupy its middle, so a name stacked above or below one overlaps
+it at every zoom. The flag carries the position; the name and comment ride in the tooltip until
+there is a markers list to put them in.
+
+The sequence format number is deliberately **not** bumped for them. A bump makes an older FLUX
+refuse the whole document, and refusing to open someone's edit because it has a marker in it is a
+far worse failure than an older build quietly dropping them.
 
 ### Batch: a folder in, a folder out
 
@@ -2666,6 +2774,14 @@ No app. Runs the queue: every job reaching a terminal state, the log carrying a 
 job, a second run skipping what already verified, a damaged output being **re-encoded rather than
 skipped**, and cancel stopping it promptly. Each source is cut twice so the `_02` naming is
 exercised.
+
+```bash
+npm run verify:edit-import
+```
+
+No app. The six xmeml traps above, the cut-list reader, and a canary that pins the values
+against the *naive* readings — a plain 30fps read, and in/out used as the timeline position —
+because every other assertion would also pass against a reader wrong in that direction.
 
 ```bash
 npm run verify:render-queue -- "E:\FOOTAGE\AG GROUPS\REELS"

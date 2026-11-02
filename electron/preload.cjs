@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('flux', {
     exists: (paths) => ipcRenderer.invoke('fs:exists', paths),
     scan: (dirPath) => ipcRenderer.invoke('fs:scan', dirPath),
     pickOutputDirectory: () => ipcRenderer.invoke('dialog:pickOutputDirectory'),
+    pickSequenceXml: () => ipcRenderer.invoke('dialog:pickSequenceXml'),
+    readText: (filePath) => ipcRenderer.invoke('fs:readText', filePath),
     pickFiles: () => ipcRenderer.invoke('dialog:pickFiles'),
     pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
     pickProjectFile: () => ipcRenderer.invoke('dialog:pickProjectFile'),

@@ -606,6 +606,32 @@ ipcMain.handle('dialog:pickDirectory', async (event) => {
   return result.canceled ? null : (result.filePaths[0] ?? null)
 })
 
+/**
+ * An edit to import. Separate from dialog:pickFiles because that one filters to
+ * media FLUX can decode, and an xmeml file is not media — it is a description
+ * of where media goes.
+ */
+ipcMain.handle('dialog:pickSequenceXml', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Import a sequence',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Premiere / Resolve sequence', extensions: ['xml'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  return result.canceled ? null : (result.filePaths[0] ?? null)
+})
+
+ipcMain.handle('fs:readText', async (_e, filePath) => {
+  try {
+    return { ok: true, text: await fs.readFile(filePath, 'utf8') }
+  } catch (err) {
+    return { ok: false, error: err.code === 'ENOENT' ? 'not-found' : (err.message ?? 'unreadable') }
+  }
+})
+
 ipcMain.handle('dialog:pickOutputDirectory', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const result = await dialog.showOpenDialog(win, {

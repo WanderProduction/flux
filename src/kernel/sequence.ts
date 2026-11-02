@@ -3,6 +3,7 @@ import {
   defaultSettings,
   makeSettings,
   makeSequenceDocument,
+  readMarkers,
   readRange,
   mediaFor,
 } from '../../shared/sequenceFormat.js'
@@ -203,6 +204,44 @@ export interface SequenceRange {
   outPoint: number | null
 }
 
+/**
+ * A named moment, or a named span, on the sequence.
+ *
+ * Markers are the only part of an edit that says what it is *about*. The
+ * Premiere sequence this arrived with carries five of them — "ХУК: вышел в 25"
+ * over the first 168 frames, "ДОЛГ 280 000 ₪" over the next 132 — each with a
+ * comment describing the beat. Nothing in the clips says any of that; the
+ * filenames are camera names.
+ *
+ * That is also why they are worth having before anything automated touches a
+ * timeline. A model asked to tighten a reel can read "this is the hook" and
+ * act on it; without markers the same model is guessing from `DSCF1906.MOV`.
+ *
+ * ## A point and a span are one type
+ *
+ * `end === start` is a point marker; `end > start` is a range. Premiere draws
+ * them differently and stores them the same way, and so does this — two types
+ * would mean every consumer asking which it had before it could do anything,
+ * and the only code that cares is the one drawing the ruler.
+ */
+export interface Marker {
+  id: string
+  /** Seconds from the start of the sequence. */
+  start: number
+  /** Seconds. Equal to `start` on a point marker. */
+  end: number
+  name: string
+  comment: string
+  /**
+   * `#rrggbb`, or absent to use the default.
+   *
+   * Stored as CSS rather than as Premiere's `pproColor` integer, because the
+   * only thing that ever reads it is a stylesheet. Converting once on the way
+   * in beats converting on every render.
+   */
+  colour?: string
+}
+
 export interface SequenceState {
   id: string
   name: string
@@ -211,6 +250,15 @@ export interface SequenceState {
   range?: SequenceRange
   tracks: Track[]
   clips: Clip[]
+  /**
+   * Always an array in memory, even when empty.
+   *
+   * `range` above is optional because a document written before it existed has
+   * no opinion about it. Markers are different: an empty list and a missing
+   * key mean the same thing — no markers — so normalising to `[]` on the way
+   * in spares every reader a `?? []`.
+   */
+  markers: Marker[]
   createdAt: number
   /** Absolute path of its `.fluxseq`, once it has been written. */
   file?: string
@@ -241,6 +289,7 @@ function defaultSequence(name = 'Sequence 1'): SequenceState {
       makeTrack('A2', 'audio'),
     ],
     clips: [],
+    markers: [],
   }
 }
 
@@ -309,12 +358,20 @@ function takeSnapshot(): Snapshot {
   return {
     active: sequence.id,
     order: [...order],
-    sequences: all.map((one) => ({ ...one, tracks: [...one.tracks], clips: [...one.clips] })),
+    sequences: all.map((one) => ({
+      ...one,
+      tracks: [...one.tracks],
+      clips: [...one.clips],
+      markers: [...(one.markers ?? [])],
+    })),
     at: Date.now(),
     shape: all
-      .map((one) => `${one.id}:${one.tracks.map((t) => t.id).join(',')}:${one.clips
-        .map((c) => c.id)
-        .join(',')}`)
+      .map(
+        (one) =>
+          `${one.id}:${one.tracks.map((t) => t.id).join(',')}:${one.clips
+            .map((c) => c.id)
+            .join(',')}:${(one.markers ?? []).map((m) => m.id).join(',')}`,
+      )
       .join('|'),
   }
 }
@@ -688,6 +745,7 @@ export function sequenceDocument(
     clips: one.clips,
     media: mediaFor(one.clips, assets),
     range: one.range,
+    markers: one.markers,
     appVersion,
   }) as Record<string, unknown>
 }
@@ -785,8 +843,20 @@ function normalise(next: SequenceState): SequenceState {
     duration: wholeFrames(clip.duration, settings.frameRate),
   }))
 
+  /*
+   * Shape comes from readMarkers, which is shared with anything else that
+   * reads a document; the only thing added here is an id for a marker that
+   * arrived without one. A marker with no id cannot be deleted or undone,
+   * because both are keyed on it — so one is minted rather than the marker
+   * being dropped, which is what an import from another tool needs.
+   */
+  const markers: Marker[] = readMarkers((next as unknown as { markers?: unknown }).markers).map(
+    (one) => ({ ...one, id: one.id || nextId('m') }) as Marker,
+  )
+
   return {
     ...next,
+    markers,
     id: next.id || nextId('s'),
     name: next.name || 'Sequence 1',
     createdAt: next.createdAt || Date.now(),
@@ -1659,6 +1729,129 @@ export function updateSequenceSettings(change: Partial<SequenceSettings>): boole
  * yet. Once there is an edit, the size stays: changing it under someone
  * halfway through would reframe every shot at once.
  */
+/** Every marker on the sequence being edited, earliest first. */
+export function getMarkers(): Marker[] {
+  return sequence.markers
+}
+
+/**
+ * Puts a marker down, and returns it.
+ *
+ * Snapped to the frame grid for the same reason a clip's start is: a marker
+ * between two frames marks neither, and every other number on the timeline is
+ * already on the grid.
+ *
+ * A span shorter than a frame is stored as a point. Dragging out a range and
+ * letting go without moving is a gesture people make constantly, and the
+ * alternative is a "range" nobody can see or click.
+ */
+export function addMarker(marker: {
+  start: number
+  end?: number
+  name?: string
+  comment?: string
+  colour?: string
+}): Marker | null {
+  const start = snapToFrame(Math.max(0, marker.start))
+  if (!Number.isFinite(start)) return null
+  const rawEnd = marker.end === undefined ? start : snapToFrame(Math.max(0, marker.end))
+  const frame = 1 / sequence.settings.frameRate
+  const end = rawEnd - start < frame / 2 ? start : rawEnd
+
+  const made: Marker = {
+    id: nextId('m'),
+    start,
+    end,
+    name: marker.name ?? '',
+    comment: marker.comment ?? '',
+    ...(marker.colour ? { colour: marker.colour } : {}),
+  }
+  sequence = {
+    ...sequence,
+    markers: [...sequence.markers, made].sort((a, b) => a.start - b.start),
+  }
+  emit()
+  return made
+}
+
+/** Changes a marker's name, comment, colour or span. */
+export function updateMarker(
+  id: string,
+  change: Partial<Omit<Marker, 'id'>>,
+): boolean {
+  const existing = sequence.markers.find((one) => one.id === id)
+  if (!existing) return false
+
+  const start = change.start === undefined ? existing.start : snapToFrame(Math.max(0, change.start))
+  const end = change.end === undefined ? existing.end : snapToFrame(Math.max(0, change.end))
+  const next: Marker = {
+    ...existing,
+    ...change,
+    start,
+    // A span cannot end before it starts; dragging the head past the tail
+    // collapses it to a point rather than inverting it.
+    end: Math.max(start, end),
+  }
+  sequence = {
+    ...sequence,
+    markers: sequence.markers
+      .map((one) => (one.id === id ? next : one))
+      .sort((a, b) => a.start - b.start),
+  }
+  emit()
+  return true
+}
+
+export function removeMarkers(ids: Iterable<string>): number {
+  const doomed = new Set(ids)
+  if (doomed.size === 0) return 0
+  const before = sequence.markers.length
+  const markers = sequence.markers.filter((one) => !doomed.has(one.id))
+  if (markers.length === before) return 0
+  sequence = { ...sequence, markers }
+  emit()
+  return before - markers.length
+}
+
+/**
+ * The marker at a moment, preferring the one that starts nearest before it.
+ *
+ * A point marker is "at" a moment within half a frame of it; a span is at it
+ * whenever the moment is inside. Spans can overlap, so the latest one to have
+ * started wins — which is the one drawn on top, and so the one a hand aiming
+ * at the ruler meant.
+ */
+export function markerAt(time: number): Marker | null {
+  const frame = 1 / sequence.settings.frameRate
+  let found: Marker | null = null
+  for (const marker of sequence.markers) {
+    const hit =
+      marker.end > marker.start
+        ? time >= marker.start - frame / 2 && time < marker.end
+        : Math.abs(marker.start - time) <= frame / 2
+    if (hit) found = marker
+  }
+  return found
+}
+
+/**
+ * The next marker start after `time`, or the previous one before it.
+ *
+ * Starts only, including a span's. Landing on the end of a range as well would
+ * double the stops on a timeline marked up in spans, and the start is the
+ * thing the name belongs to.
+ */
+export function markerNear(time: number, direction: 1 | -1): Marker | null {
+  const frame = 1 / sequence.settings.frameRate
+  if (direction > 0) {
+    return sequence.markers.find((one) => one.start > time + frame / 2) ?? null
+  }
+  for (let i = sequence.markers.length - 1; i >= 0; i--) {
+    if (sequence.markers[i].start < time - frame / 2) return sequence.markers[i]
+  }
+  return null
+}
+
 export function setSequenceSize(width: number, height: number): boolean {
   if (!(width > 0) || !(height > 0)) return false
   return updateSequenceSettings({ width: Math.round(width), height: Math.round(height) })

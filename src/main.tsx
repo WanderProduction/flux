@@ -33,6 +33,9 @@ import * as peaks from './kernel/media/peaks'
 import * as mixer from './kernel/media/mixer'
 import * as audioSource from './kernel/media/audioSource'
 import * as selection from './kernel/selection'
+import * as importEdit from './kernel/importEdit'
+import * as xmeml from '../shared/xmeml.js'
+import * as editDocument from '../shared/editDocument.js'
 import * as renderQueue from './kernel/renderQueue'
 import * as renderSettings from './kernel/renderSettings'
 import * as batchImport from './kernel/batchImport'
@@ -108,6 +111,9 @@ if (import.meta.env.DEV) {
        * has nothing to do with the code under test.
        */
       selection,
+      importEdit,
+      xmeml,
+      editDocument,
       renderQueue,
       renderSettings,
       batchImport,

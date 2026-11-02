@@ -286,7 +286,7 @@ export function mediaFor(clips, assets) {
  * @returns {object}
  */
 export function makeSequenceDocument({
-  id, name, settings, tracks, clips, media, createdAt, appVersion, range,
+  id, name, settings, tracks, clips, media, createdAt, appVersion, range, markers,
 }) {
   return {
     flux: { format: SEQUENCE_FORMAT, version: appVersion ?? '0.0.0' },
@@ -310,7 +310,48 @@ export function makeSequenceDocument({
     tracks: tracks ?? [],
     clips: clips ?? [],
     media: media ?? [],
+    /*
+     * Omitted when there are none, the same way `range` is: a sequence written
+     * before markers existed and one whose markers were all deleted should read
+     * back identically, so there is one way to say "none" rather than two.
+     *
+     * The format number is deliberately *not* bumped for this. A bump makes an
+     * older FLUX refuse the whole document — see sequenceProblem — and refusing
+     * to open someone's edit because it has a marker in it would be a far worse
+     * failure than an older build quietly dropping them. Adding an optional key
+     * is readable by every version that came before it.
+     */
+    ...(markers && markers.length > 0 ? { markers } : {}),
   }
+}
+
+/**
+ * Markers read back off a document.
+ *
+ * Always an array, and only of things that could actually be drawn. A marker
+ * with no finite start has no place on a ruler, and one carried through would
+ * surface as an invisible item that cannot be clicked or deleted — which reads
+ * as the app ignoring a click rather than as a bad document.
+ *
+ * The id is left alone when there is one, because undo and selection are keyed
+ * on it; kernel/sequence.ts mints one when it is missing.
+ *
+ * @param {unknown} raw
+ * @returns {Array<{ id?: string, start: number, end: number, name: string, comment: string, colour?: string }>}
+ */
+export function readMarkers(raw) {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((one) => one && typeof one === 'object' && Number.isFinite(one.start))
+    .map((one) => ({
+      ...(typeof one.id === 'string' && one.id ? { id: one.id } : {}),
+      start: Math.max(0, one.start),
+      end: Number.isFinite(one.end) ? Math.max(Math.max(0, one.start), one.end) : Math.max(0, one.start),
+      name: typeof one.name === 'string' ? one.name : '',
+      comment: typeof one.comment === 'string' ? one.comment : '',
+      ...(typeof one.colour === 'string' ? { colour: one.colour } : {}),
+    }))
+    .sort((a, b) => a.start - b.start)
 }
 
 /**

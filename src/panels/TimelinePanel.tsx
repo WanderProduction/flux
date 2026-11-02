@@ -2865,6 +2865,37 @@ export function TimelinePanel() {
           <div className="tl-content" style={{ width: contentWidth }}>
             <ReadinessStrip zoom={zoom} onScreen={onScreen} />
             <div className="tl-ruler" onPointerDown={beginScrub}>
+              {/*
+                Markers, under the ticks and over the band. A point is a flag;
+                a span is a flag with a bar running to its end.
+
+                No name is drawn, and that is measured rather than assumed: the
+                ruler is 22px tall and the tick labels already occupy its
+                middle, so a name stacked above or below one overlaps it at
+                every zoom. The flag carries the position, which is the part
+                that has to be on the ruler; the name and the comment ride in
+                the tooltip until there is a markers list to put them in.
+              */}
+              {sequence.markers.map((marker) => (
+                <div
+                  className={
+                    marker.end > marker.start ? 'tl-marker tl-marker--span' : 'tl-marker'
+                  }
+                  key={marker.id}
+                  style={{
+                    left: marker.start * zoom,
+                    ...(marker.end > marker.start
+                      ? { width: Math.max(2, (marker.end - marker.start) * zoom) }
+                      : {}),
+                    ...(marker.colour ? { ['--marker-colour' as string]: marker.colour } : {}),
+                  }}
+                  title={
+                    marker.comment ? `${marker.name || 'Marker'} — ${marker.comment}` : marker.name
+                  }
+                >
+                  <span className="tl-marker-flag" />
+                </div>
+              ))}
               {Array.from({ length: drawnTicks }, (_, n) => {
                 // Keyed and positioned by its absolute index, not its place in
                 // the drawn run, so scrolling moves the window rather than
