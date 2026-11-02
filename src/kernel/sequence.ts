@@ -1,6 +1,7 @@
 import type { ClipEffects } from './clipEffects'
 import {
   defaultSettings,
+  MAX_SEQUENCE_SECONDS,
   makeSettings,
   makeSequenceDocument,
   readMarkers,
@@ -131,6 +132,23 @@ export interface Clip {
    * whatever size the sequence happened to be at the time.
    */
   effects?: ClipEffects
+  /**
+   * True when this clip's source is a single picture with no end.
+   *
+   * Every other clip is bounded by its file: `sourceDuration` is how much
+   * there is, and a trim cannot pull an edge past it. A still has no such
+   * fact — one frame can be held for a second or for an hour, and the file
+   * is the same either way — so the rules that ask "is there any source
+   * left?" have to be able to tell the two apart.
+   *
+   * Written on the clip rather than looked up from the asset, for the reason
+   * `sourceDuration` and `linkId` are: what an edge may do is a fact about
+   * the sequence, and it has to survive the asset leaving the bin.
+   *
+   * Optional and only ever `true`, so a clip that is not a still carries
+   * nothing — an older document reads back as footage, which is what it was.
+   */
+  still?: true
 }
 
 /** Below this a track is off rather than quiet, which is what a fader bottom means. */
@@ -1022,6 +1040,8 @@ export interface NewClip {
   sourceDuration?: number
   /** Ties this clip to the one that came out of the same file. */
   linkId?: string
+  /** True for a single picture, whose source has no end. See Clip.still. */
+  still?: boolean
 }
 
 export function addClip({
@@ -1033,6 +1053,7 @@ export function addClip({
   speed,
   sourceDuration,
   linkId,
+  still,
 }: NewClip): Clip | null {
   const track = sequence.tracks.find((t) => t.id === trackId)
   if (!track) return null
@@ -1063,12 +1084,26 @@ export function addClip({
    */
   const length = wholeFrames(duration)
 
+  /*
+   * Nothing may be laid down past the end of what a sequence may be.
+   *
+   * Refused rather than shortened: a clip trimmed to fit would be an edit
+   * nobody made, and at this limit the caller is either placing the last of
+   * four days of footage or has made an arithmetic mistake. Both are better
+   * served by nothing happening.
+   *
+   * Asked of the resolved start, not the requested one, because
+   * `findFreeStart` can slide a clip later than it was aimed at.
+   */
+  const at = findFreeStart(trackId, Number.isFinite(start) ? start : 0, length)
+  if (!fitsInSequence(at, length)) return null
+
   const clip: Clip = {
     id: nextId('c'),
     assetId,
     trackId,
     // Same reasoning: a start that is not a number lands the clip nowhere.
-    start: findFreeStart(trackId, Number.isFinite(start) ? start : 0, length),
+    start: at,
     duration: length,
     offset: Math.max(0, offset ?? 0),
     // The media's own extent, but never less than the clip laid on it: a
@@ -1082,6 +1117,7 @@ export function addClip({
     // to.
     kind: track.kind,
     ...(linkId ? { linkId } : {}),
+    ...(still ? { still: true as const } : {}),
   }
   sequence = { ...sequence, clips: [...sequence.clips, clip] }
   emit()
@@ -1126,7 +1162,7 @@ function lowestFreeVideoTrack(start: number, duration: number): Track {
 }
 
 export function addLinkedClips(
-  { assetId, trackId, start, duration }: NewClip,
+  { assetId, trackId, start, duration, still }: NewClip,
   withAudio: boolean,
 ): { video: Clip | null; audio: Clip | null } {
   const target = sequence.tracks.find((track) => track.id === trackId)
@@ -1137,7 +1173,10 @@ export function addLinkedClips(
       // A silent file has nothing for this track, so its picture goes to the
       // first video track that will have it rather than nowhere at all.
       const home = lowestFreeVideoTrack(start, duration)
-      return { video: addClip({ assetId, trackId: home.id, start, duration }), audio: null }
+      return {
+        video: addClip({ assetId, trackId: home.id, start, duration, still }),
+        audio: null,
+      }
     }
 
     const pairId = nextId('l')
@@ -1154,6 +1193,7 @@ export function addLinkedClips(
       start: audio.start,
       duration,
       linkId: pairId,
+      still,
     })
     if (!picture) {
       // Same reasoning as below: a clip pointing at a partner that was never
@@ -1170,7 +1210,7 @@ export function addLinkedClips(
   }
 
   const linkId = withAudio ? nextId('l') : undefined
-  const video = addClip({ assetId, trackId, start, duration, linkId })
+  const video = addClip({ assetId, trackId, start, duration, linkId, still })
   if (!video || !withAudio) return { video, audio: null }
 
   const free =
@@ -1432,6 +1472,19 @@ function placeCopies(clips: Clip[], at: number, trackShift: number): Clip[] {
   if (moved.length === 0) return []
 
   const offset = freeOffsetFor(moved, at, sequence.clips)
+
+  /*
+   * A paste that would land past the end goes nowhere at all.
+   *
+   * All of it or none of it, and the set is judged by whichever member ends
+   * latest: pasting eight clips and getting the five that fit is a paste that
+   * silently dropped three, and the three it drops are the ones furthest from
+   * where you were looking. See `fitsInSequence`.
+   */
+  if (moved.some((clip) => !fitsInSequence(Math.max(0, clip.start + offset), clip.duration))) {
+    return []
+  }
+
   const links = new Map<string, string>()
   const copies = moved.map((clip) => {
     const linkId = clip.linkId
@@ -1931,7 +1984,17 @@ export function moveClips(
     Math.min(...room.map((r) => r.down)),
   )
   const earliest = Math.min(...chosen.map((clip) => clip.start))
-  const delta = Math.max(snapDelta(deltaSeconds), -earliest)
+  /*
+   * Clamped at both ends, for one reason twice: nothing lives before zero and
+   * nothing lives past the limit. Only the first half of this existed, which
+   * is how a drag could carry a clip out to an hour that no timecode can name
+   * — the sequence has two edges and a move has to know about both.
+   */
+  const latest = Math.max(...chosen.map((clip) => clipEnd(clip)))
+  const delta = Math.min(
+    Math.max(snapDelta(deltaSeconds), -earliest),
+    roomToLimit(latest),
+  )
 
   if (shift === 0 && delta === 0) return false
 
@@ -2021,6 +2084,39 @@ export function moveClips(
   return true
 }
 
+/**
+ * The longest a sequence may be. See shared/sequenceFormat.js for the number.
+ *
+ * Re-exported rather than imported at each call site so that "how long can a
+ * sequence be" has one answer inside the kernel as well as one definition.
+ */
+export { MAX_SEQUENCE_SECONDS }
+
+/**
+ * Seconds left between a moment and the end of what a sequence may be.
+ *
+ * Negative is impossible by construction — nothing may be placed past the
+ * limit — so a caller can treat this as "how much room is there" without
+ * checking the sign.
+ */
+export function roomToLimit(from: number): number {
+  return Math.max(0, MAX_SEQUENCE_SECONDS - from)
+}
+
+/**
+ * Whether a clip of this length may sit at this moment.
+ *
+ * Every path that can push a clip's tail later asks this, and there are five
+ * of them: laying one down, copying one, moving one, trimming an edge, and
+ * stretching one. They are listed because the last time a limit went in here
+ * it was applied at one of them and the other four walked straight past it —
+ * a per-clip cap under a pool with its own floor, which bounded nothing. A
+ * ceiling is only as big as the narrowest path that respects it.
+ */
+export function fitsInSequence(start: number, duration: number): boolean {
+  return start + duration <= MAX_SEQUENCE_SECONDS + EPS
+}
+
 /** Which end of a clip a trim is dragging. */
 export type TrimEdge = 'start' | 'end'
 
@@ -2071,22 +2167,38 @@ export function allowedTrim(ids: string[], edge: TrimEdge, deltaSeconds: number)
 
   for (const clip of chosen) {
     const siblings = clipsOnTrack(clip.trackId).filter((other) => !wanted.has(other.id))
-    // A second of timeline is `speed` seconds of source, so the limits the
-    // *file* imposes are divided by it: a clip at 2x has half as much timeline
-    // left to give as it has file.
-    const spare = (clip.sourceDuration - clip.offset) / clip.speed - clip.duration
+    /*
+     * How much more timeline this clip's source can cover.
+     *
+     * A second of timeline is `speed` seconds of source, so the limits the
+     * *file* imposes are divided by it: a clip at 2x has half as much timeline
+     * left to give as it has file.
+     *
+     * A still is the one clip with no answer to this. One picture held for a
+     * frame and the same picture held for an hour read the same file, so there
+     * is nothing for the tail to run out of and the head can be pulled back to
+     * the start of the sequence. What stops either edge is then the neighbour,
+     * one frame, and the ceiling — which is what the rest of this already
+     * works out, so saying `Infinity` here is the whole of supporting it.
+     */
+    const spare = clip.still
+      ? Infinity
+      : (clip.sourceDuration - clip.offset) / clip.speed - clip.duration
     if (edge === 'start') {
       const before = siblings
         .filter((other) => clipEnd(other) <= clip.start + EPS)
         .reduce((end, other) => Math.max(end, clipEnd(other)), 0)
-      low = Math.max(low, -clip.offset / clip.speed, before - clip.start, -clip.start)
+      // A still's offset means nothing, so the head is not held by it.
+      const head = clip.still ? -Infinity : -clip.offset / clip.speed
+      low = Math.max(low, head, before - clip.start, -clip.start)
       high = Math.min(high, clip.duration - min)
     } else {
       const after = siblings
         .filter((other) => other.start >= clipEnd(clip) - EPS)
         .reduce((start, other) => Math.min(start, other.start), Infinity)
       low = Math.max(low, min - clip.duration)
-      high = Math.min(high, spare, after - clipEnd(clip))
+      // The ceiling is a limit on the tail exactly as a neighbour is.
+      high = Math.min(high, spare, after - clipEnd(clip), roomToLimit(clipEnd(clip)))
     }
   }
 
@@ -2179,6 +2291,17 @@ export function allowedStretch(ids: string[], edge: TrimEdge, deltaSeconds: numb
   const chosen = sequence.clips.filter((clip) => wanted.has(clip.id))
   if (chosen.length === 0) return 0
 
+  /*
+   * A still cannot be stretched, because there is no rate to change.
+   *
+   * Stretching is "the same frames over more or less time", and one frame over
+   * more time is what *trimming* a still already does — identically, and
+   * without leaving behind a clip that claims to run at 0.3x. Refused for the
+   * whole group rather than skipped per clip: a stretch that moved the footage
+   * and left the still behind would take a linked pair out of sync.
+   */
+  if (chosen.some((clip) => clip.still)) return 0
+
   const min = minDuration()
   let low = -Infinity
   let high = Infinity
@@ -2203,7 +2326,12 @@ export function allowedStretch(ids: string[], edge: TrimEdge, deltaSeconds: numb
         .filter((other) => other.start >= clipEnd(clip) - EPS)
         .reduce((start, other) => Math.min(start, other.start), Infinity)
       low = Math.max(low, shortest - clip.duration)
-      high = Math.min(high, longest - clip.duration, after - clipEnd(clip))
+      high = Math.min(
+        high,
+        longest - clip.duration,
+        after - clipEnd(clip),
+        roomToLimit(clipEnd(clip)),
+      )
     }
   }
 

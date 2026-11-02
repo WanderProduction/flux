@@ -169,6 +169,38 @@ function atLeastZero(value, fallback) {
 }
 
 /**
+ * The longest a sequence may be: one hundred hours.
+ *
+ * There has to be a number, because every length in the document is a float
+ * that something downstream turns into a width, a frame index or a timecode,
+ * and without a ceiling an edit can produce one none of them can hold. The
+ * question is only where to put it, and three things have an opinion:
+ *
+ *   - **the timecode.** `formatTimecode` writes `HH:MM:SS:FF` with two digits
+ *     an hour, which is the broadcast convention and the thing an editor reads
+ *     a position off. It can name every frame below a hundred hours and
+ *     nothing above it. This is the binding constraint and so it is the one
+ *     the number comes from.
+ *   - **the frame grid.** Seconds are doubles and a frame is `round(s * fps)`.
+ *     At a hundred hours and 120fps that is 43.2 million frames, with twenty
+ *     digits of double left over — so the grid stays exact by a margin of
+ *     about 1e7. Precision is not what runs out first, which is worth stating
+ *     because it is the thing people assume.
+ *   - **the layout.** The timeline lays out `duration * zoom` pixels, and a
+ *     browser will not lay out an element past about 33.5 million of them. At
+ *     `MAX_ZOOM` that is reached at twenty-three hours, well inside this
+ *     limit — so the zoom is what has to give, not the sequence. See
+ *     `widestFor` in the Timeline panel.
+ *
+ * A hundred hours is four days of continuous footage. Nobody will play one;
+ * the point is that a generated edit — a multi-day timelapse, a stack of
+ * silence, an automated assembly of a whole card — fits inside the app rather
+ * than being refused by it, and that the one place it stops is a place with a
+ * reason behind it.
+ */
+export const MAX_SEQUENCE_SECONDS = 100 * 3600
+
+/**
  * @typedef {object} SequenceSettings
  * @property {number} width  the frame everything is composited into
  * @property {number} height
@@ -233,8 +265,11 @@ export function makeSettings(raw) {
     // does not offer, and refusing it would move every cut in the sequence.
     frameRate: positive(raw?.frameRate, base.frameRate),
     // Zero and absent both mean "follow the clips", so this one is allowed to
-    // be zero where every other number here is not.
-    duration: atLeastZero(raw?.duration, base.duration),
+    // be zero where every other number here is not. The ceiling is applied
+    // here rather than at the dialog because a *file* can carry a longer one —
+    // written by a future build, or by a hand — and a sequence pinned to six
+    // hundred hours would lay out a timeline no browser can hold.
+    duration: Math.min(MAX_SEQUENCE_SECONDS, atLeastZero(raw?.duration, base.duration)),
     startTimecode: atLeastZero(raw?.startTimecode, base.startTimecode),
     pixelAspect: positive(raw?.pixelAspect, base.pixelAspect),
     fieldOrder: pick(raw?.fieldOrder, FIELD_ORDERS, base.fieldOrder),

@@ -59,9 +59,14 @@ export interface SequenceCut {
   start: number
   /** Seconds of sequence it covers. */
   duration: number
-  /** Seconds into the source where it begins. */
+  /** Seconds into the source where it begins. Always 0 for a still. */
   offset: number
   speed: number
+  /**
+   * The source is one picture. The graph loops it for `duration` instead of
+   * reading a stream out of it — see `addInput` in shared/sequenceGraph.js.
+   */
+  still?: boolean
   /** Linear multiplier. Audio only: the track's level and the clip's own. */
   gain?: number
   /** -1 hard left to +1 hard right. Audio only, absent when centred. */
@@ -156,12 +161,13 @@ export function lengthOf(sequence: SequenceState): number {
  *
  *   - **Its asset is gone, or its file is offline.** Nothing to read.
  *   - **It has no length.** Nothing to draw.
- *   - **It is a still.** The composite has no image path: every layer is a
- *     decoded video stream placed by timestamp, and a held frame would need
- *     `-loop 1` and a rate of its own. Batch export refuses stills too, for a
- *     different reason — there the length would be a number nobody chose, while
- *     here the timeline chose it — so this one is a gap in the graph rather
- *     than a decision about archives, and it is named as such.
+ *
+ * A still is no longer among them. It used to be, on the grounds that every
+ * layer is a decoded video stream placed by timestamp and a held frame would
+ * need `-loop 1` and a rate of its own — which was true, and the answer turned
+ * out to be `-loop 1` and a rate of its own. See `addInput`. Batch export
+ * still refuses one, and that refusal is a different thing: there the length
+ * would be a number nobody chose, where here the timeline chose it.
  *
  * Note what is *not* refused: a stretched clip. Speed is a `setpts` divide and
  * an `atempo` chain, the same as it is for a cut, and the sequence's rate is
@@ -239,15 +245,6 @@ export function planSequence(
         })
         continue
       }
-      if (asset.kind === 'image') {
-        skipped.push({
-          id: clip.id,
-          name: asset.name,
-          reason: 'still',
-          detail: 'a still image — the composite has no image layer yet',
-        })
-        continue
-      }
 
       /*
        * Clipped to the span, then moved so the in point becomes zero. The
@@ -274,8 +271,15 @@ export function planSequence(
         source: asset.path,
         start: clip.start + headCut - span.start,
         duration: covered,
-        offset: clip.offset + headCut * clip.speed,
+        /*
+         * A still has no in point to cut into, so a head cut moves only where
+         * it starts and how long it runs. Taken from the clip rather than
+         * from the asset, because the snapshot a queued job renders from must
+         * say what the clip was when it was queued — see `Clip.still`.
+         */
+        offset: clip.still ? 0 : clip.offset + headCut * clip.speed,
         speed: clip.speed,
+        ...(clip.still ? { still: true } : {}),
       }
 
       if (track.kind === 'audio') {

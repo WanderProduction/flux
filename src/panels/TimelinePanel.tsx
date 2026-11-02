@@ -160,16 +160,76 @@ function wheelPixels(event: WheelEvent): number {
 }
 
 /**
+ * The widest element a browser will lay out, in CSS pixels.
+ *
+ * Not a guess and not a round number: it is the engine's own limit, and past
+ * it an element is silently given a different width than it was told. The
+ * timeline's content is one element `duration * zoom` wide, so this is a hard
+ * ceiling on the product of the two — and the failure if it is crossed is the
+ * worst kind, because nothing errors. The ruler, the clips and the playhead
+ * are all positioned in the same space and they would simply stop agreeing
+ * with each other, somewhere off to the right.
+ *
+ * Checked at runtime rather than trusted: `verify-still-layers` lays out an
+ * element this wide and reads back what it got.
+ */
+const MAX_ELEMENT_PX = 33_554_428
+
+/**
+ * How far *in* the zoom is allowed to go, for a sequence this long.
+ *
+ * The mirror of `widestUseful`, and it exists because the sequence ceiling and
+ * the layout ceiling are different limits that are easy to confuse. A sequence
+ * may be a hundred hours — see `MAX_SEQUENCE_SECONDS` — and at `MAX_ZOOM`
+ * that would be a hundred and forty million pixels, four times what any
+ * browser will lay out. Something has to give, and it is not the edit: a
+ * hundred hours at ninety pixels a second is still twenty-two pixels a frame,
+ * so nothing anybody does on a timeline that long is out of reach.
+ *
+ * It matters at twenty-three hours and above, which is reachable now that
+ * there is a limit at all. Below that it returns `MAX_ZOOM` and this is not
+ * in anybody's way.
+ */
+function tightestUseful(length: number): number {
+  if (!(length > 0)) return MAX_ZOOM
+  /*
+   * A hundredth off the limit, because the content width is not the widest
+   * thing in the content.
+   *
+   * The ruler lays out `ceil(width / step) + 1` ticks, so the last one sits a
+   * step *past* the end, and the end marker is positioned at the end itself.
+   * Measured with no reserve at all: the panel asked for 33,554,400px and the
+   * engine laid out 33,554,428 — the clamp exactly — because a child reached
+   * past it. Nothing was visibly wrong, since everything inside is positioned
+   * absolutely, but a layout sitting on the engine's clamp is one change away
+   * from being quietly truncated and there is nothing to spend by avoiding it.
+   *
+   * A hundredth of the limit is 335,000px, which at this zoom is about an hour
+   * of timeline, and it costs a hundred hours less than a pixel a second.
+   */
+  return Math.min(MAX_ZOOM, (MAX_ELEMENT_PX * 0.99) / (length + CONTENT_SLACK))
+}
+
+/**
  * Keeps a zoom usable. Also guards the value read back from a document: a
  * hand-edited .flux with zoom 0 would give every clip zero width and an empty
  * timeline that looks like lost work.
  *
  * `floor` is for the one case where `MIN_ZOOM` is itself the wrong answer: see
  * `widestUseful`.
+ *
+ * The ceiling is worked out here rather than passed in, and that is the point:
+ * six places set the zoom and only three of them have a length in hand, so a
+ * ceiling they had to supply would be a ceiling three of them did not apply.
+ * The length is asked of the sequence instead, which every caller shares.
  */
 function clampZoom(pixelsPerSecond: number, floor = MIN_ZOOM): number {
   if (!Number.isFinite(pixelsPerSecond) || pixelsPerSecond <= 0) return DEFAULT_ZOOM
-  return Math.min(MAX_ZOOM, Math.max(floor, pixelsPerSecond))
+  const ceiling = tightestUseful(sequenceDuration())
+  // A floor above the ceiling is possible on a very long sequence, where
+  // "fit the whole thing on screen" is further in than the layout allows.
+  // The ceiling wins: it is the one that cannot be broken.
+  return Math.min(ceiling, Math.max(Math.min(floor, ceiling), pixelsPerSecond))
 }
 
 /**
@@ -1469,15 +1529,25 @@ export function TimelinePanel() {
         const asset = await ensureProbed(assetId)
         if (!asset || asset.missing || asset.unreadable || !asset.duration) continue
 
-        // Cheap: the audio track's index, not its waveform. See media/peaks.ts.
-        const sound = await audioStateFor(asset.path)
-        const hasAudio = sound.kind === 'sound'
+        /*
+         * A still is never asked about its soundtrack.
+         *
+         * Not an optimisation — a correctness point. `audioStateFor` reads an
+         * mp4 index, so handing it a JPEG gets back "unreadable", and the
+         * notice below would then tell somebody who dropped a photograph that
+         * FLUX cannot read its audio yet. It has none to read. The absence of
+         * sound in a picture is not a fault to report, and the same reasoning
+         * already applies to footage whose audio was deliberately stripped.
+         */
+        const still = asset.kind === 'image'
+        const sound = still ? null : await audioStateFor(asset.path)
+        const hasAudio = sound?.kind === 'sound'
         const silence =
-          sound.kind === 'silent'
-            ? `${asset.name} has no soundtrack`
-            : sound.kind === 'unreadable'
-              ? `${asset.name}: FLUX cannot read this file's audio yet (${sound.detail})`
-              : null
+          !sound || sound.kind === 'sound'
+            ? null
+            : sound.kind === 'silent'
+              ? `${asset.name} has no soundtrack`
+              : `${asset.name}: FLUX cannot read this file's audio yet (${sound.detail})`
 
         /*
          * The first clip into an empty sequence decides what the sequence is.
@@ -1492,14 +1562,19 @@ export function TimelinePanel() {
          * container, for the reason media/indexCache.ts gives.
          */
         if (getSequence().clips.length === 0) {
-          const video = await videoInfoFor(asset.path)
+          // A still has no video track to read a rate off, so the sequence
+          // keeps its default rate and takes only the picture's shape. A
+          // sequence whose first clip is a photograph has no frame rate in it
+          // to discover, and inventing one from the image would be a number
+          // nobody chose.
+          const video = still ? null : await videoInfoFor(asset.path)
           updateSequenceSettings({
             ...(video
               ? { width: video.width, height: video.height, frameRate: round(video.frameRate) }
               : asset.width && asset.height
                 ? { width: asset.width, height: asset.height }
                 : {}),
-            ...(sound.kind === 'sound'
+            ...(sound?.kind === 'sound'
               ? {
                   // The rest of the audio settings are left alone: the file
                   // says what it was recorded at, not what the sequence should
@@ -1528,7 +1603,7 @@ export function TimelinePanel() {
          * hand. It now falls through and lands whole, with the sound on the
          * track it was aimed at; see addLinkedClips.
          */
-        if (track.kind === 'audio' && asset.kind !== 'video') {
+        if (track.kind === 'audio' && !still && asset.kind !== 'video') {
           if (!hasAudio) {
             notices.push(`${silence}, so there is nothing to put on an audio track`)
             continue
@@ -1543,8 +1618,24 @@ export function TimelinePanel() {
           continue
         }
 
+        /*
+         * A picture dropped on an audio track lands on a video one.
+         *
+         * `addLinkedClips` already does this for a silent file — the picture
+         * goes to the lowest video track that will have it rather than
+         * nowhere — and a still is the same case with more certainty behind
+         * it. Refusing the drop would be defensible and is what Premiere
+         * does; putting the clip where it can only have meant to go is
+         * better, and it is the behaviour already written and tested.
+         */
         const { video } = addLinkedClips(
-          { assetId, trackId: track.id, start: cursor, duration: asset.duration },
+          {
+            assetId,
+            trackId: track.id,
+            start: cursor,
+            duration: asset.duration,
+            ...(still ? { still: true } : {}),
+          },
           hasAudio,
         )
         if (video) cursor = video.start + video.duration
@@ -3421,7 +3512,11 @@ function ClipBlock({
   const state = orphaned || asset.missing ? ' clip--orphan' : ''
   // Says so only when it is: a clip playing its whole file has nothing to
   // report, and a badge on every clip would say nothing at all.
-  const trimmed = offset > EPS_UI || offset + duration < clip.sourceDuration - EPS_UI
+  // Never on a still: "from 0.00s of 5.00s" would describe a range inside a
+  // file that has no length, and the five seconds it names is the default a
+  // drop gives a picture rather than anything the file says.
+  const trimmed =
+    !clip.still && (offset > EPS_UI || offset + duration < clip.sourceDuration - EPS_UI)
 
   return (
     <div

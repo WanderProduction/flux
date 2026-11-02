@@ -101,6 +101,8 @@ import { atempoChain, encodeArgs } from './renderFormat.js'
  * @property {number} duration seconds of sequence it covers
  * @property {number} offset seconds into the source where it begins
  * @property {number} speed how fast the source runs; 1 when untouched
+ * @property {boolean} [still] the source is one picture, with no length of
+ *   its own — see `addInput`
  * @property {number} [gain] linear multiplier, audio only — see trackLevel
  */
 
@@ -336,6 +338,29 @@ export function sequenceArgs(job, options = {}) {
   let input = 0
   const addInput = (cut) => {
     const speed = cut.speed > 0 ? cut.speed : 1
+
+    /*
+     * A still is a one-frame input told to repeat itself.
+     *
+     * `-loop 1` makes the decoder hand that frame back forever and `-t` is
+     * what stops it, so the clip's own length is the whole of its timing —
+     * there is nothing to seek into and no rate to divide by. `-framerate`
+     * before `-i` sets the rate the repeats are stamped at: without it the
+     * input arrives at ffmpeg's 25fps default and the `fps=` filter in the
+     * chain has to resample a stream of identical pictures, which is work
+     * that produces exactly the same frames.
+     *
+     * No `-ss`. A still's offset is meaningless — see `Clip.still` — and
+     * seeking into a looped single image is how you get an input that
+     * produces nothing at all.
+     */
+    if (cut.still) {
+      args.push('-loop', '1', '-framerate', s(job.frameRate))
+      args.push('-t', s(cut.duration))
+      args.push('-i', cut.source)
+      return input++
+    }
+
     // Before `-i`, which is both the fast seek and — re-encoding, as here — a
     // frame-accurate one. The read limit is the span of source the clip covers,
     // which a stretch makes longer or shorter than the clip itself.

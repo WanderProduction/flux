@@ -180,6 +180,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 | **Level, mute, solo** | Per track, in decibels, saved with the project. |
 | **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
+| **Stills** | Drop a picture on a track and it is a layer: hold it for one frame or for an hour. |
 | **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
 | **HEVC** | 4:2:2 10-bit included — the profile the cameras in this archive shoot. |
 | **Rotation** | Footage shot with the body turned lands and renders upright, not on its side. |
@@ -1407,6 +1408,112 @@ This is the second time a minimum applied unconditionally has produced an overla
 first put batch-imported clips a half-frame into each other, fixed by laying them out in whole
 frames. The pattern is worth naming: **a floor that does not know what is next to it will
 eventually sit on top of it.**
+
+### Stills, and the two ends of a sequence
+
+Drop a picture on a track and it becomes a clip like any other — composited with the footage
+above and below it, trimmed by dragging its edges, rendered with the rest. It arrives five
+seconds long, which is the convention every NLE uses for a still, and that number is the only
+thing about it that is a guess.
+
+Everything else follows from one fact: **a still's source has no end.**
+
+A clip of footage is bounded by its file. It writes down how long its source was when it was cut,
+and that is what decides whether an edge can be pulled back out — a tail cannot go past the last
+frame, because there is no frame there. One picture has nothing to run out of. The same file
+answers for a clip held for a frame and a clip held for an hour, so the only things that may stop
+an edge are the neighbour on the lane, one frame, and the end of what a sequence is allowed to be.
+
+A still therefore carries one bit, `still`, and the trim arithmetic reads it as "there is no
+limit from the file". That is the whole of supporting it, because the rest of the rules were
+already right. It also means a still cannot be *stretched*: stretching is the same frames over
+more or less time, and for one frame that is what trimming already does — identically, and
+without leaving behind a clip claiming to run at 0.3x.
+
+In the composite a still is a `StillSource`: decoded once into a bitmap and handed back
+unchanged, however fast the playhead is going and whichever way. It sits behind the same
+interface as a decoder because the composite only ever asks one question — what is on screen at
+this moment — but it is kept out of the *decoder pool*, which is sized for hardware decoders. A
+still holds none, and evicting a decoder to keep a JPEG that could be decoded again in
+milliseconds is the wrong trade in both directions.
+
+Two things were wrong on the way and are worth recording. The viewer used to replace the whole
+composite with a single `<img>` whenever the clip at the playhead was an image — right while a
+still could only be shown as itself, and wrong the moment it became a layer, because an `<img>`
+can only show the front one. And a bitmap is four bytes a pixel whatever the file was compressed
+to, so a 6000x4000 photograph costs 96MB held; they are decoded down to 3840 on the long edge,
+which is past any sequence anybody is cutting here and turns the worst case into 33MB.
+
+#### Rendered as a looped input
+
+```
+-loop 1 -framerate 30 -t 7 -i still.jpg
+```
+
+`-loop 1` makes the decoder hand the one frame back forever and `-t` stops it, so the clip's own
+length is the whole of its timing. The rate matters: without `-framerate` the input arrives at
+ffmpeg's 25fps default and the graph's `fps=` has to resample a stream of identical pictures. And
+there is no `-ss`, because a still has no in point and seeking into a looped image produces an
+input with nothing in it.
+
+Measured: nine seconds of a still-then-footage sequence comes out 270 frames at 30fps, and the
+four seconds of still measure the same mean luma as the file itself to three decimal places.
+
+**The near-miss is the part worth keeping.** Rendered through the real encoder, the footage
+*after* the still read about nine luma units brighter than the same footage with a gap in front
+of it — which looks exactly like the thing a looped input is expected to get wrong, and this
+project has already been bitten once by `overlay` repeating the last frame of a stream that ran
+out. It was the encoder. The two files have different content before the footage, so rate control
+arrives at it with a different history, and CQ 26 is not bit-exact. Written losslessly the
+difference is **zero on every pixel of every shared frame**. The check now renders both and
+differences them, because the only version of that check worth having is the one with the encoder
+taken out.
+
+#### How long a sequence may be
+
+A hundred hours. There has to be a number — every length in the document is a float that
+something downstream turns into a width, a frame index or a timecode — and the question is only
+where to put it. Three things have an opinion and they disagree by a lot:
+
+- **The timecode.** `HH:MM:SS:FF` with two digits an hour is the broadcast convention and what an
+  editor reads a position off. It can name every frame below a hundred hours and nothing above.
+  This is the binding constraint, so it is where the number comes from.
+- **The frame grid.** Seconds are doubles and a frame is `round(s * fps)`. A hundred hours at
+  120fps is 43.2 million frames with about seven orders of magnitude of double left over.
+  Precision is *not* what runs out first, which is worth saying because it is what people assume.
+- **The layout.** The timeline lays out `duration * zoom` pixels and a browser will not lay out an
+  element past 33,554,428 of them — measured, not remembered, and the harness asks the engine
+  every run. At `MAX_ZOOM` that limit is reached at twenty-three hours, well inside the ceiling.
+
+So the zoom gives way rather than the edit: above about twenty-three hours the zoom ceiling comes
+down to keep the layout inside the engine's limit, and a hundred hours still zooms to 92 pixels a
+second — four pixels a frame at 24fps, so nothing on a timeline that long is out of reach. A
+hundredth of the limit is held in reserve, because the ruler puts its last tick a step *past* the
+end: with no reserve the panel asked for 33,554,400px and the engine laid out 33,554,428 — the
+clamp exactly. Nothing visibly broke, since everything inside is positioned absolutely, but a
+layout sitting on the engine's clamp is one change away from being quietly truncated.
+
+A hundred hours is four days of continuous footage. Nobody will play one. The point is that a
+*generated* edit — a multi-day timelapse, a stack of silence, an automated assembly of a whole
+card — fits inside the app rather than being refused by it, and that the one place it stops is a
+place with a reason behind it.
+
+The ceiling is applied at **five** paths, and they are listed in the code because that is the
+trap: laying a clip down, copying one, moving one, trimming an edge and stretching one. Two of
+them — `placeCopies` and `moveClips` — write to the sequence without going through `addClip`,
+so a ceiling enforced there alone would have bounded nothing. This is the third time that shape
+has come up here, after a per-clip cap under a pool with its own floor and a minimum width that
+did not know its neighbour: **a limit is only as big as the narrowest path that respects it.**
+
+```bash
+npm run verify:stills
+```
+
+Thirteen checks: the drop gesture itself, driven as a real `drop` event with the DataTransfer the
+Content Browser puts on the pointer; an edge pulled to ten minutes from a source that claims five
+seconds; a still trimmed to exactly one frame and refusing to go further; the composite compared
+against the file on a 256-sample grid; both ends of the ceiling; and the engine asked what it will
+really lay out.
 
 ### Batch: a folder in, a folder out
 

@@ -4,6 +4,8 @@ import { commands } from '../kernel/commands'
 import { getAssets, subscribeAssets, type Asset } from '../kernel/assets'
 import { assetUrl } from '../kernel/fsBridge'
 import { VideoSource, showKeyframesOnly, type Shown } from '../kernel/media/videoSource'
+import type { ClipSource } from '../kernel/media/clipSource'
+import { StillSource } from '../kernel/media/stillSource'
 import { getPerformance, subscribePerformance } from '../kernel/performance'
 import { audioInfoFor, type AudioInfo } from '../kernel/media/peaks'
 import {
@@ -167,6 +169,16 @@ const JUMP_FRAMES = 5
  * difference between an editor arriving somewhere and passing through it.
  */
 const WARM_NEIGHBOURS_MS = 250
+
+/**
+ * Stills kept for clips the playhead has left. See `stillPoolRef`.
+ *
+ * Four rather than the decoder pool's dozen, because the cost is memory and
+ * the saving is small: reopening a still is a read and one `createImageBitmap`,
+ * where reopening a decoder is an index, a codec negotiation and a run up from
+ * a keyframe. Enough to cross a cut between two stills and come back.
+ */
+const STILL_POOL = 4
 
 /**
  * Every clip to be drawn at `time`, bottom layer first.
@@ -570,7 +582,7 @@ export function ViewerPanel() {
    * genuinely expensive thing in the pipeline. So the map is reconciled: open
    * what is new, close what has gone, leave the rest alone.
    */
-  const sourcesRef = useRef(new Map<string, VideoSource>())
+  const sourcesRef = useRef(new Map<string, ClipSource>())
   /**
    * Decoders for clips the playhead has left, kept by the file they read.
    *
@@ -583,7 +595,24 @@ export function ViewerPanel() {
    * Insertion order is recency: a hit deletes and re-inserts, so the first key
    * is always the one to evict.
    */
-  const poolRef = useRef(new Map<string, VideoSource>())
+  const poolRef = useRef(new Map<string, ClipSource>())
+
+  /**
+   * The same thing for stills, kept apart because they cost something else.
+   *
+   * `poolRef` above is bounded by `decoderPool`, and that number is about
+   * *hardware decoders* — a machine has a small fixed count of them and
+   * exhausting it is what makes playback fall apart. A still holds none. Put
+   * in the same pool it would evict a decoder that a clip is about to want, in
+   * order to keep a JPEG that could be decoded again in a few milliseconds,
+   * which is the wrong trade in both directions.
+   *
+   * So it has its own limit, and the limit is about memory instead: a bitmap
+   * capped at `MAX_STILL_EDGE` is at most 3840x2160x4 bytes, a little over
+   * 33MB, so four of them is 132MB in the worst case and very much less for
+   * the sizes stills actually come in.
+   */
+  const stillPoolRef = useRef(new Map<string, ClipSource>())
 
   /**
    * How much machine to spend, and a ref beside it.
@@ -624,7 +653,10 @@ export function ViewerPanel() {
    */
   const servable = layers.filter((layer) => {
     const file = assetById.get(layer.assetId)
-    return !!file && !file.missing && !file.unreadable && file.kind === 'video'
+    // A still is served by the pipeline now, so a stack with one in it is no
+    // longer sent to the element path — which could only ever show one file,
+    // and so could not show a still over footage at all.
+    return !!file && !file.missing && !file.unreadable
   })
   const decoding = layers.length > 0 && servable.length === layers.length && why === null
 
@@ -681,18 +713,20 @@ export function ViewerPanel() {
       held.delete(id)
       // One per file: a second could never be claimed, because an arriving
       // layer takes at most one.
-      if (pool.has(source.path)) source.close()
-      else pool.set(source.path, source)
+      const home = source instanceof StillSource ? stillPoolRef.current : pool
+      if (home.has(source.path)) source.close()
+      else home.set(source.path, source)
     }
 
     for (const layer of layers) {
       if (held.has(layer.id)) continue
       const file = assetById.get(layer.assetId)
       if (!file) continue
-      const carried = pool.get(file.path)
+      const from = file.kind === 'image' ? stillPoolRef.current : pool
+      const carried = from.get(file.path)
       if (carried) {
         held.set(layer.id, carried)
-        pool.delete(file.path)
+        from.delete(file.path)
       }
     }
 
@@ -715,19 +749,26 @@ export function ViewerPanel() {
      * pool measured in megabytes could hold forty of them and exhaust that
      * long before it noticed.
      */
-    while (pool.size > poolLimit.current) {
-      const oldest = pool.keys().next().value
-      if (oldest === undefined) break
-      pool.get(oldest)?.close()
-      pool.delete(oldest)
+    const evict = (from: Map<string, ClipSource>, limit: number) => {
+      while (from.size > limit) {
+        const oldest = from.keys().next().value
+        if (oldest === undefined) break
+        from.get(oldest)?.close()
+        from.delete(oldest)
+      }
     }
+    evict(pool, poolLimit.current)
+    evict(stillPoolRef.current, STILL_POOL)
 
     void Promise.all(
       layers.map(async (layer) => {
         if (held.has(layer.id)) return
         const file = assetById.get(layer.assetId)
-        if (!file || file.missing || file.unreadable || file.kind !== 'video') return
-        const result = await VideoSource.open(file.path)
+        if (!file || file.missing || file.unreadable) return
+        const result =
+          file.kind === 'image'
+            ? await StillSource.open(file.path)
+            : await VideoSource.open(file.path)
         if (!live || !result.ok) {
           if (result.ok) result.source.close()
           // Not an error to put in front of the user — the element path will
@@ -761,11 +802,14 @@ export function ViewerPanel() {
   useEffect(() => {
     const held = sourcesRef.current
     const pool = poolRef.current
+    const stills = stillPoolRef.current
     return () => {
       for (const source of held.values()) source.close()
       held.clear()
       for (const source of pool.values()) source.close()
       pool.clear()
+      for (const source of stills.values()) source.close()
+      stills.clear()
     }
   }, [])
 
@@ -1501,39 +1545,53 @@ export function ViewerPanel() {
         >
           <div className="viewer-frame-inner">
             {playable && clip ? (
-              playable.kind === 'image' ? (
-                <img className="viewer-media" src={url} alt={playable.name} />
-              ) : (
-                <>
-                  {/* The stack is composited here.
+              <>
+                {/* The stack is composited here.
 
-                      Deliberately not keyed on the clip in front. The canvas
-                      is the *sequence's* frame now, not one clip's picture, so
-                      remounting it whenever the front layer changed would
-                      throw away the surface every layer draws into — and hand
-                      whatever was holding it a detached node still showing the
-                      last composite. */}
-                  <canvas
-                    ref={canvasRef}
+                    Deliberately not keyed on the clip in front. The canvas
+                    is the *sequence's* frame now, not one clip's picture, so
+                    remounting it whenever the front layer changed would
+                    throw away the surface every layer draws into — and hand
+                    whatever was holding it a detached node still showing the
+                    last composite.
+
+                    Mounted for a still as well, and that is a change. An
+                    image at the playhead used to replace this canvas with a
+                    single `<img>`, which was the only honest thing to do
+                    while the pipeline had no image path: there was nothing to
+                    composite a still into. Now there is — see
+                    kernel/media/stillSource.ts — and the `<img>` could only
+                    ever show the front layer, so a still over footage showed
+                    the still alone and a still *under* footage showed the
+                    still rather than the footage. */}
+                <canvas
+                  ref={canvasRef}
+                  className="viewer-media"
+                  style={{ display: decoding ? 'block' : 'none' }}
+                />
+                {/* Nothing but the canvas on the pipeline path: the sound
+                    is the mixer's, and a second copy of it here would play
+                    the same audio twice, a beat apart.
+
+                    Off it, the fallback is whatever can show the file without
+                    us decoding it — an element for footage, an `<img>` for a
+                    picture. It is the same fallback as before for the same
+                    reason, reached now only when the pipeline has actually
+                    failed rather than whenever the front layer is a still. */}
+                {decoding ? null : playable.kind === 'image' ? (
+                  <img className="viewer-media" src={url} alt={playable.name} />
+                ) : (
+                  <video
+                    key={`video-${playable.id}`}
+                    ref={mediaRef as React.RefObject<HTMLVideoElement>}
                     className="viewer-media"
-                    style={{ display: decoding ? 'block' : 'none' }}
+                    src={url}
+                    preload="auto"
+                    playsInline
+                    onLoadedMetadata={syncMedia}
                   />
-                  {/* Nothing but the canvas on the pipeline path: the sound
-                      is the mixer's, and a second copy of it here would play
-                      the same audio twice, a beat apart. */}
-                  {decoding ? null : (
-                    <video
-                      key={`video-${playable.id}`}
-                      ref={mediaRef as React.RefObject<HTMLVideoElement>}
-                      className="viewer-media"
-                      src={url}
-                      preload="auto"
-                      playsInline
-                      onLoadedMetadata={syncMedia}
-                    />
-                  )}
-                </>
-              )
+                )}
+              </>
             ) : (
               /* Only an actual problem gets words. A gap between clips is
                  black, the way a gap is black everywhere else — saying "no

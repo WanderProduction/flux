@@ -28,6 +28,7 @@
     "verify:tree": "node scripts/verify-tree.mjs",
     "verify:timeline": "node scripts/verify-timeline.mjs",
     "verify:no-overlap": "node scripts/verify-no-overlap.mjs",
+    "verify:stills": "node scripts/verify-still-layers.mjs",
     "verify:launch": "node scripts/verify-launch.mjs",
     "verify:playback": "node scripts/verify-playback.mjs",
     "verify:demux": "node scripts/verify-demux.mjs",

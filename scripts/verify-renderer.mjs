@@ -198,7 +198,10 @@ try {
       // Where a render writes, and the footage scan behind batch import.
       'pickOutputDirectory',
       'pickProjectFile',
+      // The sequence XML an edit arrives as, and reading one off disk.
+      'pickSequenceXml',
       'places',
+      'readText',
       'scan',
       'subfolders',
     ])
