@@ -3797,3 +3797,236 @@ kbd {
   border-right-width: 0;
   border-radius: 0;
 }
+
+/* ── Settings ──────────────────────────────────────────────── */
+
+/* A list on the left, one page in the middle. The grid is fixed-then-flexible
+   rather than two percentages: the list is read at a glance and should be the
+   same width whatever the window is doing, while the page wants whatever is
+   left. `min-height: 0` on both so each scrolls inside itself instead of the
+   taller one pushing the panel body past its own height. */
+.settings {
+  display: grid;
+  grid-template-columns: 252px 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+.settings-search {
+  flex: 0 1 220px;
+  min-width: 90px;
+  padding: 2px 7px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg);
+  color: var(--flux-text);
+  font-family: var(--flux-font);
+  font-size: var(--flux-text-sm);
+}
+.settings-search:focus {
+  outline: none;
+  border-color: var(--flux-accent-dim);
+}
+.settings-search::placeholder {
+  color: var(--flux-text-faint);
+}
+
+.settings-nav {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 0 14px;
+  border-right: 1px solid var(--flux-border);
+  background: var(--flux-bg);
+}
+
+.settings-level + .settings-level {
+  margin-top: 14px;
+}
+
+.settings-level-head {
+  padding: 4px 12px 6px;
+}
+.settings-level-name {
+  display: block;
+  color: var(--flux-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 9px;
+  font-weight: 700;
+}
+.settings-level-blurb {
+  display: block;
+  margin-top: 2px;
+  color: var(--flux-text-faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+/* A row, not a button that looks like one: full width, left aligned, two
+   lines. The blurb is the whole reason the list is scannable, so it is part of
+   the row rather than a tooltip nobody hovers for. */
+.settings-link {
+  display: block;
+  width: 100%;
+  padding: 5px 12px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: inherit;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+.settings-link:hover {
+  background: var(--flux-bg-hover);
+}
+.settings-link--open {
+  background: var(--flux-bg-active);
+  border-left-color: var(--flux-accent);
+}
+.settings-link-name {
+  display: block;
+  color: var(--flux-text);
+  font-size: var(--flux-text-md);
+}
+.settings-link-blurb {
+  display: block;
+  margin-top: 1px;
+  color: var(--flux-text-faint);
+  font-size: 10px;
+  line-height: 1.35;
+}
+/* A planned page is dimmer in the list and says so on the page itself. Dimmer
+   rather than disabled: it opens, it has something to read, and a row you
+   cannot click would hide the plan this list exists to show. */
+.settings-link--planned .settings-link-name {
+  color: var(--flux-text-dim);
+}
+
+.settings-empty {
+  padding: 10px 12px;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+}
+
+.settings-content {
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Capped and not centred: prose past about 70 characters a line is harder to
+   read, and a column that slides to the middle of a 4K window loses its
+   relationship with the list it was opened from. */
+.settings-page {
+  max-width: 620px;
+  padding: 18px 22px 28px;
+}
+
+.settings-page-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--flux-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.settings-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: 999px;
+  color: var(--flux-warn);
+  letter-spacing: 0.08em;
+}
+
+.settings-page-title {
+  margin: 6px 0 0;
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--flux-text);
+}
+.settings-page-blurb {
+  margin: 4px 0 0;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-lg);
+  line-height: 1.5;
+}
+
+/* The one block on a planned page that is about something real, so it reads
+   as a note pinned to the page rather than as more of the page. */
+.settings-lives {
+  margin-top: 18px;
+  padding: 11px 13px;
+  border: 1px solid var(--flux-border-strong);
+  border-left: 2px solid var(--flux-audio);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+}
+.settings-lives-head {
+  margin: 0;
+  color: var(--flux-audio);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  font-weight: 700;
+}
+.settings-lives-what {
+  margin: 6px 0 0;
+  color: var(--flux-text);
+  font-size: var(--flux-text-md);
+  line-height: 1.5;
+}
+.settings-lives-where {
+  margin: 3px 0 0;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+}
+.settings-lives-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  padding: 3px 9px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-panel);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+}
+.settings-lives-go:hover {
+  background: var(--flux-bg-hover);
+  border-color: var(--flux-accent-dim);
+}
+
+.settings-plan {
+  margin-top: 18px;
+}
+.settings-plan-head {
+  margin: 0;
+  color: var(--flux-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  font-weight: 700;
+}
+.settings-plan-body {
+  margin: 7px 0 0;
+  color: var(--flux-text);
+  font-size: var(--flux-text-md);
+  line-height: 1.65;
+}
+
+.settings-page-foot {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid var(--flux-border);
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.6;
+}

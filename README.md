@@ -152,7 +152,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 |---|---|
 | **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
-| **Workspaces** | Saved panel layouts. `1` Edit, `2` Export. |
+| **Workspaces** | Saved panel layouts. `1` Edit, `2` Export, `3` Settings. |
+| **Settings** | `Ctrl ,` — three levels and nineteen pages. The shell is built; every page is still a plan. |
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
@@ -1514,6 +1515,83 @@ Content Browser puts on the pointer; an edge pulled to ten minutes from a source
 seconds; a still trimmed to exactly one frame and refusing to go further; the composite compared
 against the file on a 256-sample grid; both ends of the ceiling; and the engine asked what it will
 really lay out.
+
+### Settings: three levels, nineteen pages
+
+`Ctrl ,` or `3`. A list of pages down the left, one page in the middle — the shape every
+application with more than a dialog's worth of settings arrives at, because settings are
+*found* rather than navigated. Nobody remembers which tab the cache is on; they scan for the
+word that matches what they want to change. Nineteen tabs is not scannable and nineteen rows
+is, and a row has space for a line under its name, which turns "what is this page" from a
+click into a read.
+
+**The levels are the idea.** A setting's level is a statement about where it travels, and
+getting that wrong stays invisible until somebody opens FLUX on a second machine and finds it
+has brought the first machine's disk layout along.
+
+| Level | Belongs to | Follows you to |
+|---|---|---|
+| **Account** | you | every machine you sign into |
+| **Workspace** | the shared world | every member and device in it |
+| **This device** | this computer | nowhere |
+
+So: appearance and hotkeys are yours and arrive wherever you sign in. Members, automations, API
+keys and preset libraries belong to the workspace, because several accounts can be in one and
+one account can be in several. Disks, audio interfaces, controllers and cache budgets stay on
+the machine they describe — a cache budget that followed an account from a workstation to a
+laptop would be wrong on both.
+
+A *project* setting is a fourth thing and it already has a home: sequence settings live in the
+`.fluxseq` document, which is where something that must still be true tomorrow on somebody
+else's computer has to live. If a setting ever wants to be in the document, it is not a
+settings page, it is a document field.
+
+#### None of it is wired yet, and every page says so
+
+The shape is the deliverable here. Nothing on any of the nineteen changes a setting yet. Every
+page is reachable and every page states what it will
+hold, specifically enough to disagree with — which is the point, because the ordering of this
+work is worth arguing about before any of it is built. [`docs/SETTINGS.md`](docs/SETTINGS.md)
+is the same content with the dependencies and the build order added.
+
+This follows the tool strip, where half the tools have always been unbuilt and have always said
+so: **an unbuilt thing says it is unbuilt and says what it will be, because a control that
+silently does nothing is a bug report waiting to be written.** There are no disabled sliders
+and no dead switches anywhere in the page — a planned page has prose, and prose cannot be
+mistaken for a feature.
+
+**Eight pages point at a setting that already exists**, with a button that goes there. That is
+not decoration. A page promising a cache setting the app has had for weeks is worse than a page
+saying nothing, because it sends somebody hunting for a feature they already own. The decoder
+pool and frame-memory budgets are in the performance dialog, preview resolution is in the
+Viewer's own toolbar, the keymap has been remappable data since the first week, and the MCP
+server already runs.
+
+#### It is a panel, which is what makes it a page
+
+Registered through the same `panels.register()` a community panel uses, shown in a workspace
+that fills the dock — the Export page's pattern, for the reason `kernel/workspaces.ts` gives.
+Nothing in the shell knows settings exist, so deleting one line removes the page cleanly.
+
+It also means Settings docks beside the Timeline, which is the only honest way anybody has
+tuned a cache: change the budget and watch what playback does to it.
+
+```bash
+npm run verify:settings
+```
+
+Five checks: all three ways in — tab, key and command — landing on the same panel; nineteen
+pages each opening to its own title with a plan long enough to be worth reading; no planned
+page carrying a control that cannot work; search reading the plans rather than the names, so
+"VST" finds Plugins; and every "Take me there" pointing at a command that is actually
+registered.
+
+**That last check found the one real bug in it.** `app.performance` was registered by the
+*Timeline panel*, so the command existed only while that panel was mounted — and the Settings
+workspace has no Timeline in it, so the Cache page's button would have done nothing at all. The
+dialog and its command belong to the app now, which is where a machine-wide setting always
+belonged. A setting that vanishes when a panel closes is the same shape of mistake as a mode
+owned by the panel that displays it, which is what `kernel/tools.ts` was written to avoid.
 
 ### Batch: a folder in, a folder out
 

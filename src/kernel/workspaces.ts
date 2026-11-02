@@ -6,12 +6,12 @@
  * and switching one changes only the arrangement of windows — never the project,
  * the selection or the playhead.
  *
- * There is one workspace right now, and that is deliberate. Sound Design and
- * Nodes / Motion were arrangements of a Mixer and a Node Map that did not exist
- * — three tabs that all showed the same three panels in slightly different
- * places. The mechanism is what matters and it is unchanged: add a definition
- * here and it gets a tab, a command and a slot in the keymap. The second
- * workspace arrives with the second thing worth arranging.
+ * There are three, and each arrived with something worth arranging. Sound
+ * Design and Nodes / Motion were arrangements of a Mixer and a Node Map that
+ * did not exist — three tabs that all showed the same three panels in slightly
+ * different places — and they were removed for it. The mechanism is what
+ * matters and it is unchanged: add a definition here and it gets a tab, a
+ * command and a slot in the keymap.
  *
  * A workspace has two possible sources of truth:
  *   - `build()`  — the shipped default, constructed programmatically.
@@ -106,9 +106,31 @@ function buildExport(api: DockviewApi) {
   api.getPanel('exportList')?.api.setActive()
 }
 
+/**
+ * SETTINGS — one panel, the whole dock.
+ *
+ * The third workspace, and the second thing that was worth arranging. It is
+ * one panel rather than several on purpose: settings are *found* by scanning
+ * a list of nineteen pages, and a list that has to share the window with a
+ * viewer and a timeline is a list nobody scans. The same reasoning the export
+ * page is built on, applied to a question that is read rather than watched.
+ *
+ * No Viewer and no Timeline, and that is the difference from Export, which
+ * keeps the Viewer because checking what you are about to write means looking
+ * at it. Nothing on a settings page is checked by looking at the picture — and
+ * for the handful of settings that *are* (a cache budget, a preview
+ * resolution), the panel can be dragged next to the Timeline, which is better
+ * than a viewer pinned to the right of a page that rarely wants one.
+ */
+function buildSettings(api: DockviewApi) {
+  api.addPanel({ id: 'settings', component: 'settings', title: 'Settings' })
+  api.getPanel('settings')?.api.setActive()
+}
+
 export const workspaces: WorkspaceDefinition[] = [
   { id: 'edit', name: 'Edit', hint: '1', build: buildEdit },
   { id: 'export', name: 'Export', hint: '2', build: buildExport },
+  { id: 'settings', name: 'Settings', hint: '3', build: buildSettings },
 ]
 
 export function getWorkspace(id: string): WorkspaceDefinition | undefined {

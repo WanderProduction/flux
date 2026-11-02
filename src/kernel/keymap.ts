@@ -33,6 +33,14 @@ export const defaultKeymap: Keymap = {
   'shift+m': 'marker.next',
   'ctrl+shift+m': 'marker.previous',
   '2': 'workspace.switch.export',
+  '3': 'workspace.switch.settings',
+  /*
+   * And the binding every application on every platform uses for settings, so
+   * nobody has to learn that this one is a workspace. It runs the same command
+   * the '3' above does — two chords, one answer, rather than a settings dialog
+   * for people who press Ctrl+, and a settings page for people who press 3.
+   */
+  'ctrl+,': 'workspace.switch.settings',
   /*
    * Send to render. The key every NLE uses for it — Premiere's Export, Media
    * Encoder's queue — so the muscle memory arrives with the user.

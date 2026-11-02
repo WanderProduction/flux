@@ -1,0 +1,194 @@
+# FLUX — Settings
+
+### Three levels, nineteen pages, and the order to build them in
+
+> Plan doc. The shell is built and every page in it is reachable. **None of the nineteen
+> changes a setting yet** — eight of them point at a setting that already exists somewhere
+> else in FLUX, and that is the closest any of them comes. This is the document that says what each one will hold and — more
+> usefully — what has to exist underneath it first.
+>
+> Open it in the app with `3` or `Ctrl ,` and read it there: each page states its own plan,
+> and the side panel's search reads those plans, so "VST" finds Plugins without knowing it is
+> called Plugins. This file is the same content with the dependencies and the ordering added.
+
+---
+
+## The one idea
+
+**A setting's level is a statement about where it travels.** That is the whole reason there are
+three of them rather than one long list, and getting it wrong is the kind of mistake that stays
+invisible until somebody opens FLUX on a second machine.
+
+| Level | It belongs to | It follows you to | It must never hold |
+|---|---|---|---|
+| **Account** | you | every machine you sign into | anything about a disk, a device, or other people |
+| **Workspace** | the shared world | every member and every device in it | anything true of only one computer |
+| **This device** | this computer | nowhere — it stays here | anything another machine would need |
+
+The user's framing of the third was *"local settings level, or device, or project — you name
+it"*. It is named for the device, because that is what the answers are about: which audio
+interface, which disks, how much of this machine's memory. **A project setting is a different
+idea and it already has a home** — sequence settings live in the `.fluxseq` document, which is
+where something that must still be true tomorrow on somebody else's computer has to live. If a
+setting ever wants to be in the document, it is not a settings page, it is a document field.
+
+### Why an account exists at all
+
+Because of the goal underneath this whole app: *edit anywhere, connect to any project, let
+others in when it helps.* That needs a thing that is **you** separately from the machine you
+happen to be sitting at, and a thing that is **the shared work** separately from either. An
+account is local first — it exists on this machine whether or not it has ever spoken to a
+server — so signing in is about claiming an account that is already here, not about being
+issued one. Nothing in FLUX stops working if the cloud is never switched on.
+
+---
+
+## Account
+
+Four pages. These are the ones a person notices in the first ten minutes.
+
+| Page | What it will hold | Needs first |
+|---|---|---|
+| **General** | Display name, email, avatar, sign in and out. Which workspace and project open on launch. | An account record on disk, and a store for it that is not the project document |
+| **Appearance** | Theme, accent, density, font and size, panel chrome. Later a custom stylesheet applied live. | Nothing — `styles/theme.css` is already the single place every colour resolves through |
+| **Notifications** | Per event: render done, render failed, batch finished, update ready, a collaborator saved. Toast, the work ring, the OS, or a phone. | An event bus worth subscribing to; most of these events are already emitted somewhere |
+| **Hotkeys & Presets** | Every command with its binding, click to rebind, conflict detection, named exportable sets. | Nothing — bindings are already a plain chord-to-command map |
+
+**Appearance and Hotkeys are the two to build first**, and for the same reason: the data model
+is already right. A skin is a file that redefines the tokens in `styles/theme.css` and nothing
+else; a keymap editor is a view over `defaultKeymap`. Neither needs an account, a workspace, or
+a server — so they are the pages that prove the shell with the least underneath them.
+
+---
+
+## Workspace
+
+Seven pages. This is where the collaboration story lives, and where almost nothing exists yet.
+
+| Page | What it will hold | Needs first |
+|---|---|---|
+| **General** | Name, logo, the projects in it, in an order you set. Archive without deleting. | A workspace record, and projects knowing which workspace they are in |
+| **Members and devices** | Invited people with roles, and your own machines — laptop, phone, workstation — each named and each sign-out-able | Identity, and then the sync layer |
+| **Automation and MCP** | Triggers and actions. The MCP server as something you can see: running, which tools, which model, and a log of what it did | Partly built — the control surface and MCP server work today |
+| **API and Webhooks** | Keys you can issue, scope and revoke. Webhooks per event with payload shapes, a delivery log and a retry | The same event bus Notifications needs |
+| **AI** | Bring-your-own-key per provider for language, vision, audio and upscale models. Direct providers and aggregators. A map from *job* to model | A secret store that is not a JSON file in plain text |
+| **Libraries** | Render presets, effect presets, title styles, LUTs, sound beds — stored with the workspace so every device has them | Presets existing as saveable things at all |
+| **Cloud** | The switch, and then what syncs, what happens to a file too large to send, and what happens when two people edit one sequence | Everything above it |
+
+Two notes on shape:
+
+**Members and devices is one page on purpose.** A colleague's laptop and your own phone are the
+same kind of thing to this app: something that may hold a copy of the workspace and sync changes
+into it. The question *"what can reach my work"* should have one answer, not two lists in two
+places that can disagree.
+
+**Automation and API are deliberately separate.** Automation is FLUX acting on itself — when a
+folder gains footage, import it; when a render finishes, move the file. API and Webhooks is FLUX
+talking to things that are not FLUX. They feel adjacent and they have different failure modes:
+an automation that misfires makes a mess in your project, a webhook that misfires makes a mess
+in somebody else's system.
+
+**Automation and MCP is the page to build first in this level**, because half of it already
+runs. The control surface and the MCP server are working today — a loopback port with a
+per-launch token, ten tools, and a model that can import an edit and start a render. What is
+missing is any way to *see* it: whether it is running, what it is allowed to do, and what it
+has actually done. That last one is the real feature. A model that can start a render on your
+machine should keep a log you can read.
+
+---
+
+## This device
+
+Eight pages. The least glamorous level and the one with the most immediate payoff, because
+these are the settings that decide whether the app is fast and whether the sound comes out of
+the right box.
+
+| Page | What it will hold | Needs first |
+|---|---|---|
+| **Controllers + Hardware** | A game controller mapped to the transport, touch adaptation, a headset later. CPU, GPU, memory, and every disk with its kind and free space | A hardware probe in main; partly there already |
+| **Audio** | Output device, sample rate, buffer. Input for live recording with a meter and monitoring. What to do when a USB interface disappears mid-session | Device enumeration, and the mixer taking a device rather than the default |
+| **Plugins** | Installed panels and extensions, VST/VST3 scan paths with what was found and what failed, and a folder of scripts | Nothing for panels — the registry is already the public seam |
+| **Saves** | Autosave interval and how many versions, where backups go, a list of them, opening one without overwriting. Save before a render | A backup writer |
+| **Display** | Pixel format and bit depth for the preview, colour management for this monitor, HDR, which screen a full-screen preview uses | Colour management, which is the real work |
+| **Mapping** | Clip label colours and what each means, marker colours, media icons, the colours the readiness strip uses | Nothing |
+| **Cache** | Where the index and thumbnail caches live and how large, with a size and a clear. Prerender and bake policy, including a shared folder. The memory budgets | Partly built — the performance dialog is these budgets |
+| **3D** | Import formats, scale and axis conventions, what to do with cameras and lights, which renderer | Reading a mesh at all |
+
+**Cache first, and it is not close.** Three of its numbers already exist and are already
+measured — the decoder pool, the frame-memory budget and the warm radius, each pinnable or left
+to follow the machine. What is missing is the rest of the page: where the caches are, how big
+they have grown, and a button that empties them. Those are the questions people actually ask,
+and today the only honest answer is "look in AppData yourself".
+
+**Then Audio**, because it is the one gap in this level that stops work rather than slowing it.
+A session mixed through motherboard output is a session mixed wrong, and there is currently no
+way to say otherwise.
+
+**Mapping is the cheapest page in the whole document** and worth doing early for that reason
+alone: it needs nothing to exist first, and it is a real customisation. If green means
+"approved" in your edit room, the app should be able to say green.
+
+---
+
+## What is already true
+
+Eight of the nineteen pages name a setting that **exists in FLUX today**, and each says so with
+a button that takes you to it. This matters more than it sounds: a page promising a cache
+setting the app has had for weeks is worse than a page saying nothing, because it sends somebody
+looking for a feature they already own.
+
+| Page | What exists | Where |
+|---|---|---|
+| Appearance | Panel arrangement and named layouts | Window menu, workspace tabs |
+| Hotkeys & Presets | Bindings as remappable data; current chord shown per command | `kernel/keymap.ts`, command palette |
+| Automation and MCP | The control surface and the MCP server | Loopback port with a per-launch token, `mcp/server.mjs` |
+| Controllers + Hardware | What the machine would choose for playback, read from the machine | Performance dialog |
+| Audio | The sequence's rate and channel count | Sequence settings (a document fact, not a device one) |
+| Saves | Saving the project | `Ctrl S` |
+| Display | Preview resolution, separately for playing and for a paused frame | Viewer toolbar |
+| Cache | Decoder pool, frame memory, warm radius | Performance dialog |
+
+---
+
+## How the page is built
+
+It is a **panel**, registered through the same `panels.register()` a community panel uses, shown
+in a workspace of its own that fills the dock. Not a modal, and not a special case the shell
+knows about — deleting one line from `src/panels/index.ts` removes it cleanly.
+
+That is the Export page's pattern, and the reasoning in `kernel/workspaces.ts` applies
+unchanged: Premiere, Resolve and Media Encoder all reach "a whole page rather than a dialog"
+because a question you cannot answer from a corner of the screen should not be asked in a corner
+of the screen. It also means Settings can be docked beside the Timeline — which is the only
+honest way anybody has ever tuned a cache: change the budget and watch what playback does.
+
+The content is data. `src/kernel/settings.ts` holds the levels and the pages; the panel is a
+view over it. A page becoming real means giving it a component, not restructuring anything.
+
+### The rule every page follows
+
+From `kernel/tools.ts`, where half the tool strip has always been unbuilt and has always said
+so: **an unbuilt thing says it is unbuilt and says what it will be. A control that silently
+does nothing is a bug report waiting to be written.**
+
+So there are no disabled sliders and no dead switches anywhere in here. A planned page has
+*prose*, and prose cannot be mistaken for a feature. `npm run verify:settings` asserts exactly
+that — it opens all nineteen pages and fails if any planned one carries an input, a select, a
+textarea, a switch, a slider, or any button other than one that runs a command that really
+exists.
+
+```bash
+npm run verify:settings
+```
+
+Five checks: all three ways in land on the same panel; three levels and nineteen pages, each one
+opening to its own title with a plan long enough to be worth reading; no page drawn as working
+that is not; search reading the plans and not just the names; and every "Take me there" pointing
+at a registered command.
+
+That last check found the one real bug in this work. `app.performance` was registered by the
+**Timeline panel**, so the command existed only while that panel was mounted — and the Settings
+workspace has no Timeline in it. The Cache page's button would have done nothing. The dialog and
+its command now belong to the app, which is where a machine-wide setting always belonged: a
+setting that disappears when a panel closes has the same shape as a mode owned by the panel that
+displays it, which is the mistake `kernel/tools.ts` was written to avoid.

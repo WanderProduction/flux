@@ -102,7 +102,6 @@ import { activeTool, subscribeTool, type ToolId } from '../kernel/tools'
 import { getAssets as allAssets } from '../kernel/assets'
 import { PanelFrame } from './PanelFrame'
 import { ReadinessStrip, READINESS_HEIGHT } from './ReadinessStrip'
-import { PerformanceDialog } from './PerformanceDialog'
 import { SequenceSettingsDialog } from './SequenceSettingsDialog'
 import { useThumbnail } from './useThumbnail'
 
@@ -2521,13 +2520,6 @@ export function TimelinePanel() {
         run: rippleDelete,
       },
       {
-        id: 'app.performance',
-        title: 'Performance Settings',
-        category: 'App',
-        detail: 'How much of this machine FLUX may spend on playback',
-        run: () => setPerformanceOpen(true),
-      },
-      {
         id: 'timeline.zoomToFit',
         title: 'Zoom To Fit',
         category: 'Timeline',
@@ -2819,7 +2811,6 @@ export function TimelinePanel() {
   const drawnTicks = Math.max(0, lastTick - firstTick + 1)
   const allSequences = listSequences()
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [performanceOpen, setPerformanceOpen] = useState(false)
 
   return (
     <PanelFrame
@@ -2873,9 +2864,12 @@ export function TimelinePanel() {
             >
               Settings
             </button>
+            {/* Runs the command rather than opening the dialog itself: the
+                dialog is the app's now, because a machine-wide setting that
+                vanished when this panel closed was only reachable from here. */}
             <button
               className="cb-btn"
-              onClick={() => setPerformanceOpen(true)}
+              onClick={() => void commands.run('app.performance')}
               title="How much of this machine FLUX may spend on playback"
             >
               Performance
@@ -2909,7 +2903,6 @@ export function TimelinePanel() {
         activeId={sequence.id}
         onRename={(id, name) => renameSequence(id, name)}
       />
-      {performanceOpen && <PerformanceDialog onClose={() => setPerformanceOpen(false)} />}
       {settingsOpen && (
         <SequenceSettingsDialog sequence={sequence} onClose={() => setSettingsOpen(false)} />
       )}

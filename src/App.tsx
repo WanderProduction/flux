@@ -29,6 +29,7 @@ import { CommandPalette } from './shell/CommandPalette'
 import { UpdateBadge } from './shell/UpdateBadge'
 import { MediaWorkRing } from './shell/MediaWorkRing'
 import { ImportChoiceHost } from './shell/ImportChoiceHost'
+import { PerformanceDialog } from './panels/PerformanceDialog'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
 import {
   closeProject,
@@ -94,6 +95,16 @@ function Workspace({ project }: { project: Project }) {
     setActiveId(id)
   }, [])
   const [paletteOpen, setPaletteOpen] = useState(false)
+  /*
+   * How much of this machine FLUX may spend.
+   *
+   * Owned here rather than by the Timeline, which used to own it. Nothing
+   * about a decoder pool or a frame-memory budget is about the timeline, and
+   * registering the command there meant it existed only while that panel was
+   * mounted — so it was missing from any workspace without a Timeline in it,
+   * which the settings page then pointed at and could not reach.
+   */
+  const [performanceOpen, setPerformanceOpen] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [openSequence, setOpenSequence] = useState(() => getSequence().name)
   const [dirty, setDirty] = useState(isDirty)
@@ -350,6 +361,13 @@ function Workspace({ project }: { project: Project }) {
         detail: 'Rearranges panels only — project, selection and playhead are untouched',
         run: () => applyWorkspace(workspace.id),
       })),
+      {
+        id: 'app.performance',
+        title: 'Performance Settings',
+        category: 'App',
+        detail: 'How much of this machine FLUX may spend on playback',
+        run: () => setPerformanceOpen(true),
+      },
       {
         id: 'workspace.save',
         title: 'Save Current Layout',
@@ -723,6 +741,7 @@ function Workspace({ project }: { project: Project }) {
         lookupChord={keymap.lookup}
       />
       <ImportChoiceHost />
+      {performanceOpen && <PerformanceDialog onClose={() => setPerformanceOpen(false)} />}
       {layoutDialog && (
         <div
           className="layout-sheet-backdrop"

@@ -19,6 +19,7 @@ import { BatchPanel } from './BatchPanel'
 import { RenderPanel } from './RenderPanel'
 import { ExportListPanel } from './ExportListPanel'
 import { EffectControlsPanel } from './EffectControlsPanel'
+import { SettingsPanel } from './SettingsPanel'
 
 export function registerBuiltinPanels() {
   panels.registerAll([
@@ -69,6 +70,23 @@ export function registerBuiltinPanels() {
       title: 'To render',
       description: 'What is about to be written, with the pictures to check it by',
       component: ExportListPanel,
+    },
+    /*
+     * Settings is a panel, which is what makes it a page rather than a modal:
+     * it gets a workspace that fills the dock, exactly as the export page
+     * does. It can also be docked beside the Timeline, which is the only
+     * honest way anybody has ever tuned a cache — change the budget and watch
+     * what playback does to it.
+     *
+     * Note what this entry is *not*: a special case. The shell knows nothing
+     * about settings, so this is the same call a community panel makes, and
+     * deleting this line removes the page cleanly.
+     */
+    {
+      id: 'settings',
+      title: 'Settings',
+      description: 'Account, workspace and this device — and the plan for all of it',
+      component: SettingsPanel,
     },
   ])
 }
