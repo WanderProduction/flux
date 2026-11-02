@@ -20,6 +20,18 @@ export const defaultKeymap: Keymap = {
   'ctrl+3': 'panel.focus.content',
   'ctrl+4': 'panel.focus.batch',
   'ctrl+5': 'panel.focus.render',
+  /*
+   * M for a marker, the key every NLE uses. Shift+M and Ctrl+Shift+M walk
+   * between them, which is Premiere's own pair — and deliberately not the
+   * arrows, which already step a frame at a time.
+   *
+   * Ctrl+M is NOT one of them here: it is already Send to Render, which is the
+   * same key Premiere gives to Export and Media Encoder gives to its queue.
+   * Marker navigation is reached far less often than a render is started.
+   */
+  m: 'marker.add',
+  'shift+m': 'marker.next',
+  'ctrl+shift+m': 'marker.previous',
   '2': 'workspace.switch.export',
   /*
    * Send to render. The key every NLE uses for it — Premiere's Export, Media

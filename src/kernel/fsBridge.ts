@@ -71,6 +71,8 @@ interface FsBridge {
   exists: (paths: string[]) => Promise<Record<string, boolean>>
   scan: (dirPath: string) => Promise<ScanResult>
   pickFiles: () => Promise<string[]>
+  pickSequenceXml: () => Promise<string | null>
+  readText: (filePath: string) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
   assetUrl: (filePath: string) => string
 }
 
@@ -97,6 +99,12 @@ export const existsMany = (paths: string[]): Promise<Record<string, boolean>> =>
 /** Every media file under a folder, proxy and cache folders walked past. */
 export const scanFootage = (dirPath: string): Promise<ScanResult> => requireFs().scan(dirPath)
 export const pickFiles = (): Promise<string[]> => requireFs().pickFiles()
+/** An interchange file to import — xmeml, as Premiere and Resolve write it. */
+export const pickSequenceXml = (): Promise<string | null> => requireFs().pickSequenceXml()
+/** Reads a text file. For edits and cut lists, which are descriptions, not media. */
+export const readTextFile = (
+  filePath: string,
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> => requireFs().readText(filePath)
 export const assetUrl = (filePath: string): string => requireFs().assetUrl(filePath)
 
 /** `C:\Users\nikol\Videos` -> crumbs labelled per segment, each with its own absolute path. */

@@ -3746,3 +3746,54 @@ kbd {
   border-color: var(--flux-line, #2a3140);
   color: inherit;
 }
+
+/* ── Timeline markers ─────────────────────────────────────────────
+   A point is a flag; a span is a flag with a bar running to its end.
+   Colour comes through a custom property so a marker imported with
+   Premiere's own colour can override the default without inline rules
+   fighting the stylesheet. */
+.tl-marker {
+  --marker-colour: var(--flux-driver);
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  /* Flag at the top, name at the bottom. The ruler's own timecode labels sit
+     along the top edge, and a name beside the flag lands straight on top of
+     them — unreadable at every zoom where both are present, which is all of
+     them. */
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  pointer-events: none;
+  z-index: 2;
+}
+.tl-marker-flag {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  background: var(--marker-colour);
+  /* A pennant: square at the mast, cut away at the bottom right, so the
+     left edge reads as the exact frame it marks. */
+  clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 100%);
+}
+.tl-marker--span {
+  /* The bar is the element's own background, behind the flag. */
+  background: color-mix(in srgb, var(--marker-colour) 22%, transparent);
+  border-left: 1px solid var(--marker-colour);
+  border-right: 1px solid color-mix(in srgb, var(--marker-colour) 55%, transparent);
+}
+
+/* A clip too thin to afford its own borders.
+   `.clip` is border-box with a 1px border each side, so a block can never
+   render narrower than 2px however small its inline width — and that, not the
+   JavaScript floor above it, is the irreducible reason butted sub-second clips
+   were drawn on top of each other while the sequence itself was correct.
+   Below three pixels the sides come off and the block can be the width it
+   really is. It reads as a hairline, which is what a clip that small is; the
+   alternative is a 2px block sitting over its neighbour. */
+.clip--hairline {
+  border-left-width: 0;
+  border-right-width: 0;
+  border-radius: 0;
+}

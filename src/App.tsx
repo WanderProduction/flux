@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent } from 'dockview'
 
 import { commands } from './kernel/commands'
+import { importEditDocument } from './kernel/importEdit'
+import { startControlServer, stopControlServer } from './kernel/controlBridge'
+import { addMarker, markerAt, markerNear, removeMarkers } from './kernel/sequence'
+import { getTime, seek } from './kernel/playback'
+import { pickSequenceXml, readTextFile } from './kernel/fsBridge'
+import { readXmeml } from '../shared/xmeml.js'
 import { panels } from './kernel/panels'
 import { createKeymapController, defaultKeymap } from './kernel/keymap'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
@@ -365,6 +371,134 @@ function Workspace({ project }: { project: Project }) {
         run: async () => {
           const result = await saveProject()
           say(result.ok ? 'Project saved' : `Could not save: ${result.error}`)
+        },
+      },
+      {
+        id: 'marker.add',
+        title: 'Add Marker',
+        category: 'Timeline',
+        detail: 'At the playhead, or over the marked span when there is one',
+        run: () => {
+          /*
+           * Over the marked range when there is one, and a point otherwise.
+           * Someone who has just marked in and out and reaches for a marker
+           * means that span — making them mark it twice would be the kind of
+           * small stupidity that stops people using a feature.
+           */
+          const { inPoint, outPoint } = getSequence().range ?? { inPoint: null, outPoint: null }
+          const spanned = inPoint !== null && outPoint !== null && outPoint > inPoint
+          const made = addMarker(
+            spanned ? { start: inPoint, end: outPoint } : { start: getTime() },
+          )
+          say(made ? (spanned ? 'Marker over the marked span' : 'Marker added') : 'Could not add a marker')
+        },
+      },
+      {
+        id: 'marker.delete',
+        title: 'Delete Marker at Playhead',
+        category: 'Timeline',
+        run: () => {
+          const here = markerAt(getTime())
+          if (!here) {
+            say('No marker at the playhead')
+            return
+          }
+          removeMarkers([here.id])
+          say(here.name ? `Deleted “${here.name}”` : 'Marker deleted')
+        },
+      },
+      {
+        id: 'marker.next',
+        title: 'Go to Next Marker',
+        category: 'Timeline',
+        run: () => {
+          const next = markerNear(getTime(), 1)
+          if (!next) {
+            say('No marker after this')
+            return
+          }
+          seek(next.start)
+          if (next.name) say(next.name)
+        },
+      },
+      {
+        id: 'marker.previous',
+        title: 'Go to Previous Marker',
+        category: 'Timeline',
+        run: () => {
+          const previous = markerNear(getTime(), -1)
+          if (!previous) {
+            say('No marker before this')
+            return
+          }
+          seek(previous.start)
+          if (previous.name) say(previous.name)
+        },
+      },
+      {
+        id: 'control.start',
+        title: 'Start Local Control Server',
+        category: 'Project',
+        detail: 'Lets an MCP server — and so a model — drive FLUX on this machine',
+        run: async () => {
+          const result = await startControlServer()
+          if (!result.ok) {
+            say(`Could not start: ${result.error}`)
+            return
+          }
+          /*
+           * The port is said; the token is not. It is written to a file
+           * that only a program running as this user can read, and putting
+           * it in a toast would be putting it on screen in every recording
+           * and screenshot of this app.
+           */
+          say(
+            result.already
+              ? `Already listening on 127.0.0.1:${result.port}`
+              : `Listening on 127.0.0.1:${result.port} — token in the app data folder`,
+          )
+        },
+      },
+      {
+        id: 'control.stop',
+        title: 'Stop Local Control Server',
+        category: 'Project',
+        run: async () => {
+          const stopped = await stopControlServer()
+          say(stopped ? 'Control server stopped' : 'It was not running')
+        },
+      },
+      {
+        id: 'edit.importXml',
+        title: 'Import Sequence XML…',
+        category: 'Project',
+        detail: 'A Premiere or Resolve sequence, as clips on a new timeline',
+        run: async () => {
+          const file = await pickSequenceXml()
+          if (!file) return
+          const read = await readTextFile(file)
+          if (!read.ok) {
+            say(`Could not read that file: ${read.error}`)
+            return
+          }
+          const parsed = readXmeml(read.text)
+          if (!parsed.ok) {
+            say(parsed.error)
+            return
+          }
+          const result = await importEditDocument(parsed.document)
+          /*
+           * The warning count is said out loud rather than swallowed. An
+           * import that quietly left a nest, a marker set and fourteen
+           * offline sources behind looks exactly like one that worked.
+           */
+          say(
+            result.placed > 0
+              ? `${result.placed} clips on “${result.sequenceName}”` +
+                (result.warnings.length ? ` — ${result.warnings.length} warning(s)` : '')
+              : 'Nothing could be placed — none of its media was found',
+          )
+          for (const warning of result.warnings) console.warn('[flux] import:', warning)
         },
       },
       {

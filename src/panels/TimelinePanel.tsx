@@ -160,16 +160,76 @@ function wheelPixels(event: WheelEvent): number {
 }
 
 /**
+ * The widest element a browser will lay out, in CSS pixels.
+ *
+ * Not a guess and not a round number: it is the engine's own limit, and past
+ * it an element is silently given a different width than it was told. The
+ * timeline's content is one element `duration * zoom` wide, so this is a hard
+ * ceiling on the product of the two — and the failure if it is crossed is the
+ * worst kind, because nothing errors. The ruler, the clips and the playhead
+ * are all positioned in the same space and they would simply stop agreeing
+ * with each other, somewhere off to the right.
+ *
+ * Checked at runtime rather than trusted: `verify-still-layers` lays out an
+ * element this wide and reads back what it got.
+ */
+const MAX_ELEMENT_PX = 33_554_428
+
+/**
+ * How far *in* the zoom is allowed to go, for a sequence this long.
+ *
+ * The mirror of `widestUseful`, and it exists because the sequence ceiling and
+ * the layout ceiling are different limits that are easy to confuse. A sequence
+ * may be a hundred hours — see `MAX_SEQUENCE_SECONDS` — and at `MAX_ZOOM`
+ * that would be a hundred and forty million pixels, four times what any
+ * browser will lay out. Something has to give, and it is not the edit: a
+ * hundred hours at ninety pixels a second is still twenty-two pixels a frame,
+ * so nothing anybody does on a timeline that long is out of reach.
+ *
+ * It matters at twenty-three hours and above, which is reachable now that
+ * there is a limit at all. Below that it returns `MAX_ZOOM` and this is not
+ * in anybody's way.
+ */
+function tightestUseful(length: number): number {
+  if (!(length > 0)) return MAX_ZOOM
+  /*
+   * A hundredth off the limit, because the content width is not the widest
+   * thing in the content.
+   *
+   * The ruler lays out `ceil(width / step) + 1` ticks, so the last one sits a
+   * step *past* the end, and the end marker is positioned at the end itself.
+   * Measured with no reserve at all: the panel asked for 33,554,400px and the
+   * engine laid out 33,554,428 — the clamp exactly — because a child reached
+   * past it. Nothing was visibly wrong, since everything inside is positioned
+   * absolutely, but a layout sitting on the engine's clamp is one change away
+   * from being quietly truncated and there is nothing to spend by avoiding it.
+   *
+   * A hundredth of the limit is 335,000px, which at this zoom is about an hour
+   * of timeline, and it costs a hundred hours less than a pixel a second.
+   */
+  return Math.min(MAX_ZOOM, (MAX_ELEMENT_PX * 0.99) / (length + CONTENT_SLACK))
+}
+
+/**
  * Keeps a zoom usable. Also guards the value read back from a document: a
  * hand-edited .flux with zoom 0 would give every clip zero width and an empty
  * timeline that looks like lost work.
  *
  * `floor` is for the one case where `MIN_ZOOM` is itself the wrong answer: see
  * `widestUseful`.
+ *
+ * The ceiling is worked out here rather than passed in, and that is the point:
+ * six places set the zoom and only three of them have a length in hand, so a
+ * ceiling they had to supply would be a ceiling three of them did not apply.
+ * The length is asked of the sequence instead, which every caller shares.
  */
 function clampZoom(pixelsPerSecond: number, floor = MIN_ZOOM): number {
   if (!Number.isFinite(pixelsPerSecond) || pixelsPerSecond <= 0) return DEFAULT_ZOOM
-  return Math.min(MAX_ZOOM, Math.max(floor, pixelsPerSecond))
+  const ceiling = tightestUseful(sequenceDuration())
+  // A floor above the ceiling is possible on a very long sequence, where
+  // "fit the whole thing on screen" is further in than the layout allows.
+  // The ceiling wins: it is the one that cannot be broken.
+  return Math.min(ceiling, Math.max(Math.min(floor, ceiling), pixelsPerSecond))
 }
 
 /**
@@ -1469,15 +1529,25 @@ export function TimelinePanel() {
         const asset = await ensureProbed(assetId)
         if (!asset || asset.missing || asset.unreadable || !asset.duration) continue
 
-        // Cheap: the audio track's index, not its waveform. See media/peaks.ts.
-        const sound = await audioStateFor(asset.path)
-        const hasAudio = sound.kind === 'sound'
+        /*
+         * A still is never asked about its soundtrack.
+         *
+         * Not an optimisation — a correctness point. `audioStateFor` reads an
+         * mp4 index, so handing it a JPEG gets back "unreadable", and the
+         * notice below would then tell somebody who dropped a photograph that
+         * FLUX cannot read its audio yet. It has none to read. The absence of
+         * sound in a picture is not a fault to report, and the same reasoning
+         * already applies to footage whose audio was deliberately stripped.
+         */
+        const still = asset.kind === 'image'
+        const sound = still ? null : await audioStateFor(asset.path)
+        const hasAudio = sound?.kind === 'sound'
         const silence =
-          sound.kind === 'silent'
-            ? `${asset.name} has no soundtrack`
-            : sound.kind === 'unreadable'
-              ? `${asset.name}: FLUX cannot read this file's audio yet (${sound.detail})`
-              : null
+          !sound || sound.kind === 'sound'
+            ? null
+            : sound.kind === 'silent'
+              ? `${asset.name} has no soundtrack`
+              : `${asset.name}: FLUX cannot read this file's audio yet (${sound.detail})`
 
         /*
          * The first clip into an empty sequence decides what the sequence is.
@@ -1492,14 +1562,19 @@ export function TimelinePanel() {
          * container, for the reason media/indexCache.ts gives.
          */
         if (getSequence().clips.length === 0) {
-          const video = await videoInfoFor(asset.path)
+          // A still has no video track to read a rate off, so the sequence
+          // keeps its default rate and takes only the picture's shape. A
+          // sequence whose first clip is a photograph has no frame rate in it
+          // to discover, and inventing one from the image would be a number
+          // nobody chose.
+          const video = still ? null : await videoInfoFor(asset.path)
           updateSequenceSettings({
             ...(video
               ? { width: video.width, height: video.height, frameRate: round(video.frameRate) }
               : asset.width && asset.height
                 ? { width: asset.width, height: asset.height }
                 : {}),
-            ...(sound.kind === 'sound'
+            ...(sound?.kind === 'sound'
               ? {
                   // The rest of the audio settings are left alone: the file
                   // says what it was recorded at, not what the sequence should
@@ -1528,7 +1603,7 @@ export function TimelinePanel() {
          * hand. It now falls through and lands whole, with the sound on the
          * track it was aimed at; see addLinkedClips.
          */
-        if (track.kind === 'audio' && asset.kind !== 'video') {
+        if (track.kind === 'audio' && !still && asset.kind !== 'video') {
           if (!hasAudio) {
             notices.push(`${silence}, so there is nothing to put on an audio track`)
             continue
@@ -1543,8 +1618,24 @@ export function TimelinePanel() {
           continue
         }
 
+        /*
+         * A picture dropped on an audio track lands on a video one.
+         *
+         * `addLinkedClips` already does this for a silent file — the picture
+         * goes to the lowest video track that will have it rather than
+         * nowhere — and a still is the same case with more certainty behind
+         * it. Refusing the drop would be defensible and is what Premiere
+         * does; putting the clip where it can only have meant to go is
+         * better, and it is the behaviour already written and tested.
+         */
         const { video } = addLinkedClips(
-          { assetId, trackId: track.id, start: cursor, duration: asset.duration },
+          {
+            assetId,
+            trackId: track.id,
+            start: cursor,
+            duration: asset.duration,
+            ...(still ? { still: true } : {}),
+          },
           hasAudio,
         )
         if (video) cursor = video.start + video.duration
@@ -2865,6 +2956,37 @@ export function TimelinePanel() {
           <div className="tl-content" style={{ width: contentWidth }}>
             <ReadinessStrip zoom={zoom} onScreen={onScreen} />
             <div className="tl-ruler" onPointerDown={beginScrub}>
+              {/*
+                Markers, under the ticks and over the band. A point is a flag;
+                a span is a flag with a bar running to its end.
+
+                No name is drawn, and that is measured rather than assumed: the
+                ruler is 22px tall and the tick labels already occupy its
+                middle, so a name stacked above or below one overlaps it at
+                every zoom. The flag carries the position, which is the part
+                that has to be on the ruler; the name and the comment ride in
+                the tooltip until there is a markers list to put them in.
+              */}
+              {sequence.markers.map((marker) => (
+                <div
+                  className={
+                    marker.end > marker.start ? 'tl-marker tl-marker--span' : 'tl-marker'
+                  }
+                  key={marker.id}
+                  style={{
+                    left: marker.start * zoom,
+                    ...(marker.end > marker.start
+                      ? { width: Math.max(2, (marker.end - marker.start) * zoom) }
+                      : {}),
+                    ...(marker.colour ? { ['--marker-colour' as string]: marker.colour } : {}),
+                  }}
+                  title={
+                    marker.comment ? `${marker.name || 'Marker'} — ${marker.comment}` : marker.name
+                  }
+                >
+                  <span className="tl-marker-flag" />
+                </div>
+              ))}
               {Array.from({ length: drawnTicks }, (_, n) => {
                 // Keyed and positioned by its absolute index, not its place in
                 // the drawn run, so scrolling moves the window rather than
@@ -2956,9 +3078,28 @@ export function TimelinePanel() {
                 // clip's own handler stops the press before it arrives.
                 onPointerDown={(e) => beginMarquee(e, track)}
               >
-                {sequence.clips
-                  .filter((clip) => clip.trackId === track.id && drawn(clip))
-                  .map((clip) => {
+                {(() => {
+                  /*
+                   * Sorted once per lane so each block can be told how much
+                   * room it has before the next one. Done here rather than in
+                   * the block because a block cannot see its neighbours, and
+                   * doing it per block would be a scan of the lane per clip.
+                   *
+                   * Over the whole lane, not only what is drawn: the clip
+                   * after this one may be off screen and is still the thing
+                   * this one must not run into.
+                   */
+                  const lane = sequence.clips
+                    .filter((clip) => clip.trackId === track.id)
+                    .sort((a, b) => a.start - b.start)
+                  const roomFor = new Map<string, number>()
+                  for (let i = 0; i < lane.length; i++) {
+                    const next = lane[i + 1]
+                    roomFor.set(lane[i].id, next ? next.start - lane[i].start : Infinity)
+                  }
+                  return lane
+                    .filter((clip) => drawn(clip))
+                    .map((clip) => {
                     const dragging = drag?.moved === true && drag.ids.includes(clip.id)
                     const copying = dragging && drag?.copying === true
                     const trimming = trim?.ids.includes(clip.id) ? trim : null
@@ -2968,6 +3109,7 @@ export function TimelinePanel() {
                         clip={clip}
                         asset={assetById.get(clip.assetId)}
                         zoom={zoom}
+                        room={roomFor.get(clip.id) ?? Infinity}
                         selected={selected.has(clip.id)}
                         dragging={dragging}
                         copying={copying}
@@ -2988,8 +3130,9 @@ export function TimelinePanel() {
                         offsetY={dragging ? drag.deltaTracks * TRACK_HEIGHT : 0}
                         onPointerDown={(event) => beginClipDrag(event, clip)}
                       />
-                    )
-                  })}
+                      )
+                    })
+                })()}
 
                 {gap?.trackId === track.id && (
                   <div
@@ -3282,6 +3425,7 @@ function ClipBlock({
   clip,
   asset,
   zoom,
+  room,
   selected,
   dragging,
   copying,
@@ -3296,6 +3440,13 @@ function ClipBlock({
   clip: Clip
   asset: Asset | undefined
   zoom: number
+  /**
+   * Seconds between this clip's start and the next clip's on the same lane.
+   *
+   * Infinity when nothing follows it, which is what lets the last clip on a
+   * lane still take its minimum width.
+   */
+  room: number
   selected: boolean
   dragging: boolean
   copying: boolean
@@ -3317,7 +3468,37 @@ function ClipBlock({
   // pointer is the edit.
   const speed = stretching ? (clip.duration * clip.speed) / Math.max(duration, 1e-6) : clip.speed
   const offset = stretching ? clip.offset : clip.offset + trimStart * clip.speed
-  const width = Math.max(2, duration * zoom)
+  /*
+   * Wide enough to see, but never wider than the room there is.
+   *
+   * A block has a minimum width so that a clip too short to draw is still
+   * something a pointer can hit. Applied unconditionally — which is what it
+   * was — that minimum pushes a block past the start of the next one, and
+   * butted clips are drawn on top of each other while the sequence itself is
+   * beyond reproach. At a zoom that fits a 23-minute batch import on screen
+   * that is every clip under about three seconds, which on a reel is most of
+   * them. The worst of it is that a short clip between two longer ones can be
+   * painted over completely: it looks like dragging it somewhere deleted it.
+   *
+   * So the minimum applies only into space that is empty. `room` is the
+   * distance to the next clip on this lane, and a clip butted against its
+   * neighbour therefore draws at its true width however thin that is — a
+   * hairline, which is honest, rather than a block overlapping the next one,
+   * which is a lie about the edit.
+   *
+   * A clip being dragged is exempt: it has been lifted out of the lane, the
+   * neighbour it is about to land on is not something it is overlapping yet,
+   * and a block that got thinner as it approached one would be alarming.
+   */
+  const full = duration * zoom
+  /*
+   * Never wider than the room, and never thinner than the clip really is.
+   * The second half only matters if the sequence itself ever held two clips
+   * on top of each other — it does not, and a width of zero would be worse
+   * than a hairline if it ever did.
+   */
+  const cap = Math.max(room * zoom, full)
+  const width = dragging ? Math.max(2, full) : Math.min(Math.max(2, full), cap)
 
   // The asset can be gone while the clip remains: removing something from the
   // bin must not silently delete the editing work that used it.
@@ -3331,11 +3512,15 @@ function ClipBlock({
   const state = orphaned || asset.missing ? ' clip--orphan' : ''
   // Says so only when it is: a clip playing its whole file has nothing to
   // report, and a badge on every clip would say nothing at all.
-  const trimmed = offset > EPS_UI || offset + duration < clip.sourceDuration - EPS_UI
+  // Never on a still: "from 0.00s of 5.00s" would describe a range inside a
+  // file that has no length, and the five seconds it names is the default a
+  // drop gives a picture rather than anything the file says.
+  const trimmed =
+    !clip.still && (offset > EPS_UI || offset + duration < clip.sourceDuration - EPS_UI)
 
   return (
     <div
-      className={`clip clip--${clip.kind}${state}${selected ? ' clip--selected' : ''}${
+      className={`clip clip--${clip.kind}${state}${width < 3 ? ' clip--hairline' : ''}${selected ? ' clip--selected' : ''}${
         dragging ? ' clip--dragging' : ''
       }${copying ? ' clip--copying' : ''}`}
       // Named, because blocks are drawn only near the viewport now and a

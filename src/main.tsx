@@ -33,6 +33,12 @@ import * as peaks from './kernel/media/peaks'
 import * as mixer from './kernel/media/mixer'
 import * as audioSource from './kernel/media/audioSource'
 import * as selection from './kernel/selection'
+import * as controlOps from './kernel/controlOps'
+import * as controlBridge from './kernel/controlBridge'
+import { listenForControl } from './kernel/controlBridge'
+import * as importEdit from './kernel/importEdit'
+import * as xmeml from '../shared/xmeml.js'
+import * as editDocument from '../shared/editDocument.js'
 import * as renderQueue from './kernel/renderQueue'
 import * as renderSettings from './kernel/renderSettings'
 import * as batchImport from './kernel/batchImport'
@@ -51,6 +57,14 @@ registerBuiltinPanels()
  * lose by closing a window is not a tool.
  */
 registerToolCommands()
+
+/*
+ * The control surface answers from here rather than from a panel, for the
+ * reason kernel/controlBridge.ts gives: it has to answer whether or not
+ * anything is on screen. Registering the handler does not open the port —
+ * that is still a deliberate act, by command.
+ */
+listenForControl()
 
 /**
  * The mixer listens to the transport for the whole life of the app.
@@ -108,6 +122,11 @@ if (import.meta.env.DEV) {
        * has nothing to do with the code under test.
        */
       selection,
+      controlOps,
+      controlBridge,
+      importEdit,
+      xmeml,
+      editDocument,
       renderQueue,
       renderSettings,
       batchImport,

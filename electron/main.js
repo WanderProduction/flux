@@ -16,6 +16,7 @@ import {
 } from './filesystem.js'
 import { buildAppMenu, updateAppMenu } from './appMenu.js'
 import { serveFile } from './assetServer.js'
+import { DEFAULT_PORT, mintToken, startControl, writeToken } from './control.js'
 import { checkEncoder, findTools } from './render.js'
 import { RenderQueue } from './renderQueue.js'
 import {
@@ -606,6 +607,32 @@ ipcMain.handle('dialog:pickDirectory', async (event) => {
   return result.canceled ? null : (result.filePaths[0] ?? null)
 })
 
+/**
+ * An edit to import. Separate from dialog:pickFiles because that one filters to
+ * media FLUX can decode, and an xmeml file is not media — it is a description
+ * of where media goes.
+ */
+ipcMain.handle('dialog:pickSequenceXml', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Import a sequence',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Premiere / Resolve sequence', extensions: ['xml'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  return result.canceled ? null : (result.filePaths[0] ?? null)
+})
+
+ipcMain.handle('fs:readText', async (_e, filePath) => {
+  try {
+    return { ok: true, text: await fs.readFile(filePath, 'utf8') }
+  } catch (err) {
+    return { ok: false, error: err.code === 'ENOENT' ? 'not-found' : (err.message ?? 'unreadable') }
+  }
+})
+
 ipcMain.handle('dialog:pickOutputDirectory', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const result = await dialog.showOpenDialog(win, {
@@ -673,6 +700,109 @@ ipcMain.handle('render:state', () => (queue ? queue.state() : null))
  * just watched scroll past is a small cruelty.
  */
 ipcMain.handle('render:reveal', (_e, dirPath) => shell.openPath(dirPath))
+
+// ── the control surface ───────────────────────────────────────
+//
+// Off until asked for. See electron/control.js for why a loopback port that
+// can start a render is held to a different standard than one that serves
+// files.
+
+let control = null
+let controlToken = null
+
+/**
+ * One operation, answered by the renderer.
+ *
+ * The kernel lives there — the planners, the stores, the queue's list — so an
+ * operation is a round trip rather than something main can answer itself. The
+ * id is what lets several be in flight at once, which they will be the moment
+ * a caller stops waiting for each one.
+ */
+let nextCall = 0
+function askRenderer(op, params) {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (!win || win.isDestroyed()) {
+    return Promise.reject(new Error('FLUX has no window open'))
+  }
+  const id = `c${(nextCall += 1)}`
+  return new Promise((resolve, reject) => {
+    /*
+     * A timeout, because a renderer that never answers would otherwise hold
+     * the HTTP request open for ever and the caller would have nothing to go
+     * on. Long enough for an import of a few hundred clips; far short of a
+     * render, which is started and then polled rather than awaited.
+     */
+    const timer = setTimeout(() => {
+      ipcMain.removeListener('control:result', onResult)
+      reject(new Error(`"${op}" did not answer within 120s`))
+    }, 120_000)
+
+    const onResult = (_event, payload) => {
+      if (payload.id !== id) return
+      clearTimeout(timer)
+      ipcMain.removeListener('control:result', onResult)
+      if (payload.ok) resolve(payload.value)
+      else reject(new Error(payload.error ?? 'the renderer refused'))
+    }
+
+    ipcMain.on('control:result', onResult)
+    win.webContents.send('control:call', { id, op, params })
+  })
+}
+
+ipcMain.handle('control:start', async (_e, port) => {
+  if (control) return { ok: true, port: control.port, token: controlToken, already: true }
+  try {
+    controlToken = mintToken()
+    const tokenFile = await writeToken(app.getPath('userData'), controlToken)
+    control = await startControl({
+      token: controlToken,
+      port: Number(port) || DEFAULT_PORT,
+      /*
+       * Everything is routed at the renderer rather than split between here
+       * and there. A caller should not have to know which half of the app
+       * owns which noun, and the moment one operation is answered here the
+       * next one that needs both becomes a special case.
+       *
+       * The *names* are asked for once, at start, rather than main claiming
+       * every name exists. A surface that forwards anything cannot refuse an
+       * unknown operation — the renderer throws instead, which reaches the
+       * caller as a 500 rather than a 404 and makes a typo indistinguishable
+       * from a crash. It also cannot list what it has, which is the one thing
+       * a model needs to correct itself.
+       */
+      operations: Object.fromEntries(
+        (await askRenderer('listOperations', {})).map((op) => [
+          op,
+          (params) => askRenderer(op, params),
+        ]),
+      ),
+    })
+    return { ok: true, port: control.port, token: controlToken, tokenFile }
+  } catch (err) {
+    control = null
+    controlToken = null
+    return {
+      ok: false,
+      error:
+        err.code === 'EADDRINUSE'
+          ? `port ${Number(port) || DEFAULT_PORT} is already in use`
+          : (err.message ?? 'could not start'),
+    }
+  }
+})
+
+ipcMain.handle('control:stop', async () => {
+  if (!control) return false
+  await control.close()
+  control = null
+  controlToken = null
+  return true
+})
+
+ipcMain.handle('control:status', () =>
+  control ? { running: true, port: control.port } : { running: false },
+)
 
 ipcMain.handle('dialog:pickFiles', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)

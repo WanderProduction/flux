@@ -1,0 +1,16 @@
+{
+  "name": "flux-mcp",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "An MCP server that drives a running FLUX on this machine.",
+  "bin": {
+    "flux-mcp": "server.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

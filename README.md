@@ -180,9 +180,13 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Mixer** | Every audio clip under the playhead, summed on one AudioContext — which is also the clock. |
 | **Level, mute, solo** | Per track, in decibels, saved with the project. |
 | **Layers** | Every visible video track is composited into the sequence's frame; each has an eye. |
+| **Stills** | Drop a picture on a track and it is a layer: hold it for one frame or for an hour. |
 | **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
 | **HEVC** | 4:2:2 10-bit included — the profile the cameras in this archive shoot. |
 | **Rotation** | Footage shot with the body turned lands and renders upright, not on its side. |
+| **Driven from outside** | A loopback control surface and an MCP server, so a model can edit and render. |
+| **Import an edit** | A Premiere or Resolve sequence XML, as clips on a new timeline. |
+| **Markers** | Named moments and spans. `M` to drop one; they survive an XML import. |
 | **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
 | **Batch export** | Every clip left on the timeline becomes one file, encoded and verified. |
 | **Sequence render** | Or the whole sequence as *one* file: layers composited, audio mixed down, gaps black. |
@@ -1167,6 +1171,349 @@ compressed track in memory.
 
 Not yet: any UI for removing a track (the kernel refuses to remove the last one, since a sequence
 with none has nowhere to drop).
+
+### Driving FLUX from outside: the control surface and MCP
+
+A language model deciding which takes survive needs to put a sequence together and start a
+render. It does that through an **MCP server** (`mcp/`), which talks to a **control surface**
+inside FLUX — a loopback HTTP port that is off until you ask for it.
+
+Start it from the palette: **Start Local Control Server**. It says the port; it does not say the
+token, because a token in a toast is a token in every screenshot and screen recording of the app.
+
+#### The model writes a document; the app does the work
+
+This is the one rule the whole design follows, and it is why there is no `cutClip`,
+`moveClip` or `setInPoint` anywhere in the tool list.
+
+A verb per gesture is the obvious API and the wrong one. A two-hundred-cut reel becomes two
+hundred round trips — each a request, a reply and a model turn, with the model holding the whole
+timeline in its head between them to stay consistent. The same edit as one `import_cut_list` is
+one call, one undo step, and one thing to be right about.
+
+Ten tools, each doing something substantial: describe the project, inspect a sequence, scan a
+folder, import a cut list, import an XML, set render settings, queue, start, poll, stop.
+
+#### Why it drives a running FLUX instead of replacing it
+
+The first design was headless — a Node process reading the project files and running ffmpeg with
+FLUX not involved. That is the better long-term shape and it is not what is here, for a boring
+reason: the two planners that turn a timeline into render jobs are about 470 lines of TypeScript
+in `src/kernel/`, and a plain Node process cannot import them without a build step. Rewriting
+them as JavaScript to get them out is a large change to the most heavily checked code in the
+app, bought for an audience of one process.
+
+Talking to the running app costs nothing and reuses every tested path — the planners, the queue,
+the settings, the verifier. The price is that FLUX has to be open, which it is anyway.
+
+#### A port that can start a render is held to a different standard
+
+`serve-updates` binds to loopback and has no auth, which is right for it: it hands out files
+that are already on the machine. This one can write into a project and spend hours of GPU time,
+so loopback alone is not enough — **any** process on this machine can reach a loopback port,
+including a page in a browser the user has open.
+
+So: it does not open on launch. Every request carries a token, minted per launch and written to
+a file in the app's data directory, compared in constant time. The token travels in a header and
+never in a URL, because URLs end up in logs. Oversized bodies, unknown routes and the wrong
+method are all refused.
+
+`scripts/verify-control.mjs` checks the shut half first and in more detail than the working
+half: no token, a wrong token *of the right length*, a token of the wrong length — that last one
+because `timingSafeEqual` throws on a length mismatch, and a 500 on a bad credential is a crash
+rather than a refusal. It also reads the machine's own external addresses and requires that
+every one of them refuses the connection, because "we passed 127.0.0.1" is not the same claim as
+"it is bound to 127.0.0.1".
+
+#### What it cannot do
+
+Nothing in the tool list deletes a file, moves one, or writes outside the render output folder.
+Removing a clip removes it from a timeline — undoable, and the footage is untouched. That is the
+only kind of "delete" FLUX has, and it is worth saying in the place an agent reads it.
+
+#### A cut past the end of its source is trimmed at the door
+
+A model guessing an out point will ask for more than exists. Placing it anyway produces a clip
+that claims more frames than it can render, and the thing that catches that is the **render
+verifier** — hours later, as a failed job reading `24 frames, expected about 36`. True, and far
+too late.
+
+So import clamps a clip to what its source actually holds and says so in a warning. Which is
+also why import probes before it places: `importFiles` starts probing in the background and does
+not wait, so without that the durations would be whatever happened to have arrived.
+
+#### Running it
+
+```bash
+cd mcp && npm install
+```
+
+The SDK lives in `mcp/` with its own `package.json` so the app's single runtime dependency does
+not move — an Electron bundle that will never import it should not carry it.
+
+```bash
+node mcp/server.mjs
+```
+
+With FLUX open and the control server started, that is a working MCP server. It finds the token
+itself, and re-reads it on every call, because FLUX mints a new one each launch — a server that
+cached it would start failing with a 401 the moment the app restarted, which reads as "the tool
+is broken" rather than "it reconnected".
+
+### Importing an edit: Premiere, Resolve, or a model
+
+A timeline can arrive from three places now — an XML out of Premiere or Resolve, a cut list
+written by a language model, and FLUX itself later. All three become an **edit document**
+first, and exactly one converter turns that into a sequence.
+
+That split is the whole design. Converting each format straight into a sequence would be three
+copies of the same awkward arithmetic — frames to seconds, timeline position against source
+in-point, which track is a layer on top of which — and three places for it to be subtly
+different. A reader's job is to be right about its own format; it is never also right about
+FLUX.
+
+Everything in a document is in **seconds** and **bottom track first**. Seconds because frames
+are meaningless without the rate, and the rate is exactly what interchange formats get wrong.
+Bottom-first because that is the compositor's order and xmeml's, and it is *not* FLUX's — a
+sequence holds `[V2, V1]`. The flip happens once, in the converter.
+
+#### Six things that are wrong if you read xmeml naively
+
+Every one of these is in the single real sequence this was built against — a 25-second vertical
+reel with graphics. They are not edge cases; they are what a normal export contains. Every one
+also produces a timeline that *plays*, which is what makes them worth a harness.
+
+1. **A file appears once and is then referenced empty.** The second music clip is
+   `<file id="file-6"/>` with no body — path, rate and duration are up in the first clip that
+   used it. Taking each `<file>` at face value loses the media on every repeat use, which in a
+   music bed split around a stop is half the soundtrack.
+2. **`timebase` is not the frame rate.** `<timebase>30</timebase>` with `<ntsc>TRUE</ntsc>`
+   means 29.97, and the same integer frame numbers then land at different seconds.
+3. **`start`/`end` and `in`/`out` are different coordinate systems.** The graphics insert
+   starts at frame 168 with an in-point of 0. Confusing them puts every clip at the wrong
+   moment, trimmed to the wrong range, and it still looks plausible.
+4. **Geometry comes from a filter.** The talking head is a 2160x3840 file in a 1080x1920
+   sequence with a Basic Motion scale of 50. Scaling to fit instead gets the framing wrong on
+   exactly the clips someone bothered to reframe. It maps onto FLUX's own `Transform`.
+5. **Paths are percent-encoded URLs, and not in ASCII.** `file://localhost/C:/...` with Hebrew
+   and Russian filenames in it — and pointing at the machine that wrote them.
+6. **A clip can contain a whole sequence.** Premiere's nest. FLUX has no sequence inside a
+   sequence, so this is **refused by name** rather than dropped: a nest that vanished silently
+   would take a third of that reel's graphics with it and leave a timeline that looked complete.
+
+`scripts/verify-edit-import.mjs` builds a fixture containing all six at once — the real export
+is a client's work and does not belong in the repository — and pins each. It takes a real file
+as an argument too, as a smoke test.
+
+#### The cut list a model writes
+
+Not XML, and the reason is token cost. That sample sequence is **450 lines for nine clips**, so
+a two-hundred-cut reel in the same form is ten thousand lines the model would have to emit
+without one malformed tag. The same cuts here are two hundred short objects:
+
+```json
+{
+  "name": "Oleg reel 10", "frameRate": 30, "width": 1080, "height": 1920,
+  "sources": ["E:/FOOTAGE/.../talking_01.mp4"],
+  "video": [[{ "src": 0, "in": 12.4, "out": 18.9, "why": "clean, facing camera" },
+             { "src": 0, "in": 31.0, "out": 36.2 }]]
+}
+```
+
+`src` is an **index into `sources`**, not a path: a reel cut from one interview repeats the same
+path on every cut, and these paths are long and non-ASCII. Cuts lay **end to end** unless they
+carry `at`, because almost every cut list is takes in order. `why` rides along as a note on the
+clip — a few tokens, and the only record of what the model was thinking.
+
+A bad list reports **every** problem at once rather than the first, because making a model
+discover four mistakes one round trip at a time is the slowest possible way to converge.
+
+#### Paths, which are the hard part
+
+The arithmetic is dull; resolving media is not. An XML written elsewhere names files that do not
+exist here. Import widens its search in three steps — the path as written if the project already
+has it, the path as written if it is on disk, then the path with a prefix swapped — and
+**reports what is still missing rather than placing clips that cannot play**. A timeline full of
+offline clips wastes a review pass before anyone notices.
+
+### Markers
+
+A named moment, or a named span. `M` drops one at the playhead — or over the marked range when
+there is one, because someone who has just marked in and out and reaches for a marker means that
+span. `Shift M` and `Ctrl Shift M` walk between them, which is Premiere's own pair. Not
+`Ctrl M`: that is already Send to Render, which is reached far more often.
+
+Markers are the only part of an edit that says what it is *about*. That reel carries five —
+"ХУК: вышел в 25" over the first 168 frames, "ДОЛГ 280 000 ₪" over the next 132 — each with a
+comment describing the beat. Nothing in the clips says any of that; the filenames are camera
+names. They import even when **none of the media resolves**, which is exactly when they are most
+useful: the structure of someone else's edit, readable without their drives.
+
+That is also why they exist before anything automated touches a timeline. A model asked to
+tighten a reel can read "this is the hook"; without markers the same model is guessing from
+`DSCF1906.MOV`.
+
+**A point and a span are one type.** `end === start` is a point. Two types would mean every
+consumer asking which it had before it could do anything, and the only code that cares is the one
+drawing the ruler.
+
+**No name is drawn on the ruler**, and that is measured rather than assumed: the ruler is 22px
+tall and the tick labels already occupy its middle, so a name stacked above or below one overlaps
+it at every zoom. The flag carries the position; the name and comment ride in the tooltip until
+there is a markers list to put them in.
+
+The sequence format number is deliberately **not** bumped for them. A bump makes an older FLUX
+refuse the whole document, and refusing to open someone's edit because it has a marker in it is a
+far worse failure than an older build quietly dropping them.
+
+#### Blocks that collide while the sequence is correct
+
+Reported as "ripple delete leaves clips colliding, and dragging one to a cut point makes it
+disappear". Both turned out to be the same thing, and neither was in the sequence.
+
+A fuzz loop drove 1,500 real editing operations — moves onto exact neighbour edges, ripples,
+razors, trims, deletes — and checked after **every one** that no two clips on a lane overlap.
+The model never overlapped. So the collision was in what was drawn, which is also what the
+report guessed.
+
+A clip block had a minimum width, so a clip too short to see was still something a pointer could
+hit. Applied unconditionally, that minimum pushes a block past the start of the next one: butted
+clips are painted on top of each other. At a zoom that fits a 23-minute batch import on screen
+that is every clip under about three seconds. And a short clip between two longer ones gets
+painted over **completely**, which is exactly what "I dragged it to a cut point and it
+disappeared" looks like.
+
+Two floors, and the second is the one that matters:
+
+1. `Math.max(2, duration * zoom)` in the block. Now capped at the room before the next clip on
+   the lane, so the minimum only applies into space that is actually empty.
+2. **`border: 1px solid` under `box-sizing: border-box`.** A block cannot render narrower than
+   its two side borders however small its inline width — so fixing the first floor alone changed
+   nothing measurable, and the harness kept failing at exactly 2px. Below three pixels the sides
+   come off and the block is the width it really is.
+
+The second one is why this is worth writing down. The JavaScript looked fixed, the inline style
+said `0.666667px`, and `getBoundingClientRect` still said `2`. Only measuring the *rendered*
+rectangle finds that; a unit test on the width calculation would have passed throughout.
+
+```bash
+npm run verify:no-overlap -- 500 11
+```
+
+Seeded, so a failing run replays exactly, and it checks both the model and the laid-out
+rectangles. The arguments are the number of operations and the seed; the seed is printed on
+every run.
+
+This is the second time a minimum applied unconditionally has produced an overlap here — the
+first put batch-imported clips a half-frame into each other, fixed by laying them out in whole
+frames. The pattern is worth naming: **a floor that does not know what is next to it will
+eventually sit on top of it.**
+
+### Stills, and the two ends of a sequence
+
+Drop a picture on a track and it becomes a clip like any other — composited with the footage
+above and below it, trimmed by dragging its edges, rendered with the rest. It arrives five
+seconds long, which is the convention every NLE uses for a still, and that number is the only
+thing about it that is a guess.
+
+Everything else follows from one fact: **a still's source has no end.**
+
+A clip of footage is bounded by its file. It writes down how long its source was when it was cut,
+and that is what decides whether an edge can be pulled back out — a tail cannot go past the last
+frame, because there is no frame there. One picture has nothing to run out of. The same file
+answers for a clip held for a frame and a clip held for an hour, so the only things that may stop
+an edge are the neighbour on the lane, one frame, and the end of what a sequence is allowed to be.
+
+A still therefore carries one bit, `still`, and the trim arithmetic reads it as "there is no
+limit from the file". That is the whole of supporting it, because the rest of the rules were
+already right. It also means a still cannot be *stretched*: stretching is the same frames over
+more or less time, and for one frame that is what trimming already does — identically, and
+without leaving behind a clip claiming to run at 0.3x.
+
+In the composite a still is a `StillSource`: decoded once into a bitmap and handed back
+unchanged, however fast the playhead is going and whichever way. It sits behind the same
+interface as a decoder because the composite only ever asks one question — what is on screen at
+this moment — but it is kept out of the *decoder pool*, which is sized for hardware decoders. A
+still holds none, and evicting a decoder to keep a JPEG that could be decoded again in
+milliseconds is the wrong trade in both directions.
+
+Two things were wrong on the way and are worth recording. The viewer used to replace the whole
+composite with a single `<img>` whenever the clip at the playhead was an image — right while a
+still could only be shown as itself, and wrong the moment it became a layer, because an `<img>`
+can only show the front one. And a bitmap is four bytes a pixel whatever the file was compressed
+to, so a 6000x4000 photograph costs 96MB held; they are decoded down to 3840 on the long edge,
+which is past any sequence anybody is cutting here and turns the worst case into 33MB.
+
+#### Rendered as a looped input
+
+```
+-loop 1 -framerate 30 -t 7 -i still.jpg
+```
+
+`-loop 1` makes the decoder hand the one frame back forever and `-t` stops it, so the clip's own
+length is the whole of its timing. The rate matters: without `-framerate` the input arrives at
+ffmpeg's 25fps default and the graph's `fps=` has to resample a stream of identical pictures. And
+there is no `-ss`, because a still has no in point and seeking into a looped image produces an
+input with nothing in it.
+
+Measured: nine seconds of a still-then-footage sequence comes out 270 frames at 30fps, and the
+four seconds of still measure the same mean luma as the file itself to three decimal places.
+
+**The near-miss is the part worth keeping.** Rendered through the real encoder, the footage
+*after* the still read about nine luma units brighter than the same footage with a gap in front
+of it — which looks exactly like the thing a looped input is expected to get wrong, and this
+project has already been bitten once by `overlay` repeating the last frame of a stream that ran
+out. It was the encoder. The two files have different content before the footage, so rate control
+arrives at it with a different history, and CQ 26 is not bit-exact. Written losslessly the
+difference is **zero on every pixel of every shared frame**. The check now renders both and
+differences them, because the only version of that check worth having is the one with the encoder
+taken out.
+
+#### How long a sequence may be
+
+A hundred hours. There has to be a number — every length in the document is a float that
+something downstream turns into a width, a frame index or a timecode — and the question is only
+where to put it. Three things have an opinion and they disagree by a lot:
+
+- **The timecode.** `HH:MM:SS:FF` with two digits an hour is the broadcast convention and what an
+  editor reads a position off. It can name every frame below a hundred hours and nothing above.
+  This is the binding constraint, so it is where the number comes from.
+- **The frame grid.** Seconds are doubles and a frame is `round(s * fps)`. A hundred hours at
+  120fps is 43.2 million frames with about seven orders of magnitude of double left over.
+  Precision is *not* what runs out first, which is worth saying because it is what people assume.
+- **The layout.** The timeline lays out `duration * zoom` pixels and a browser will not lay out an
+  element past 33,554,428 of them — measured, not remembered, and the harness asks the engine
+  every run. At `MAX_ZOOM` that limit is reached at twenty-three hours, well inside the ceiling.
+
+So the zoom gives way rather than the edit: above about twenty-three hours the zoom ceiling comes
+down to keep the layout inside the engine's limit, and a hundred hours still zooms to 92 pixels a
+second — four pixels a frame at 24fps, so nothing on a timeline that long is out of reach. A
+hundredth of the limit is held in reserve, because the ruler puts its last tick a step *past* the
+end: with no reserve the panel asked for 33,554,400px and the engine laid out 33,554,428 — the
+clamp exactly. Nothing visibly broke, since everything inside is positioned absolutely, but a
+layout sitting on the engine's clamp is one change away from being quietly truncated.
+
+A hundred hours is four days of continuous footage. Nobody will play one. The point is that a
+*generated* edit — a multi-day timelapse, a stack of silence, an automated assembly of a whole
+card — fits inside the app rather than being refused by it, and that the one place it stops is a
+place with a reason behind it.
+
+The ceiling is applied at **five** paths, and they are listed in the code because that is the
+trap: laying a clip down, copying one, moving one, trimming an edge and stretching one. Two of
+them — `placeCopies` and `moveClips` — write to the sequence without going through `addClip`,
+so a ceiling enforced there alone would have bounded nothing. This is the third time that shape
+has come up here, after a per-clip cap under a pool with its own floor and a minimum width that
+did not know its neighbour: **a limit is only as big as the narrowest path that respects it.**
+
+```bash
+npm run verify:stills
+```
+
+Thirteen checks: the drop gesture itself, driven as a real `drop` event with the DataTransfer the
+Content Browser puts on the pointer; an edge pulled to ten minutes from a source that claims five
+seconds; a still trimmed to exactly one frame and refusing to go further; the composite compared
+against the file on a 256-sample grid; both ends of the ceiling; and the engine asked what it will
+really lay out.
 
 ### Batch: a folder in, a folder out
 
@@ -2666,6 +3013,30 @@ No app. Runs the queue: every job reaching a terminal state, the log carrying a 
 job, a second run skipping what already verified, a damaged output being **re-encoded rather than
 skipped**, and cancel stopping it promptly. Each source is cut twice so the `_02` naming is
 exercised.
+
+```bash
+npm run verify:edit-import
+```
+
+```bash
+npm run verify:control
+```
+
+The control surface against a running app — the shut half first, in more detail than the
+working half. See above for why the wrong-length token gets its own check.
+
+```bash
+npm run verify:mcp
+```
+
+Real MCP over stdio to the real server, to the real control surface, to the real app, ending
+in two files on disk. Nothing is stubbed, because the interesting failures are all at the
+seams: a tool whose name is not routed, a schema a model cannot fill in, an error that
+arrives as a protocol fault instead of as text it can read.
+
+No app. The six xmeml traps above, the cut-list reader, and a canary that pins the values
+against the *naive* readings — a plain 30fps read, and in/out used as the timeline position —
+because every other assertion would also pass against a reader wrong in that direction.
 
 ```bash
 npm run verify:render-queue -- "E:\FOOTAGE\AG GROUPS\REELS"
