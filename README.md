@@ -1365,6 +1365,49 @@ The sequence format number is deliberately **not** bumped for them. A bump makes
 refuse the whole document, and refusing to open someone's edit because it has a marker in it is a
 far worse failure than an older build quietly dropping them.
 
+#### Blocks that collide while the sequence is correct
+
+Reported as "ripple delete leaves clips colliding, and dragging one to a cut point makes it
+disappear". Both turned out to be the same thing, and neither was in the sequence.
+
+A fuzz loop drove 1,500 real editing operations — moves onto exact neighbour edges, ripples,
+razors, trims, deletes — and checked after **every one** that no two clips on a lane overlap.
+The model never overlapped. So the collision was in what was drawn, which is also what the
+report guessed.
+
+A clip block had a minimum width, so a clip too short to see was still something a pointer could
+hit. Applied unconditionally, that minimum pushes a block past the start of the next one: butted
+clips are painted on top of each other. At a zoom that fits a 23-minute batch import on screen
+that is every clip under about three seconds. And a short clip between two longer ones gets
+painted over **completely**, which is exactly what "I dragged it to a cut point and it
+disappeared" looks like.
+
+Two floors, and the second is the one that matters:
+
+1. `Math.max(2, duration * zoom)` in the block. Now capped at the room before the next clip on
+   the lane, so the minimum only applies into space that is actually empty.
+2. **`border: 1px solid` under `box-sizing: border-box`.** A block cannot render narrower than
+   its two side borders however small its inline width — so fixing the first floor alone changed
+   nothing measurable, and the harness kept failing at exactly 2px. Below three pixels the sides
+   come off and the block is the width it really is.
+
+The second one is why this is worth writing down. The JavaScript looked fixed, the inline style
+said `0.666667px`, and `getBoundingClientRect` still said `2`. Only measuring the *rendered*
+rectangle finds that; a unit test on the width calculation would have passed throughout.
+
+```bash
+npm run verify:no-overlap -- 500 11
+```
+
+Seeded, so a failing run replays exactly, and it checks both the model and the laid-out
+rectangles. The arguments are the number of operations and the seed; the seed is printed on
+every run.
+
+This is the second time a minimum applied unconditionally has produced an overlap here — the
+first put batch-imported clips a half-frame into each other, fixed by laying them out in whole
+frames. The pattern is worth naming: **a floor that does not know what is next to it will
+eventually sit on top of it.**
+
 ### Batch: a folder in, a folder out
 
 `Ctrl 4`. Built for one job: an archive of 10,898 video files across 343 folders, 2.3TB of

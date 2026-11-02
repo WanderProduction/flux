@@ -3783,3 +3783,17 @@ kbd {
   border-left: 1px solid var(--marker-colour);
   border-right: 1px solid color-mix(in srgb, var(--marker-colour) 55%, transparent);
 }
+
+/* A clip too thin to afford its own borders.
+   `.clip` is border-box with a 1px border each side, so a block can never
+   render narrower than 2px however small its inline width — and that, not the
+   JavaScript floor above it, is the irreducible reason butted sub-second clips
+   were drawn on top of each other while the sequence itself was correct.
+   Below three pixels the sides come off and the block can be the width it
+   really is. It reads as a hairline, which is what a clip that small is; the
+   alternative is a 2px block sitting over its neighbour. */
+.clip--hairline {
+  border-left-width: 0;
+  border-right-width: 0;
+  border-radius: 0;
+}

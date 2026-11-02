@@ -2987,9 +2987,28 @@ export function TimelinePanel() {
                 // clip's own handler stops the press before it arrives.
                 onPointerDown={(e) => beginMarquee(e, track)}
               >
-                {sequence.clips
-                  .filter((clip) => clip.trackId === track.id && drawn(clip))
-                  .map((clip) => {
+                {(() => {
+                  /*
+                   * Sorted once per lane so each block can be told how much
+                   * room it has before the next one. Done here rather than in
+                   * the block because a block cannot see its neighbours, and
+                   * doing it per block would be a scan of the lane per clip.
+                   *
+                   * Over the whole lane, not only what is drawn: the clip
+                   * after this one may be off screen and is still the thing
+                   * this one must not run into.
+                   */
+                  const lane = sequence.clips
+                    .filter((clip) => clip.trackId === track.id)
+                    .sort((a, b) => a.start - b.start)
+                  const roomFor = new Map<string, number>()
+                  for (let i = 0; i < lane.length; i++) {
+                    const next = lane[i + 1]
+                    roomFor.set(lane[i].id, next ? next.start - lane[i].start : Infinity)
+                  }
+                  return lane
+                    .filter((clip) => drawn(clip))
+                    .map((clip) => {
                     const dragging = drag?.moved === true && drag.ids.includes(clip.id)
                     const copying = dragging && drag?.copying === true
                     const trimming = trim?.ids.includes(clip.id) ? trim : null
@@ -2999,6 +3018,7 @@ export function TimelinePanel() {
                         clip={clip}
                         asset={assetById.get(clip.assetId)}
                         zoom={zoom}
+                        room={roomFor.get(clip.id) ?? Infinity}
                         selected={selected.has(clip.id)}
                         dragging={dragging}
                         copying={copying}
@@ -3019,8 +3039,9 @@ export function TimelinePanel() {
                         offsetY={dragging ? drag.deltaTracks * TRACK_HEIGHT : 0}
                         onPointerDown={(event) => beginClipDrag(event, clip)}
                       />
-                    )
-                  })}
+                      )
+                    })
+                })()}
 
                 {gap?.trackId === track.id && (
                   <div
@@ -3313,6 +3334,7 @@ function ClipBlock({
   clip,
   asset,
   zoom,
+  room,
   selected,
   dragging,
   copying,
@@ -3327,6 +3349,13 @@ function ClipBlock({
   clip: Clip
   asset: Asset | undefined
   zoom: number
+  /**
+   * Seconds between this clip's start and the next clip's on the same lane.
+   *
+   * Infinity when nothing follows it, which is what lets the last clip on a
+   * lane still take its minimum width.
+   */
+  room: number
   selected: boolean
   dragging: boolean
   copying: boolean
@@ -3348,7 +3377,37 @@ function ClipBlock({
   // pointer is the edit.
   const speed = stretching ? (clip.duration * clip.speed) / Math.max(duration, 1e-6) : clip.speed
   const offset = stretching ? clip.offset : clip.offset + trimStart * clip.speed
-  const width = Math.max(2, duration * zoom)
+  /*
+   * Wide enough to see, but never wider than the room there is.
+   *
+   * A block has a minimum width so that a clip too short to draw is still
+   * something a pointer can hit. Applied unconditionally — which is what it
+   * was — that minimum pushes a block past the start of the next one, and
+   * butted clips are drawn on top of each other while the sequence itself is
+   * beyond reproach. At a zoom that fits a 23-minute batch import on screen
+   * that is every clip under about three seconds, which on a reel is most of
+   * them. The worst of it is that a short clip between two longer ones can be
+   * painted over completely: it looks like dragging it somewhere deleted it.
+   *
+   * So the minimum applies only into space that is empty. `room` is the
+   * distance to the next clip on this lane, and a clip butted against its
+   * neighbour therefore draws at its true width however thin that is — a
+   * hairline, which is honest, rather than a block overlapping the next one,
+   * which is a lie about the edit.
+   *
+   * A clip being dragged is exempt: it has been lifted out of the lane, the
+   * neighbour it is about to land on is not something it is overlapping yet,
+   * and a block that got thinner as it approached one would be alarming.
+   */
+  const full = duration * zoom
+  /*
+   * Never wider than the room, and never thinner than the clip really is.
+   * The second half only matters if the sequence itself ever held two clips
+   * on top of each other — it does not, and a width of zero would be worse
+   * than a hairline if it ever did.
+   */
+  const cap = Math.max(room * zoom, full)
+  const width = dragging ? Math.max(2, full) : Math.min(Math.max(2, full), cap)
 
   // The asset can be gone while the clip remains: removing something from the
   // bin must not silently delete the editing work that used it.
@@ -3366,7 +3425,7 @@ function ClipBlock({
 
   return (
     <div
-      className={`clip clip--${clip.kind}${state}${selected ? ' clip--selected' : ''}${
+      className={`clip clip--${clip.kind}${state}${width < 3 ? ' clip--hairline' : ''}${selected ? ' clip--selected' : ''}${
         dragging ? ' clip--dragging' : ''
       }${copying ? ' clip--copying' : ''}`}
       // Named, because blocks are drawn only near the viewport now and a
