@@ -114,6 +114,33 @@ contextBridge.exposeInMainWorld('flux', {
    * unmounts repeatedly would otherwise stack a listener per mount and get the
    * same progress event a dozen times.
    */
+  /**
+   * The local control surface — see electron/control.js.
+   *
+   * `onCall` is how the renderer answers it: main forwards each operation
+   * here, the kernel runs it, and the reply goes back by id.
+   */
+  control: {
+    start: (port) => ipcRenderer.invoke('control:start', port),
+    stop: () => ipcRenderer.invoke('control:stop'),
+    status: () => ipcRenderer.invoke('control:status'),
+    onCall: (handler) => {
+      const listener = async (_e, call) => {
+        try {
+          const value = await handler(call.op, call.params ?? {})
+          ipcRenderer.send('control:result', { id: call.id, ok: true, value })
+        } catch (err) {
+          ipcRenderer.send('control:result', {
+            id: call.id,
+            ok: false,
+            error: err && err.message ? err.message : String(err),
+          })
+        }
+      }
+      ipcRenderer.on('control:call', listener)
+      return () => ipcRenderer.removeListener('control:call', listener)
+    },
+  },
   render: {
     tools: () => ipcRenderer.invoke('render:tools'),
     start: (jobs, config) => ipcRenderer.invoke('render:start', jobs, config),

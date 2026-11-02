@@ -34,7 +34,7 @@
  * a harness on it — the same mistake already put a batch import on V2 once.
  */
 
-import { getAssets, hasAsset, type Asset } from './assets'
+import { ensureProbed, getAssets, hasAsset, type Asset } from './assets'
 import { existsMany } from './fsBridge'
 import { importFiles } from './importPipeline'
 import {
@@ -181,6 +181,33 @@ export async function importEditDocument(
     )
   }
 
+  /*
+   * Probed before anything is placed, because the clamp below needs to know
+   * how long each source really is — and because `importFiles` starts probing
+   * in the background and does not wait, so without this the durations are
+   * whatever happened to have arrived.
+   *
+   * Capped rather than all at once: an XML can name a hundred sources, and a
+   * hundred simultaneous `<video>` elements asking for metadata is the stall
+   * thumbnails.ts caps itself at three to avoid.
+   */
+  const resolved = [...new Set(found.values())]
+  const byPathNow = new Map(getAssets().map((one) => [normalise(one.path), one]))
+  const needed = resolved
+    .map((filePath) => byPathNow.get(normalise(filePath)))
+    .filter((one): one is Asset => Boolean(one))
+
+  let next = 0
+  await Promise.all(
+    Array.from({ length: Math.min(6, needed.length) }, async () => {
+      for (;;) {
+        const index = next++
+        if (index >= needed.length) return
+        await ensureProbed(needed[index].id)
+      }
+    }),
+  )
+
   const assetFor = new Map<string, Asset>()
   for (const asset of getAssets()) assetFor.set(normalise(asset.path), asset)
 
@@ -233,11 +260,44 @@ export async function importEditDocument(
           if (!asset) continue
           if (!(clip.duration > 0)) continue
 
+          /*
+           * Clamped to what the file actually holds.
+           *
+           * A document can ask for more than exists — a model guessing an out
+           * point, an XML whose media was later re-cut shorter. Placing it
+           * anyway produces a clip that renders fewer frames than it claims,
+           * and the *render verifier* is what catches that: hours later, as a
+           * failed job reading "24 frames, expected about 36". Which is a true
+           * statement about a cut nobody should have been allowed to make.
+           *
+           * So it is trimmed here and said out loud. A clip clamped to nothing
+           * at all is left out entirely — a zero-length block is not a clip.
+           */
+          const available = asset.duration ?? 0
+          let duration = clip.duration
+          if (available > 0) {
+            const left = Math.max(0, available - clip.offset) / clip.speed
+            if (left <= 0) {
+              warnings.push(
+                `"${clip.name}" starts at ${clip.offset.toFixed(2)}s, past the end of a ` +
+                  `${available.toFixed(2)}s file — left out`,
+              )
+              continue
+            }
+            if (left < duration - 1e-6) {
+              warnings.push(
+                `"${clip.name}" asked for ${duration.toFixed(2)}s from ${clip.offset.toFixed(2)}s ` +
+                  `but the file is ${available.toFixed(2)}s — trimmed to ${left.toFixed(2)}s`,
+              )
+              duration = left
+            }
+          }
+
           const made = addClip({
             assetId: asset.id,
             trackId: lane.id,
             start: clip.start,
-            duration: clip.duration,
+            duration,
             offset: clip.offset,
             speed: clip.speed,
             /*
@@ -245,7 +305,7 @@ export async function importEditDocument(
              * probed as. A trim can only be pulled back out as far as this,
              * and the document is the thing that knew the range was legal.
              */
-            sourceDuration: clip.offset + clip.duration * clip.speed,
+            sourceDuration: clip.offset + duration * clip.speed,
           })
           if (!made) continue
           placed += 1

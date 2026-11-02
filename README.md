@@ -183,6 +183,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Sequences** | Many per project, each its own `.fluxseq` file, each a tab on the timeline. |
 | **HEVC** | 4:2:2 10-bit included — the profile the cameras in this archive shoot. |
 | **Rotation** | Footage shot with the body turned lands and renders upright, not on its side. |
+| **Driven from outside** | A loopback control surface and an MCP server, so a model can edit and render. |
 | **Import an edit** | A Premiere or Resolve sequence XML, as clips on a new timeline. |
 | **Markers** | Named moments and spans. `M` to drop one; they survive an XML import. |
 | **Batch import** | Point at a folder; every clip under it lands end to end on a new sequence. |
@@ -1169,6 +1170,94 @@ compressed track in memory.
 
 Not yet: any UI for removing a track (the kernel refuses to remove the last one, since a sequence
 with none has nowhere to drop).
+
+### Driving FLUX from outside: the control surface and MCP
+
+A language model deciding which takes survive needs to put a sequence together and start a
+render. It does that through an **MCP server** (`mcp/`), which talks to a **control surface**
+inside FLUX — a loopback HTTP port that is off until you ask for it.
+
+Start it from the palette: **Start Local Control Server**. It says the port; it does not say the
+token, because a token in a toast is a token in every screenshot and screen recording of the app.
+
+#### The model writes a document; the app does the work
+
+This is the one rule the whole design follows, and it is why there is no `cutClip`,
+`moveClip` or `setInPoint` anywhere in the tool list.
+
+A verb per gesture is the obvious API and the wrong one. A two-hundred-cut reel becomes two
+hundred round trips — each a request, a reply and a model turn, with the model holding the whole
+timeline in its head between them to stay consistent. The same edit as one `import_cut_list` is
+one call, one undo step, and one thing to be right about.
+
+Ten tools, each doing something substantial: describe the project, inspect a sequence, scan a
+folder, import a cut list, import an XML, set render settings, queue, start, poll, stop.
+
+#### Why it drives a running FLUX instead of replacing it
+
+The first design was headless — a Node process reading the project files and running ffmpeg with
+FLUX not involved. That is the better long-term shape and it is not what is here, for a boring
+reason: the two planners that turn a timeline into render jobs are about 470 lines of TypeScript
+in `src/kernel/`, and a plain Node process cannot import them without a build step. Rewriting
+them as JavaScript to get them out is a large change to the most heavily checked code in the
+app, bought for an audience of one process.
+
+Talking to the running app costs nothing and reuses every tested path — the planners, the queue,
+the settings, the verifier. The price is that FLUX has to be open, which it is anyway.
+
+#### A port that can start a render is held to a different standard
+
+`serve-updates` binds to loopback and has no auth, which is right for it: it hands out files
+that are already on the machine. This one can write into a project and spend hours of GPU time,
+so loopback alone is not enough — **any** process on this machine can reach a loopback port,
+including a page in a browser the user has open.
+
+So: it does not open on launch. Every request carries a token, minted per launch and written to
+a file in the app's data directory, compared in constant time. The token travels in a header and
+never in a URL, because URLs end up in logs. Oversized bodies, unknown routes and the wrong
+method are all refused.
+
+`scripts/verify-control.mjs` checks the shut half first and in more detail than the working
+half: no token, a wrong token *of the right length*, a token of the wrong length — that last one
+because `timingSafeEqual` throws on a length mismatch, and a 500 on a bad credential is a crash
+rather than a refusal. It also reads the machine's own external addresses and requires that
+every one of them refuses the connection, because "we passed 127.0.0.1" is not the same claim as
+"it is bound to 127.0.0.1".
+
+#### What it cannot do
+
+Nothing in the tool list deletes a file, moves one, or writes outside the render output folder.
+Removing a clip removes it from a timeline — undoable, and the footage is untouched. That is the
+only kind of "delete" FLUX has, and it is worth saying in the place an agent reads it.
+
+#### A cut past the end of its source is trimmed at the door
+
+A model guessing an out point will ask for more than exists. Placing it anyway produces a clip
+that claims more frames than it can render, and the thing that catches that is the **render
+verifier** — hours later, as a failed job reading `24 frames, expected about 36`. True, and far
+too late.
+
+So import clamps a clip to what its source actually holds and says so in a warning. Which is
+also why import probes before it places: `importFiles` starts probing in the background and does
+not wait, so without that the durations would be whatever happened to have arrived.
+
+#### Running it
+
+```bash
+cd mcp && npm install
+```
+
+The SDK lives in `mcp/` with its own `package.json` so the app's single runtime dependency does
+not move — an Electron bundle that will never import it should not carry it.
+
+```bash
+node mcp/server.mjs
+```
+
+With FLUX open and the control server started, that is a working MCP server. It finds the token
+itself, and re-reads it on every call, because FLUX mints a new one each launch — a server that
+cached it would start failing with a 401 the moment the app restarted, which reads as "the tool
+is broken" rather than "it reconnected".
 
 ### Importing an edit: Premiere, Resolve, or a model
 
@@ -2778,6 +2867,22 @@ exercised.
 ```bash
 npm run verify:edit-import
 ```
+
+```bash
+npm run verify:control
+```
+
+The control surface against a running app — the shut half first, in more detail than the
+working half. See above for why the wrong-length token gets its own check.
+
+```bash
+npm run verify:mcp
+```
+
+Real MCP over stdio to the real server, to the real control surface, to the real app, ending
+in two files on disk. Nothing is stubbed, because the interesting failures are all at the
+seams: a tool whose name is not routed, a schema a model cannot fill in, an error that
+arrives as a protocol fault instead of as text it can read.
 
 No app. The six xmeml traps above, the cut-list reader, and a canary that pins the values
 against the *naive* readings — a plain 30fps read, and in/out used as the timeline position —

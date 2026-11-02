@@ -3,6 +3,7 @@ import { DockviewReact, type DockviewApi, type DockviewReadyEvent } from 'dockvi
 
 import { commands } from './kernel/commands'
 import { importEditDocument } from './kernel/importEdit'
+import { startControlServer, stopControlServer } from './kernel/controlBridge'
 import { addMarker, markerAt, markerNear, removeMarkers } from './kernel/sequence'
 import { getTime, seek } from './kernel/playback'
 import { pickSequenceXml, readTextFile } from './kernel/fsBridge'
@@ -432,6 +433,39 @@ function Workspace({ project }: { project: Project }) {
           }
           seek(previous.start)
           if (previous.name) say(previous.name)
+        },
+      },
+      {
+        id: 'control.start',
+        title: 'Start Local Control Server',
+        category: 'Project',
+        detail: 'Lets an MCP server — and so a model — drive FLUX on this machine',
+        run: async () => {
+          const result = await startControlServer()
+          if (!result.ok) {
+            say(`Could not start: ${result.error}`)
+            return
+          }
+          /*
+           * The port is said; the token is not. It is written to a file
+           * that only a program running as this user can read, and putting
+           * it in a toast would be putting it on screen in every recording
+           * and screenshot of this app.
+           */
+          say(
+            result.already
+              ? `Already listening on 127.0.0.1:${result.port}`
+              : `Listening on 127.0.0.1:${result.port} — token in the app data folder`,
+          )
+        },
+      },
+      {
+        id: 'control.stop',
+        title: 'Stop Local Control Server',
+        category: 'Project',
+        run: async () => {
+          const stopped = await stopControlServer()
+          say(stopped ? 'Control server stopped' : 'It was not running')
         },
       },
       {
