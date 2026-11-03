@@ -10,6 +10,12 @@ import { pickSequenceXml, readTextFile } from './kernel/fsBridge'
 import { readXmeml } from '../shared/xmeml.js'
 import { panels } from './kernel/panels'
 import { createKeymapController, defaultKeymap } from './kernel/keymap'
+import {
+  getKeybindings,
+  keybindingsLoaded,
+  loadKeybindings,
+  subscribeKeybindings,
+} from './kernel/keybindings'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
 import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
 import {
@@ -65,7 +71,22 @@ export function App() {
 function Workspace({ project }: { project: Project }) {
   const apiRef = useRef<DockviewApi | null>(null)
   const savedRef = useRef<SavedLayouts>({})
+  /*
+   * Started on the shipped map and then fed from the store.
+   *
+   * Two steps rather than one because the controller is built during the first
+   * render and the stored bindings arrive from IPC a moment later. Starting on
+   * the defaults means every key works during that moment; the effect below
+   * hands it the user's map as soon as there is one, and on every later edit.
+   */
   const keymap = useMemo(() => createKeymapController(defaultKeymap), [])
+
+  useEffect(() => {
+    if (!keybindingsLoaded()) void loadKeybindings()
+    const push = () => keymap.setKeymap(getKeybindings())
+    if (keybindingsLoaded()) push()
+    return subscribeKeybindings(push)
+  }, [keymap])
 
   /**
    * The workspace this project was saved in, read once at mount.
@@ -735,11 +756,11 @@ function Workspace({ project }: { project: Project }) {
         </span>
       </footer>
 
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        lookupChord={keymap.lookup}
-      />
+      {/* No lookupChord prop any more: the palette asks kernel/keybindings
+          directly, which is also where the Hotkeys page reads and writes. A
+          function threaded from here worked while the palette was the only
+          thing that needed it; the second consumer is what made it a seam. */}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ImportChoiceHost />
       {performanceOpen && <PerformanceDialog onClose={() => setPerformanceOpen(false)} />}
       {layoutDialog && (

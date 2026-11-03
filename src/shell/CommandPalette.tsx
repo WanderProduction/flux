@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { commands, type Command } from '../kernel/commands'
 import { formatChord } from '../kernel/keymap'
+import { chordsFor, subscribeKeybindings } from '../kernel/keybindings'
 
 /**
  * The command palette — the single search surface for every action.
@@ -33,15 +34,15 @@ function fuzzyScore(haystack: string, needle: string): number | null {
   return score
 }
 
-export function CommandPalette({
-  open,
-  onClose,
-  lookupChord,
-}: {
-  open: boolean
-  onClose: () => void
-  lookupChord: (commandId: string) => string | undefined
-}) {
+export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
+  /*
+   * Re-read when a binding changes, so a key rebound on the Hotkeys page shows
+   * its new chord here without the palette being reopened. Cheap: it is one
+   * counter and the palette only renders while it is open.
+   */
+  const [, bumpChords] = useState(0)
+  useEffect(() => subscribeKeybindings(() => bumpChords((n) => n + 1)), [])
+
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -117,7 +118,7 @@ export function CommandPalette({
         <ul className="palette-list" ref={listRef}>
           {results.length === 0 && <li className="palette-empty">No matching command</li>}
           {results.map((command, i) => {
-            const chord = lookupChord(command.id)
+            const chord = chordsFor(command.id)[0]
             return (
               <li
                 key={command.id}

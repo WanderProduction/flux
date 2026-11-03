@@ -2,10 +2,10 @@
 
 ### Three levels, nineteen pages, and the order to build them in
 
-> Plan doc. The shell is built and every page in it is reachable. **None of the nineteen
-> changes a setting yet** — eight of them point at a setting that already exists somewhere
-> else in FLUX, and that is the closest any of them comes. This is the document that says what each one will hold and — more
-> usefully — what has to exist underneath it first.
+> Plan doc. The shell is built and every page in it is reachable. **One of the nineteen is
+> real** — Hotkeys & Presets — and seven of the rest point at a setting that already exists
+> somewhere else in FLUX. This is the document that says what each page will hold and, more
+> usefully, what has to exist underneath it first.
 >
 > Open it in the app with `3` or `Ctrl ,` and read it there: each page states its own plan,
 > and the side panel's search reads those plans, so "VST" finds Plugins without knowing it is
@@ -52,12 +52,61 @@ Four pages. These are the ones a person notices in the first ten minutes.
 | **General** | Display name, email, avatar, sign in and out. Which workspace and project open on launch. | An account record on disk, and a store for it that is not the project document |
 | **Appearance** | Theme, accent, density, font and size, panel chrome. Later a custom stylesheet applied live. | Nothing — `styles/theme.css` is already the single place every colour resolves through |
 | **Notifications** | Per event: render done, render failed, batch finished, update ready, a collaborator saved. Toast, the work ring, the OS, or a phone. | An event bus worth subscribing to; most of these events are already emitted somewhere |
-| **Hotkeys & Presets** | Every command with its binding, click to rebind, conflict detection, named exportable sets. | Nothing — bindings are already a plain chord-to-command map |
+| **Hotkeys & Presets** | **Built.** Every command with its binding, click to rebind, conflict detection, named sets. Export and import are a clipboard round trip. | — |
 
-**Appearance and Hotkeys are the two to build first**, and for the same reason: the data model
-is already right. A skin is a file that redefines the tokens in `styles/theme.css` and nothing
+**Appearance and Hotkeys were the two to build first**, for the same reason: the data model was
+already right. A skin is a file that redefines the tokens in `styles/theme.css` and nothing
 else; a keymap editor is a view over `defaultKeymap`. Neither needs an account, a workspace, or
 a server — so they are the pages that prove the shell with the least underneath them.
+
+### What building Hotkeys actually took
+
+The prediction held: the page is a view over the map, and most of the work was the two things
+the map did not have.
+
+**A store to keep an edited map in.** `kernel/keybindings.ts` — the bindings in force, loaded
+at boot, written on every change, with named sets beside them. Two rules in it are worth
+stating because they are the ones that would be wrong by default:
+
+- **A stored map is the whole truth**, not a layer over the defaults. Merge them and a binding
+  somebody deliberately *cleared* comes back on the next launch, which is why `resetAll` is an
+  explicit act rather than an implicit one.
+- **A set is the whole map**, not a diff from the defaults. A diff is smaller and is the wrong
+  shape: a saved set has to still mean the same thing after a release changes a default, and a
+  diff would silently absorb that change.
+
+**A way to capture a chord while the app is listening for the same keys.** Press `Ctrl M` to
+rebind something and FLUX would send the sequence to render while you were still choosing. So
+capture installs its listener in the **capture phase** on `window`, which runs before the
+keymap's own bubble-phase listener, and calls `preventDefault`; the controller checks
+`defaultPrevented` and steps aside. That is the same mechanism the folder tree already uses to
+keep its arrow keys away from the playhead.
+
+It also has to produce chords the keymap can hold, which includes the held-key ones: `S` is both
+a command and a modifier, so eight of the shipped bindings look like `s+arrowup`. Capture keeps
+its own held set and asks `chordOf` — the same function the controller asks — rather than
+assembling a chord string itself. A page that could display a binding it could not reproduce
+would be a page that quietly refuses to edit eight of its rows.
+
+### And one thing the plan did not see
+
+**A command registry is not a catalogue.** Most commands belong to panels and are registered
+when the panel mounts, so `commands.list()` is whatever is open right now — and the settings
+page lives in a workspace with no Timeline, Viewer, Content Browser or Render in it. Measured:
+**47 commands loaded there, against 117 the build actually has.** A hotkeys page built on that
+list would hide the entire Timeline from the one page made for rebinding it.
+
+The fix is not to move panel commands into the app; they belong to their panels, and that is the
+SDK seam working. What was missing was the distinction between *runnable now* and *exists in
+this build*, so the registry gained `catalogue()` — everything it has been told about since
+launch, kept when the command goes away. The page lists that, and marks a command whose panel is
+closed, because such a command can still be rebound (the keymap is data, and the binding works
+the moment the panel opens) while the key does nothing in the meantime. A row that looked
+identical to a live one would make that read as a broken rebind.
+
+The gap this leaves is honest and small: a session that has never opened a panel does not know
+its commands. Opening the Edit workspace once fills it, which is what an editor does before
+reaching for the settings.
 
 ---
 
@@ -132,7 +181,7 @@ alone: it needs nothing to exist first, and it is a real customisation. If green
 
 ## What is already true
 
-Eight of the nineteen pages name a setting that **exists in FLUX today**, and each says so with
+Seven of the nineteen pages name a setting that **exists in FLUX today**, and each says so with
 a button that takes you to it. This matters more than it sounds: a page promising a cache
 setting the app has had for weeks is worse than a page saying nothing, because it sends somebody
 looking for a feature they already own.
@@ -140,7 +189,6 @@ looking for a feature they already own.
 | Page | What exists | Where |
 |---|---|---|
 | Appearance | Panel arrangement and named layouts | Window menu, workspace tabs |
-| Hotkeys & Presets | Bindings as remappable data; current chord shown per command | `kernel/keymap.ts`, command palette |
 | Automation and MCP | The control surface and the MCP server | Loopback port with a per-launch token, `mcp/server.mjs` |
 | Controllers + Hardware | What the machine would choose for playback, read from the machine | Performance dialog |
 | Audio | The sequence's rate and channel count | Sequence settings (a document fact, not a device one) |

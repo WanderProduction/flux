@@ -153,7 +153,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
 | **Workspaces** | Saved panel layouts. `1` Edit, `2` Export, `3` Settings. |
-| **Settings** | `Ctrl ,` — three levels and nineteen pages. The shell is built; every page is still a plan. |
+| **Settings** | `Ctrl ,` — three levels, nineteen pages. One is real so far; the rest say what they will be. |
+| **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets. |
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
@@ -1546,13 +1547,13 @@ A *project* setting is a fourth thing and it already has a home: sequence settin
 else's computer has to live. If a setting ever wants to be in the document, it is not a
 settings page, it is a document field.
 
-#### None of it is wired yet, and every page says so
+#### One page of nineteen is real, and the rest say so
 
-The shape is the deliverable here. Nothing on any of the nineteen changes a setting yet. Every
-page is reachable and every page states what it will
-hold, specifically enough to disagree with — which is the point, because the ordering of this
-work is worth arguing about before any of it is built. [`docs/SETTINGS.md`](docs/SETTINGS.md)
-is the same content with the dependencies and the build order added.
+**Hotkeys & Presets** is built — see below. The other eighteen are reachable and each states
+what it will hold, specifically enough to disagree with, which is the point: the ordering of
+this work is worth arguing about before any of it exists.
+[`docs/SETTINGS.md`](docs/SETTINGS.md) is the same content with the dependencies and the build
+order added.
 
 This follows the tool strip, where half the tools have always been unbuilt and have always said
 so: **an unbuilt thing says it is unbuilt and says what it will be, because a control that
@@ -1560,7 +1561,7 @@ silently does nothing is a bug report waiting to be written.** There are no disa
 and no dead switches anywhere in the page — a planned page has prose, and prose cannot be
 mistaken for a feature.
 
-**Eight pages point at a setting that already exists**, with a button that goes there. That is
+**Seven pages point at a setting that already exists**, with a button that goes there. That is
 not decoration. A page promising a cache setting the app has had for weeks is worse than a page
 saying nothing, because it sends somebody hunting for a feature they already own. The decoder
 pool and frame-memory budgets are in the performance dialog, preview resolution is in the
@@ -1592,6 +1593,66 @@ workspace has no Timeline in it, so the Cache page's button would have done noth
 dialog and its command belong to the app now, which is where a machine-wide setting always
 belonged. A setting that vanishes when a panel closes is the same shape of mistake as a mode
 owned by the panel that displays it, which is what `kernel/tools.ts` was written to avoid.
+
+#### Hotkeys & Presets, the first page that changes anything
+
+It was first because the data model was already right: bindings have been a plain
+chord-to-command map since the first week, so the page is a view over that map rather than a
+rewrite of anything. Every command, grouped as the palette groups them, with its keys; click
+**Set** or **Add** and press the keys you want.
+
+**A rebind is a swap, and it says so first.** One chord runs one command, so taking a chord
+takes it from whoever had it — which is the right behaviour and the wrong thing to do silently.
+A conflict stops and names the command about to lose its key, and nothing moves until you say
+*Take it*. **Default** puts one command back, in both directions: its current keys go, *and* its
+shipped keys are taken back from whoever holds them now. Doing only the first would leave a
+command with nothing whenever its default had been given away.
+
+**Sets are the whole map, not a diff.** A diff is smaller and is the wrong shape: a saved set
+has to still mean the same thing after a release changes a default, and a diff would silently
+absorb that change. Export and import are a clipboard round trip for now — the main process has
+pickers for *opening* a file and nothing for choosing where to save one, so the file version is
+a second route into the same function rather than a different feature.
+
+#### Capturing a chord while the app is listening for the same keys
+
+The only hard part. Press `Ctrl M` to rebind something and FLUX would send the sequence to
+render while you were still choosing. So capture installs its listener in the **capture phase**
+on `window` — which runs before the keymap's own bubble-phase listener — and calls
+`preventDefault`; the controller checks `defaultPrevented` and steps aside. The same mechanism
+the folder tree already uses to keep its arrows away from the playhead.
+
+It also has to produce chords the keymap can actually hold, and that includes the held-key ones:
+`S` is both a command and a modifier, so eight of the shipped bindings look like `s+arrowup`.
+Capture keeps its own held set and asks `chordOf` — the same function the controller asks —
+rather than assembling a chord string itself. A page that could display a binding it could not
+reproduce would be a page that quietly refuses to edit eight of its rows.
+
+#### A command registry is not a catalogue
+
+The thing the plan did not see, and the harness found it. Most commands belong to panels and are
+registered when the panel mounts, so `commands.list()` is whatever is open right now — and the
+settings page lives in a workspace with no Timeline, Viewer, Content Browser or Render in it.
+Measured: **47 commands loaded there, against the 117 this build has.** A hotkeys page built on
+that list would hide the entire Timeline from the one page made for rebinding it.
+
+The fix is not to move panel commands into the app — they belong to their panels, and that is the
+extension seam working as designed. What was missing was the difference between *runnable now*
+and *exists in this build*, so the registry gained `catalogue()`: everything it has been told
+about since launch, kept when the command goes away. The page lists that, and marks a command
+whose panel is closed — it can still be rebound, because the keymap is data and the binding
+works the moment the panel opens, but the key does nothing in the meantime and a row that looked
+identical to a live one would make that read as a broken rebind.
+
+```bash
+npm run verify:hotkeys
+```
+
+Eight checks, and none of them trusts the page's own state: a rebind is proved by dispatching a
+real key event and counting the command's real side effect, a conflict is proved by the chord
+*not* having changed hands until it is answered, and persistence is proved by reading the store
+back the way a cold boot does — including that a binding you deliberately cleared stays cleared,
+which it would not if the stored map were merged over the defaults.
 
 ### Batch: a folder in, a folder out
 

@@ -1,6 +1,9 @@
 import { useCallback, useMemo, useState } from 'react'
 
+import type { FunctionComponent } from 'react'
+
 import { PanelFrame } from './PanelFrame'
+import { HotkeysPage } from './settings/HotkeysPage'
 import { commands } from '../kernel/commands'
 import {
   FIRST_SETTINGS_PAGE,
@@ -143,12 +146,32 @@ export function SettingsPanel() {
   )
 }
 
-/** One page. Built ones will render themselves here; the rest state the plan. */
+/**
+ * The pages that have been built, by id.
+ *
+ * Here rather than on the page definition because `kernel/settings.ts` is
+ * kernel — it describes the settings tree and must not import React. The
+ * `ready` flag there stays the single statement of what is built, and
+ * `verify:settings` asserts the two agree in both directions: a page marked
+ * ready with nothing to render would be a blank page, and a component nobody
+ * can reach would be dead code.
+ */
+// Explicitly partial: most ids are not in here, and a lookup that TypeScript
+// believed always returned a component would make the `Built &&` below look
+// like a mistake rather than the point.
+const BUILT: Record<string, FunctionComponent | undefined> = {
+  'account.hotkeys': HotkeysPage,
+}
+
+/** One page: the built ones render themselves, the rest state the plan. */
 function SettingsContent({ page }: { page: SettingsPage }) {
+  const Built = BUILT[page.id]
   const level = settingsLevels.find((one) => one.id === page.level)
 
+  // A built page gets a wider column: 620px is right for prose and wrong for
+  // a table of commands and the keys they run.
   return (
-    <article className="settings-page">
+    <article className={`settings-page${Built ? ' settings-page--built' : ''}`}>
       <header className="settings-page-head">
         <div className="settings-page-crumb">
           {level?.name}
@@ -160,9 +183,15 @@ function SettingsContent({ page }: { page: SettingsPage }) {
 
       {page.livesAt && <LivesAt page={page} />}
 
+      {Built && <Built />}
+
       {page.coming && (
         <section className="settings-plan">
-          <h3 className="settings-plan-head">What this page will be</h3>
+          {/* On a built page this is what is still missing, which is a
+              different heading from what the page *will be*. */}
+          <h3 className="settings-plan-head">
+            {page.ready ? 'Still to come' : 'What this page will be'}
+          </h3>
           <p className="settings-plan-body">{page.coming}</p>
         </section>
       )}

@@ -155,19 +155,26 @@ export const settingsPages: SettingsPage[] = [
     level: 'account',
     name: 'Hotkeys & Presets',
     blurb: 'Every binding, and sets of them you can name',
-    ready: false,
+    /*
+     * The first page that changes anything, and it was first because the data
+     * model was already right: bindings have been a plain chord-to-command
+     * map since the first week, so the page is a view over that map. What had
+     * to be built was a store to keep an edited map in and a way to capture a
+     * chord without the app acting on the keys being pressed.
+     */
+    ready: true,
+    /*
+     * What is still missing, said here rather than on the page: export and
+     * import go through the clipboard, because the main process has pickers
+     * for opening a file and nothing for choosing where to save one. The text
+     * is the same either way, so a file route is a second way into
+     * `exportKeybindings` rather than a different feature.
+     */
     coming:
-      'A searchable list of every command with its binding, click-to-rebind, and conflict ' +
-      'detection that tells you what a chord is already taken by. Then named sets — a ' +
-      'Premiere set, a Resolve set, yours — exportable and importable, so a new machine is ' +
-      'one file away from feeling right. The hard part is already done and it is the data ' +
-      'model: bindings are a plain chord-to-command map, so an editor is a view over it ' +
-      'rather than a rewrite.',
-    livesAt: {
-      what: 'The bindings themselves, as remappable data, and the current chord for any command',
-      where: 'kernel/keymap.ts, and the command palette shows each binding beside its command',
-      command: 'palette.open',
-    },
+      'Export and import as a file rather than through the clipboard, which needs a save ' +
+      'dialog the main process does not have yet. Sets that ship with FLUX — a Premiere ' +
+      'set, a Resolve set — so muscle memory arrives with the app rather than being rebuilt ' +
+      'by hand.',
   },
 
   // ── Workspace ──────────────────────────────────────────────────

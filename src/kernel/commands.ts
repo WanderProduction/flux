@@ -39,10 +39,40 @@ export interface Disposable {
   dispose: () => void
 }
 
+/**
+ * A command the registry has been told about, whether or not it is loaded.
+ *
+ * Everything except `run` — which is the point. This is what something needs
+ * in order to *talk about* a command: list it, name it, group it, bind a key
+ * to it. Running it needs the real thing, and the real thing may belong to a
+ * panel that is closed.
+ */
+export type CommandInfo = Omit<Command, 'run' | 'enabled'>
+
 type Listener = () => void
 
 class CommandRegistry {
   private commands = new Map<string, Command>()
+  /**
+   * Everything registered since launch, kept when the command goes away.
+   *
+   * Most commands belong to panels and are registered when the panel mounts,
+   * so `commands` holds whatever is open right now — which is the right
+   * answer for running something and the wrong one for listing what this
+   * build can do. Measured: with the Settings workspace open, 47 of the 78
+   * commands the shipped keymap binds were registered, because that workspace
+   * has no Timeline, Viewer, Content Browser or Render panel in it. A hotkeys
+   * editor built on that list would hide half the app.
+   *
+   * Kept rather than rebuilt, because nothing can enumerate what a panel
+   * *will* register without mounting it. So this fills in as panels are
+   * opened, and the one gap left is a session that has never opened the panel
+   * at all — which the Hotkeys page states rather than hides.
+   *
+   * Not a memory leak worth worrying about: it is one small object per
+   * distinct command id, and a build has on the order of a hundred.
+   */
+  private known = new Map<string, CommandInfo>()
   private listeners = new Set<Listener>()
 
   register(command: Command): Disposable {
@@ -53,6 +83,12 @@ class CommandRegistry {
       console.warn(`[flux] command "${command.id}" was already registered — overwriting`)
     }
     this.commands.set(command.id, command)
+    this.known.set(command.id, {
+      id: command.id,
+      title: command.title,
+      category: command.category,
+      ...(command.detail ? { detail: command.detail } : {}),
+    })
     this.emit()
     return {
       dispose: () => {
@@ -71,8 +107,20 @@ class CommandRegistry {
     return this.commands.get(id)
   }
 
+  /** What can be run right now. */
   list(): Command[] {
     return [...this.commands.values()]
+  }
+
+  /**
+   * Everything this build has registered since launch, loaded or not.
+   *
+   * For anything that talks *about* commands rather than running them — the
+   * Hotkeys page is the first. Use `get` alongside it to tell whether a
+   * particular one can be run at this moment.
+   */
+  catalogue(): CommandInfo[] {
+    return [...this.known.values()]
   }
 
   isEnabled(command: Command): boolean {

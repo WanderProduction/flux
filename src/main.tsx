@@ -46,6 +46,7 @@ import * as batchExport from './kernel/batchExport'
 import * as sequenceExport from './kernel/sequenceExport'
 import * as keymap from './kernel/keymap'
 import * as settings from './kernel/settings'
+import * as keybindings from './kernel/keybindings'
 import * as renderBridge from './kernel/renderBridge'
 
 // Panels register before the first render so the dock's component map is
@@ -135,6 +136,7 @@ if (import.meta.env.DEV) {
       sequenceExport,
       keymap,
       settings,
+      keybindings,
       renderBridge,
       media: { audioSource },
       performance,
