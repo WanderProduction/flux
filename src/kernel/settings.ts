@@ -389,17 +389,14 @@ export const settingsPages: SettingsPage[] = [
     id: 'device.cache',
     level: 'device',
     name: 'Cache',
-    blurb: 'What is kept, where, and how much memory',
-    ready: false,
+    blurb: 'What is kept, where, and how much of it there is',
+    ready: true,
     coming:
-      'Where the index and thumbnail caches live and how large they may grow, with a button ' +
-      'that says how much is there and clears it. Prerendered and baked segments: what to ' +
-      'keep, when to build it, and whether a shared folder on the network serves a whole ' +
-      'room from one bake. And the memory budgets, which are the ones that actually decide ' +
-      'whether playback holds up — how many decoders may be open, how much decoded picture ' +
-      'may be held, how far ahead to warm.',
+      'Prerendered and baked segments: what to keep, when to build it, and whether a shared ' +
+      'folder on the network serves a whole room from one bake. Per-project cache locations, ' +
+      'for a machine where the fast disk is not the one the app was installed on.',
     livesAt: {
-      what: 'Decoder pool, frame memory and warm radius, each pinnable or left to follow the machine',
+      what: 'The budgets themselves — decoder pool, frame memory, warm radius and how much disk the cache may use, each pinnable or left to follow the machine',
       where: 'The performance dialog',
       command: 'app.performance',
     },

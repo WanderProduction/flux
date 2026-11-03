@@ -27,6 +27,7 @@ import * as playback from './kernel/playback'
 import * as importPipeline from './kernel/importPipeline'
 import * as videoSource from './kernel/media/videoSource'
 import * as performance from './kernel/performance'
+import * as cache from './kernel/cache'
 import * as indexCache from './kernel/media/indexCache'
 import * as ranges from './kernel/media/ranges'
 import * as peaks from './kernel/media/peaks'
@@ -142,6 +143,7 @@ if (import.meta.env.DEV) {
       renderBridge,
       media: { audioSource },
       performance,
+      cache,
     },
   })
 }

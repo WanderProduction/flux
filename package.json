@@ -31,6 +31,7 @@
     "verify:stills": "node scripts/verify-still-layers.mjs",
     "verify:settings": "node scripts/verify-settings.mjs",
     "verify:hotkeys": "node scripts/verify-hotkeys.mjs",
+    "verify:cache": "node scripts/verify-cache.mjs",
     "verify:appearance": "node scripts/verify-appearance.mjs",
     "verify:launch": "node scripts/verify-launch.mjs",
     "verify:playback": "node scripts/verify-playback.mjs",

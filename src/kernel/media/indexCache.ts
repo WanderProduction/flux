@@ -1,3 +1,4 @@
+import { KIND } from '../cache'
 import { assetUrl } from '../fsBridge'
 import { workEnded, workQueued, workStarted } from '../mediaWork'
 import { displaySize, readAudioTrack, readVideoTrack } from '../../../shared/mp4.js'
@@ -99,10 +100,17 @@ export type TrackResult = { ok: true; track: VideoTrack } | { ok: false; reason:
  */
 export type TrackKind = 'video' | 'audio'
 
-/** What each kind is filed under, in memory and on disk. */
+/**
+ * What each kind is filed under, in memory and on disk.
+ *
+ * The strings come from kernel/cache.ts rather than being written here,
+ * because the Cache settings page has to group a directory of hex-named files
+ * by kind — and a name declared privately by whoever writes it is a name the
+ * report cannot know. Rename one there and the page follows.
+ */
 const ENTRY_NAME: Record<TrackKind, string> = {
-  video: 'video-index',
-  audio: 'audio-index',
+  video: KIND.videoIndex,
+  audio: KIND.audioIndex,
 }
 
 /**

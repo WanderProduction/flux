@@ -69,6 +69,21 @@ contextBridge.exposeInMainWorld('flux', {
     /** Throws one cached thing away, so it is worked out again next time. */
     forget: (filePath, name) => ipcRenderer.invoke('media:forget', filePath, name),
   },
+  /**
+   * The cache in bulk, rather than one entry at a time.
+   *
+   * Separate from `media` because it is a different question with a different
+   * owner: `media` is the cache being used, this is the cache being accounted
+   * for, and the second one also covers Chromium's caches, which `media` knows
+   * nothing about. See the handlers in electron/main.js.
+   */
+  cache: {
+    measure: () => ipcRenderer.invoke('cache:measure'),
+    /** Everything, or one kind of entry. See mediaCache.clearCache. */
+    clear: (kind) => ipcRenderer.invoke('cache:clear', kind ?? null),
+    clearWindow: () => ipcRenderer.invoke('cache:clearWindow'),
+    reveal: () => ipcRenderer.invoke('cache:reveal'),
+  },
   project: {
     create: (root, name) => ipcRenderer.invoke('project:create', root, name),
     open: (root) => ipcRenderer.invoke('project:open', root),

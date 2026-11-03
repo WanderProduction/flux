@@ -153,7 +153,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
 | **Workspaces** | Saved panel layouts. `1` Edit, `2` Export, `3` Settings. |
-| **Settings** | `Ctrl ,` — three levels, nineteen pages. Two are real; the rest say what they will be. |
+| **Settings** | `Ctrl ,` — three levels, nineteen pages. Three are real; the rest say what they will be. |
 | **Themes** | Three dark ones, five accents, density and text size — all of it token overrides. |
 | **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets. |
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
@@ -1548,10 +1548,10 @@ A *project* setting is a fourth thing and it already has a home: sequence settin
 else's computer has to live. If a setting ever wants to be in the document, it is not a
 settings page, it is a document field.
 
-#### Two pages of nineteen are real, and the rest say so
+#### Three pages of nineteen are real, and the rest say so
 
-**Hotkeys & Presets** and **Appearance** are built — see below. The other seventeen are
-reachable and each states
+**Hotkeys & Presets**, **Appearance** and **Cache** are built — see below. The other sixteen
+are reachable and each states
 what it will hold, specifically enough to disagree with, which is the point: the ordering of
 this work is worth arguing about before any of it exists.
 [`docs/SETTINGS.md`](docs/SETTINGS.md) is the same content with the dependencies and the build
@@ -1716,6 +1716,59 @@ on a real element and asserts the colour or size it actually resolved to, becaus
 set an attribute nothing responded to would pass any test written against the store. The audit
 is one of the seven: new literals fail the run, as does any `var(--flux-…, literal)`, since a
 fallback is how four tokens hid for months.
+
+#### Cache: the page that found the prune was wrong
+
+Where the caches are, how much is in them by kind, and a button for each. FLUX could not answer
+any of those before — the honest answer was "open AppData and look", which is the answer every
+editor has been mocked for giving.
+
+**It sets nothing.** The budgets were already there: decoder pool, frame memory, warm radius and
+how much disk the cache may use all live in the performance dialog, resolved against the machine.
+A second slider here would have been a second place to change one number, and the loser would be
+whichever the user did not open. So the page points at that dialog and owns the half nothing
+owned — the measurement.
+
+Which is how it found the bug. The page draws a bar of what is cached against the budget it is
+pruned to, and putting those two numbers next to each other meant fetching them from opposite
+sides of the app. **They did not match: 256MB against 5991MB.**
+
+`kernel/performance.ts` scales the disk budget with system memory, 64MB per gigabyte. The main
+process could not run that formula — it is TypeScript in the renderer bundle, and the prune
+happens at startup before any renderer exists to ask — so it read the store, found nothing
+pinned, and fell back to the cache's own 256MB default. Nothing pinned is the normal state: it is
+every machine where nobody has opened the performance dialog. The index cache was being trimmed
+to a twenty-third of its intended size on every launch, and the only symptom was clips taking the
+slow path to open again for no reason anybody could point at. A cache quietly too small does not
+look like a bug, it looks like the app. The formula is in `shared/performanceDefaults.js` now
+and both sides read it.
+
+**Two caches, and only one is ours.** The other thing measuring turned up: 30MB of FLUX's media
+cache against **619MB of Chromium's** in the same folder — fetched files and V8's compiled code,
+twenty times the size, never counted and never cleared by anything. They have their own group on
+the page, labelled as not ours, emptied through `session.clearCache()` and `clearCodeCaches()`
+rather than by deleting directories that are open. The shader caches beside them are left alone
+and not mentioned: held by the GPU process, rebuilt by the driver, and a button that cannot work
+is worse than no button.
+
+Entries are hex-named files, so the four kinds — thumbnails, audio peaks, and a frame index each
+for picture and sound — are read out of each entry's header and listed cheapest-to-rebuild first,
+because that is the order somebody clearing selectively reads them in. Those names used to be
+private constants in whichever module wrote them; they are in `kernel/cache.ts` now and the
+producers import them, because a name declared privately is a name the report cannot know.
+
+```bash
+npm run verify:cache
+```
+
+Thirteen checks in two halves. The measurement runs against a real temp directory from plain Node
+with no app, writing through the real `writeDerived` so the header the kind is read back out of
+is the one the app writes. The page is then checked against the directory it describes — the path
+it names is the one the app caches into, the bar is drawn against the budget the main process
+prunes to, a hand-edited budget is held to the same bounds on both sides, and clears are pressed
+and the disk re-measured, the window one included, because the
+Electron APIs behind it are the only part of this page that cannot be reasoned about from our own
+code.
 
 ### Batch: a folder in, a folder out
 

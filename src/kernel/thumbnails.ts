@@ -18,6 +18,7 @@
  *     left the screen a minute ago.
  */
 
+import { KIND } from './cache'
 import type { MediaKind } from './fsBridge'
 
 interface MediaBridge {
@@ -139,7 +140,7 @@ import { workEnded, workQueued, workStarted } from './mediaWork'
  * necessary — the answer had been computed, it had simply never been written
  * down.
  */
-const ENTRY_NAME = 'thumb'
+const ENTRY_NAME = KIND.thumb
 
 const MAX_EDGE = 320
 const JPEG_QUALITY = 0.72

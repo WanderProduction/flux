@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, screen, session, shell } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import os from 'node:os'
 
 import { DIALOG_FILTERS, mediaKindOf } from '../shared/mediaTypes.js'
+import { clamp, defaultsFor, LIMITS } from '../shared/performanceDefaults.js'
 import {
   existsMany,
   isServableMediaPath,
@@ -20,7 +21,9 @@ import { DEFAULT_PORT, mintToken, startControl, writeToken } from './control.js'
 import { checkEncoder, findTools } from './render.js'
 import { RenderQueue } from './renderQueue.js'
 import {
+  clearCache,
   forgetDerived,
+  measureCache,
   pruneCache,
   readDerived,
   hasDerived,
@@ -588,6 +591,138 @@ ipcMain.handle('media:forget', (_e, filePath, name) =>
   forgetDerived(mediaCachePath(), filePath, name),
 )
 
+/*
+ * ── what is on disk, and a way to be rid of it ────────────────
+ *
+ * Until this existed the only honest answer to "how much disk is FLUX using"
+ * was "open AppData and look", which is the answer every NLE is mocked for.
+ *
+ * Two caches are reported and they are not the same kind of thing. The media
+ * cache is ours: we chose its layout, we chose its budget, and the renderer
+ * can say what it holds. The window's caches belong to Chromium — the HTTP
+ * cache and V8's compiled code — and we chose nothing about them, including
+ * how big they get. Measured on this machine while the page was being built:
+ * 30MB of media cache against 619MB of Chromium's, which is the whole reason
+ * the second group is on the page at all. A page that reported only the cache
+ * we designed would have been off by a factor of twenty.
+ */
+
+/**
+ * How much disk the media cache may use.
+ *
+ * A pinned value if there is one, and otherwise what this machine should
+ * choose — read through the same formula the renderer resolves, from
+ * shared/performanceDefaults.js.
+ *
+ * It used to fall back to mediaCache's own 256MB constant, with a comment
+ * saying the default stood on any machine that had never opened the settings.
+ * It does not: the renderer's default scales with memory, so this side was
+ * pruning to 256MB while the performance dialog showed 5991MB — and the Cache
+ * page, which draws a bar of one against the other, is what finally made the
+ * two numbers sit next to each other.
+ *
+ * Clamped through the same bounds for the same reason. The store is a JSON
+ * file on disk that anybody can edit, and `settle()` in kernel/performance.ts
+ * already holds what it finds to LIMITS before showing it. A side that did
+ * not would disagree with the dialog again the moment somebody typed a 1 in
+ * there — which is the bug above wearing a different hat.
+ */
+const diskBudget = async () => {
+  const machine = { totalMemoryBytes: os.totalmem(), cpuCount: os.cpus().length }
+  const base = defaultsFor(machine).diskCacheMb
+  const mb = Number((await readStore('performance'))?.diskCacheMb)
+  return clamp(mb ?? base, LIMITS.diskCacheMb, base) * 1024 * 1024
+}
+
+/**
+ * Every byte under a directory.
+ *
+ * Chromium offers a size for the HTTP cache and nothing for the rest, so the
+ * directories are walked instead. Walking also gives the number the user
+ * arrived with — what Explorer shows them — rather than Chromium's idea of
+ * what it is currently accounting for, and those two disagree.
+ */
+const dirBytes = async (dir) => {
+  let entries
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let bytes = 0
+  for (const entry of entries) {
+    const at = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      bytes += await dirBytes(at)
+      continue
+    }
+    try {
+      bytes += (await fs.stat(at)).size
+    } catch {
+      // Chromium rewriting a cache file underneath the walk. Not an error.
+    }
+  }
+  return bytes
+}
+
+/**
+ * The two Chromium caches worth a number, and nothing else.
+ *
+ * `Cache` is the HTTP cache; `Code Cache` is V8 keeping compiled JavaScript so
+ * a launch does not recompile the bundle. Both have a real API that empties
+ * them, which is the test for being on this list — the shader caches beside
+ * them are a couple of megabytes, held open by the GPU process, and rebuilt by
+ * the driver whether we like it or not. Offering a button that cannot work is
+ * worse than not mentioning them.
+ */
+const WINDOW_CACHES = [
+  { id: 'http', name: 'Fetched files', dir: 'Cache' },
+  { id: 'code', name: 'Compiled code', dir: 'Code Cache' },
+]
+
+/** What each of them currently holds, in the order the page lists them. */
+const windowCaches = async () => {
+  const root = app.getPath('userData')
+  const parts = []
+  for (const part of WINDOW_CACHES) {
+    parts.push({ id: part.id, name: part.name, bytes: await dirBytes(path.join(root, part.dir)) })
+  }
+  return { dir: root, bytes: parts.reduce((n, p) => n + p.bytes, 0), parts }
+}
+
+ipcMain.handle('cache:measure', async () => ({
+  media: await measureCache(mediaCachePath(), await diskBudget()),
+  window: await windowCaches(),
+}))
+
+ipcMain.handle('cache:clear', (_e, kind) => clearCache(mediaCachePath(), kind ?? null))
+
+/**
+ * Empties the window's caches through the APIs that own them.
+ *
+ * Not `rm` on the directories: they are open, and on Windows that fails
+ * halfway and leaves a cache Chromium believes in and cannot read. The bytes
+ * freed are measured either side rather than reported by the APIs, which
+ * report nothing.
+ */
+ipcMain.handle('cache:clearWindow', async () => {
+  const before = (await windowCaches()).bytes
+
+  const ses = session.defaultSession
+  await ses.clearCache().catch(() => {})
+  await ses.clearCodeCaches({}).catch(() => {})
+
+  const after = (await windowCaches()).bytes
+  return { bytes: Math.max(0, before - after) }
+})
+
+/** Opens the cache directory, which is the other half of saying where it is. */
+ipcMain.handle('cache:reveal', async () => {
+  const dir = mediaCachePath()
+  await fs.mkdir(dir, { recursive: true }).catch(() => {})
+  return shell.openPath(dir)
+})
+
 ipcMain.handle('dialog:pickProjectFile', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const result = await dialog.showOpenDialog(win, {
@@ -844,19 +979,14 @@ app.whenReady().then(() => {
    * the app starting, and a directory full of indexes to stat is exactly the
    * kind of thing that has no business happening before the first paint.
    *
-   * The budget is read here rather than sent from the renderer, because this
-   * side owns the store and the prune happens before the renderer could have
-   * told us anything. Same key the renderer writes — see
-   * src/kernel/performance.ts — and the default stands when it is absent,
-   * which is every machine that has never opened the settings.
+   * The budget is worked out here rather than sent from the renderer, because
+   * this side owns the store and the prune happens before the renderer could
+   * have told us anything. See diskBudget, which is also what the Cache
+   * settings page draws its bar against — the two have to agree or the page
+   * shows a cache comfortably inside a limit it is being trimmed to.
    */
   void (async () => {
-    const chosen = await readStore('performance')
-    const mb = Number(chosen?.diskCacheMb)
-    await pruneCache(
-      mediaCachePath(),
-      Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : undefined,
-    ).catch(() => {})
+    await pruneCache(mediaCachePath(), await diskBudget()).catch(() => {})
   })()
 
   // Same reasoning, one step further: whether a newer FLUX exists is never a

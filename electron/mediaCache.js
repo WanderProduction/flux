@@ -76,12 +76,21 @@ const HEADER_BYTES = 32
 const SUFFIX = '.fluxidx'
 
 /**
- * How much disk the cache may hold before the least recently used entries go.
+ * The budget when a caller names none.
  *
- * Generous, because an index is small next to what it stands for: 256MB of
- * indexes is roughly two hundred hours of footage, and the media itself would
- * be terabytes. The budget exists so the directory cannot grow without limit,
- * not because the space is precious.
+ * **The app always names one.** It comes from the performance settings,
+ * resolved against the machine — 64MB per gigabyte of memory, so around six
+ * gigabytes on a large one — and both the startup prune and the Cache
+ * settings page read it through `diskBudget` in electron/main.js. This
+ * constant is what a harness gets when it calls these functions against a
+ * temp directory and does not care.
+ *
+ * It was the operative number until the Cache page was built, and that was a
+ * bug: the main process fell back to it on any machine where nobody had
+ * pinned a performance setting, which is nearly all of them, so the cache was
+ * pruned to a twenty-third of the budget the app was reporting. Generous as a
+ * floor — 256MB of indexes is roughly two hundred hours of footage — and far
+ * too small as a silent default.
  */
 export const CACHE_BUDGET_BYTES = 256 * 1024 * 1024
 
@@ -409,4 +418,138 @@ export async function pruneCache(dir, budget = CACHE_BUDGET_BYTES) {
   }
 
   return { kept, removed, bytes }
+}
+
+/**
+ * Reads the kind out of an entry's preamble.
+ *
+ * A directory of hex-named files says nothing about what is in it, and the
+ * difference matters: a thumbnail is a few kilobytes and a second to rebuild,
+ * a sample table for a 36,000-frame clip is a megabyte and twenty-two
+ * milliseconds of ranged reads per open. Somebody who wants the pictures
+ * thrown away should not have to throw away the indexes with them.
+ *
+ * One short read per entry, no payload. Anything unreadable comes back null
+ * and is counted as such rather than guessed at — see measureCache.
+ */
+async function entryKind(at) {
+  let handle
+  try {
+    handle = await fs.open(at, 'r')
+  } catch {
+    return null
+  }
+  try {
+    const want = HEADER_BYTES + 4096
+    const buffer = Buffer.allocUnsafe(want)
+    const { bytesRead } = await handle.read(buffer, 0, want, 0)
+    if (bytesRead < HEADER_BYTES) return null
+
+    const head = new DataView(buffer.buffer, buffer.byteOffset, bytesRead)
+    if (head.getUint32(0, true) !== MAGIC) return null
+    if (head.getUint16(4, true) !== ENTRY_FORMAT) return null
+
+    const from = HEADER_BYTES + head.getUint16(6, true) + head.getUint16(12, true)
+    const nameLength = head.getUint16(14, true)
+    if (from + nameLength > bytesRead) return null
+    return new TextDecoder().decode(
+      new Uint8Array(buffer.buffer, buffer.byteOffset + from, nameLength),
+    )
+  } catch {
+    return null
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/**
+ * How much is in the cache, and what kind of thing it is.
+ *
+ * The question the Cache settings page exists to answer, and until it did the
+ * only honest answer was "open AppData and look". Sized by stat rather than by
+ * the length in the header, because a budget is about disk and a half-written
+ * entry from a crash occupies disk whatever its header claims.
+ *
+ * `newest` is the last time anything here was *used* — readDerived touches an
+ * entry on every hit — so a cache nobody has reached for in a month is
+ * visible as one.
+ *
+ * @returns {Promise<{ dir: string, budget: number, bytes: number, entries: number,
+ *   byKind: Record<string, { bytes: number, entries: number }>, unreadable: number,
+ *   newest: number }>}
+ */
+export async function measureCache(dir, budget = CACHE_BUDGET_BYTES) {
+  const empty = { dir, budget, bytes: 0, entries: 0, byKind: {}, unreadable: 0, newest: 0 }
+
+  let names
+  try {
+    names = (await fs.readdir(dir)).filter((name) => name.endsWith(SUFFIX))
+  } catch {
+    // No directory yet, which is every machine that has not opened a file.
+    return empty
+  }
+
+  const out = { ...empty, byKind: {} }
+  for (const file of names) {
+    const at = path.join(dir, file)
+    let stat
+    try {
+      stat = await fs.stat(at)
+    } catch {
+      continue
+    }
+
+    const kind = await entryKind(at)
+    if (kind === null) out.unreadable += 1
+    const bucket = (out.byKind[kind ?? ''] ??= { bytes: 0, entries: 0 })
+    bucket.bytes += stat.size
+    bucket.entries += 1
+
+    out.bytes += stat.size
+    out.entries += 1
+    if (stat.mtimeMs > out.newest) out.newest = stat.mtimeMs
+  }
+  return out
+}
+
+/**
+ * Empties the cache, or one kind of it.
+ *
+ * The button every NLE has, for the reason given at forgetDerived: a cache can
+ * be wrong in ways nobody can diagnose, and being able to throw it away is the
+ * difference between a bad afternoon and a reinstall. Nothing is lost — every
+ * byte in here was derived from media that is still there.
+ *
+ * An entry whose preamble cannot be read survives a by-kind clear and dies in
+ * a full one. It cannot be attributed, so attributing it would be a guess, and
+ * guessing wrong here deletes the expensive thing to spare the cheap one.
+ *
+ * @returns {Promise<{ removed: number, bytes: number }>}
+ */
+export async function clearCache(dir, only = null) {
+  let names
+  try {
+    names = (await fs.readdir(dir)).filter((name) => name.endsWith(SUFFIX))
+  } catch {
+    return { removed: 0, bytes: 0 }
+  }
+
+  let removed = 0
+  let bytes = 0
+  for (const file of names) {
+    const at = path.join(dir, file)
+    if (only !== null && (await entryKind(at)) !== only) continue
+
+    let size = 0
+    try {
+      size = (await fs.stat(at)).size
+    } catch {
+      // Gone already. Still worth the rm, which will simply find nothing.
+    }
+    if (await fs.rm(at, { force: true }).then(() => true, () => false)) {
+      removed += 1
+      bytes += size
+    }
+  }
+  return { removed, bytes }
 }

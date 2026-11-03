@@ -4,6 +4,7 @@ import type { FunctionComponent } from 'react'
 
 import { PanelFrame } from './PanelFrame'
 import { AppearancePage } from './settings/AppearancePage'
+import { CachePage } from './settings/CachePage'
 import { HotkeysPage } from './settings/HotkeysPage'
 import { commands } from '../kernel/commands'
 import {
@@ -163,6 +164,7 @@ export function SettingsPanel() {
 const BUILT: Record<string, FunctionComponent | undefined> = {
   'account.appearance': AppearancePage,
   'account.hotkeys': HotkeysPage,
+  'device.cache': CachePage,
 }
 
 /** One page: the built ones render themselves, the rest state the plan. */
@@ -242,7 +244,7 @@ function LivesAt({ page }: { page: SettingsPage }) {
       <p className="settings-lives-what">{lives.what}</p>
       <p className="settings-lives-where">{lives.where}</p>
       {lives.command && (
-        <button className="settings-lives-go" onClick={go}>
+        <button className="settings-lives-go" data-command={lives.command} onClick={go}>
           Take me there
         </button>
       )}

@@ -42,6 +42,21 @@
  */
 
 import { loadStore, saveStore } from './store'
+/*
+ * The numbers live in shared/ rather than here, and the reason is the startup
+ * prune: the main process trims the media cache to the disk budget before any
+ * renderer exists to be asked what it is. A formula that lived only in this
+ * file left that side guessing, and it guessed 256MB against this side's
+ * 5991MB. One formula, two readers — see the note at the top of that file.
+ */
+import {
+  clamp,
+  defaultsFor as defaultsForMachine,
+  LIMITS,
+} from '../../shared/performanceDefaults.js'
+
+/** Re-exported, because a caller asking what the bounds are should not have to know. */
+export { LIMITS } from '../../shared/performanceDefaults.js'
 
 export interface PerformanceSettings {
   /**
@@ -110,78 +125,15 @@ interface MachineBridge {
  */
 let machine: Machine = { totalMemoryBytes: 8 * 1024 * 1024 * 1024, cpuCount: 4 }
 
-const GB = 1024 * 1024 * 1024
-
-/** Bounds, which exist to stop a hand-edited store making the app unusable. */
-export const LIMITS = {
-  /*
-   * The floors are the values these were before they were settings, not the
-   * smallest number that would work. A setting that can make the app slower
-   * than it was is a trap, and a machine small enough to want less than this
-   * is a machine that will not be playing 4K either way.
-   */
-  /*
-   * The ceiling here is deliberately above what measured well. Twenty-four
-   * concurrent HEVC decoders cost a tenth of the frame rate on the GPU this
-   * was measured on, but that is one GPU and one codec, and a bound that
-   * refused what some hardware can do would be a worse answer than a default
-   * that does not reach for it. The default is twelve; see `defaultsFor`.
-   */
-  decoderPool: { min: 6, max: 96 },
-  warmRadius: { min: 0, max: 8 },
-  frameMemoryMb: { min: 256, max: 8192 },
-  diskCacheMb: { min: 256, max: 262144 },
-} as const
-
-/**
- * Clips that keep a decoder open, on every machine.
- *
- * Twelve rather than thirteen because the cliff was measured between thirteen
- * and twenty-four open HEVC decoders and a default should sit below a cliff,
- * not on it. Twelve measured identical to six on both H.264 and HEVC — flat
- * across three passes, no gaps over 100ms — so the headroom above the seven
- * that a warm radius of three keeps open costs nothing and is there for
- * moving back and forth across a few cuts while editing.
- */
-const DECODER_POOL = 12
-
-function clamp(value: number, { min, max }: { min: number; max: number }, fallback: number): number {
-  if (!Number.isFinite(value)) return fallback
-  return Math.min(max, Math.max(min, Math.round(value)))
-}
-
 /**
  * What this machine should do by default.
  *
- * Memory is the thing worth scaling against. It is the resource the app
- * actually consumes, it is knowable exactly, and it tracks how serious a
- * computer is closely enough for this purpose — nobody puts ninety-four
- * gigabytes in a machine they do not intend to work on.
- *
- * **The decoder pool is deliberately not scaled against it.** It was, and that
- * was the one real mistake in this file: system memory says nothing about how
- * many streams a GPU will decode at once, so scaling a decode-session count
- * by gigabytes gave this machine fifty-three and cost it a tenth of its frame
- * rate on HEVC. A number that cannot be derived from anything knowable here
- * is better left at the largest value measured to be safe on the heavier
- * codec, with the setting there for anyone whose hardware does more.
- *
- * **Frame memory still is**, and the difference is the point. The kept runs
- * are `ImageBitmap`s and they land in the renderer's own working set: in the
- * arm that held 14.8GB of them, the process grew by 11.7GB while the GPU grew
- * by 1.8GB. So gigabytes of system memory is the right thing to read for this
- * one and the wrong thing to read for the pool, whose decode sessions live on
- * the card. Two settings in the same struct, scaled from the same number, and
- * only one of them was entitled to it.
+ * The formula is shared; what is local is *which machine* — `machine` here is
+ * filled in by the main process's reply and falls back to a modest laptop, and
+ * a caller that passes nothing means "this one".
  */
 export function defaultsFor(spec: Machine = machine): PerformanceSettings {
-  const gb = spec.totalMemoryBytes / GB
-  return {
-    decoderPool: DECODER_POOL,
-    warmRadius: clamp(gb >= 32 ? 3 : gb >= 16 ? 2 : 1, LIMITS.warmRadius, 1),
-    frameMemoryMb: clamp(gb * 16, LIMITS.frameMemoryMb, 256),
-    diskCacheMb: clamp(gb * 64, LIMITS.diskCacheMb, 256),
-  }
+  return defaultsForMachine(spec)
 }
 
 let settings: PerformanceSettings = defaultsFor()

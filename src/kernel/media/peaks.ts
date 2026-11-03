@@ -1,3 +1,4 @@
+import { KIND } from '../cache'
 import { readPcm } from './audioSource'
 import { workEnded, workQueued, workStarted } from '../mediaWork'
 import { assetUrl } from '../fsBridge'
@@ -39,8 +40,8 @@ import {
  * than a second or so behind.
  */
 
-/** Filed under this in the media cache. See electron/mediaCache.js. */
-const ENTRY_NAME = 'peaks'
+/** Filed under this in the media cache. Named in kernel/cache.ts, which reports on it. */
+const ENTRY_NAME = KIND.peaks
 
 /** Chunks allowed to sit in the decoder before the feed waits for it. */
 const MAX_QUEUED_CHUNKS = 64

@@ -2,10 +2,10 @@
 
 ### Three levels, nineteen pages, and the order to build them in
 
-> Plan doc. The shell is built and every page in it is reachable. **Two of the nineteen are
-> real** — Hotkeys & Presets and Appearance — and seven of the rest point at a setting that
-> already exists somewhere else in FLUX. This is the document that says what each page will
-> hold and, more usefully, what has to exist underneath it first.
+> Plan doc. The shell is built and every page in it is reachable. **Three of the nineteen are
+> real** — Hotkeys & Presets, Appearance and Cache — and seven of the rest point at a setting
+> that already exists somewhere else in FLUX. This is the document that says what each page
+> will hold and, more usefully, what has to exist underneath it first.
 >
 > Open it in the app with `3` or `Ctrl ,` and read it there: each page states its own plan,
 > and the side panel's search reads those plans, so "VST" finds Plugins without knowing it is
@@ -239,14 +239,91 @@ the right box.
 | **Saves** | Autosave interval and how many versions, where backups go, a list of them, opening one without overwriting. Save before a render | A backup writer |
 | **Display** | Pixel format and bit depth for the preview, colour management for this monitor, HDR, which screen a full-screen preview uses | Colour management, which is the real work |
 | **Mapping** | Clip label colours and what each means, marker colours, media icons, the colours the readiness strip uses | Nothing |
-| **Cache** | Where the index and thumbnail caches live and how large, with a size and a clear. Prerender and bake policy, including a shared folder. The memory budgets | Partly built — the performance dialog is these budgets |
+| **Cache** | **Built.** Where the caches are, how much is in them by kind, and a clear for each. Still to come: prerender and bake policy, a shared bake folder, per-project cache locations | — |
 | **3D** | Import formats, scale and axis conventions, what to do with cameras and lights, which renderer | Reading a mesh at all |
 
-**Cache first, and it is not close.** Three of its numbers already exist and are already
-measured — the decoder pool, the frame-memory budget and the warm radius, each pinnable or left
-to follow the machine. What is missing is the rest of the page: where the caches are, how big
-they have grown, and a button that empties them. Those are the questions people actually ask,
-and today the only honest answer is "look in AppData yourself".
+**Cache was first, and it is built.** The three questions a cache page exists to answer are
+where it is, how big it has got and how to empty it, and FLUX could answer none of them — the
+honest answer was "open AppData and look", which is the answer every editor has been mocked for
+giving. The page answers all three, by kind, and clears them the same way.
+
+### It is a measurement, not another set of sliders
+
+The budgets were already there. How many decoders may be open, how much decoded picture may be
+held, how far ahead to warm and **how much disk the cache may use** are all in the performance
+dialog, resolved against the machine, and the main process reads the disk one out of the store to
+prune to at startup. A second slider on this page would have meant two places to change one
+number and the loser would be whichever the user did not open. So the page points at that dialog
+and owns the half nothing owned.
+
+Which is how it found the bug.
+
+### The prune and the dialog disagreed by a factor of twenty-three
+
+The page draws a bar of what is cached against the budget it is pruned to, and the two numbers
+had to be fetched from opposite sides of the app to put next to each other. They did not match:
+**256MB on one side and 5991MB on the other.**
+
+`kernel/performance.ts` scales the disk budget with system memory — 64MB per gigabyte — which on
+a 94GB machine is around six gigabytes. The main process could not run that formula: it is
+TypeScript in the renderer bundle, and the prune happens at startup, before any renderer exists
+to be asked. So it read the store, found nothing pinned, and fell back to the media cache's own
+`CACHE_BUDGET_BYTES` of 256MB.
+
+Nothing pinned is the normal state. It is every machine where nobody has opened the performance
+dialog, which is nearly all of them. So the index cache was being trimmed to a twenty-third of
+its intended size on first launch, every launch, and the only symptom was clips occasionally
+taking the slow path to open again for no reason anybody could point at. A cache quietly too
+small does not look like a bug; it looks like the app.
+
+The formula now lives in `shared/performanceDefaults.js` — plain JS with no imports, like the
+rest of `shared/` — and both sides read it. One formula, two readers, and a check that fails if
+they ever disagree again.
+
+### Two caches, and only one of them is ours
+
+The other thing measuring turned up: on the machine this was built on, FLUX's media cache held
+**30MB** and Chromium's caches beside it held **619MB**. Fetched files and V8's compiled code,
+in the same app-data folder, twenty times the size of the cache we designed — and nothing in
+FLUX had ever cleared them or counted them.
+
+So they are on the page, in their own group, labelled as not ours. A page that reported only the
+cache we chose the layout and the budget for would have been wrong by a factor of twenty and
+would have sent anybody short of disk looking in the wrong folder. They are cleared through
+`session.clearCache()` and `clearCodeCaches()` rather than by deleting the directories, which
+are open — on Windows that fails halfway and leaves a cache Chromium believes in and cannot read.
+
+The shader caches next to them are left alone and not mentioned: a couple of megabytes, held open
+by the GPU process, rebuilt by the driver whether we like it or not. A button that cannot work is
+worse than no button, which is the same rule the rest of these pages follow.
+
+### What a kind is, and why the names moved
+
+Entries are hex-named files in one directory, so a report has to open each one to know what it
+holds. Four kinds do: thumbnails, audio peaks, and a frame index each for picture and sound. They
+are listed in that order — cheapest to rebuild first — because that is the order somebody
+clearing selectively wants to read them in. A thumbnail is a second; a sample table for a long
+clip is a megabyte and twenty-two milliseconds of ranged reads on every open.
+
+Each of those names used to be a private constant in whichever module wrote it. They are in
+`kernel/cache.ts` now and the producers import them, because a name declared privately is a name
+the report cannot know: rename one and the page grows a mystery bucket instead of a row. An entry
+whose header cannot be read — a write cut short by a crash — is counted and shown, and survives a
+by-kind clear rather than being guessed at. Guessing wrong there deletes the expensive thing to
+spare the cheap one.
+
+```bash
+npm run verify:cache
+```
+
+Thirteen checks, in two halves. The measurement is exercised against a real temp directory from
+plain Node with no app running, writing entries through the real `writeDerived` so the preamble
+the kind is read back out of is the one the app writes. The page is then checked against the
+directory it is describing: the path it names is the one the app caches into, the bar is drawn
+against the budget the main process prunes to, a hand-edited budget is held to the same bounds
+on both sides, and a clear is pressed and the disk re-measured —
+including the window one, pressed for real, because the two Electron APIs behind it are the only
+part of this page that cannot be reasoned about from our own code.
 
 **Then Audio**, because it is the one gap in this level that stops work rather than slowing it.
 A session mixed through motherboard output is a session mixed wrong, and there is currently no
@@ -273,7 +350,7 @@ looking for a feature they already own.
 | Audio | The sequence's rate and channel count | Sequence settings (a document fact, not a device one) |
 | Saves | Saving the project | `Ctrl S` |
 | Display | Preview resolution, separately for playing and for a paused frame | Viewer toolbar |
-| Cache | Decoder pool, frame memory, warm radius | Performance dialog |
+| Cache | The budgets themselves — decoder pool, frame memory, warm radius, disk | Performance dialog |
 
 ---
 

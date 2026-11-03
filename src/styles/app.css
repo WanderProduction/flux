@@ -4440,3 +4440,196 @@ kbd {
   padding-top: 12px;
   border-top: 1px solid var(--flux-border);
 }
+
+/* ── settings: Cache ──────────────────────────────────────────
+ *
+ * No colour literals and no hardcoded font sizes, which is not a style note:
+ * verify:appearance counts both and fails the run on a new one. Everything
+ * here resolves through the tokens, so a theme reaches this page for free.
+ */
+.ca {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ca-group {
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+  padding: 13px 14px 11px;
+}
+.ca-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ca-title {
+  margin: 0;
+  font-size: var(--flux-text-lg);
+  font-weight: 600;
+}
+.ca-size {
+  font-size: var(--flux-text-md);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ca-of {
+  color: var(--flux-text-dim);
+}
+.ca-bar {
+  margin: 10px 0 9px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--flux-border);
+  overflow: hidden;
+}
+.ca-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--flux-accent-dim);
+}
+.ca-where {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 9px;
+  flex-wrap: wrap;
+}
+.ca-path {
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+  background: var(--flux-bg-elevated);
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  padding: 2px 6px;
+  overflow-wrap: anywhere;
+}
+.ca-note {
+  margin: 0 0 10px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+  max-width: 78ch;
+}
+.ca-empty {
+  margin: 0 0 8px;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+}
+.ca-rows {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  border-top: 1px solid var(--flux-border);
+}
+.ca-row {
+  display: grid;
+  grid-template-columns: 1fr auto 68px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--flux-border);
+}
+.ca-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ca-row-name {
+  font-size: var(--flux-text-md);
+}
+.ca-row-note {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.45;
+}
+.ca-row--plain .ca-row-name {
+  font-size: var(--flux-text-md);
+}
+.ca-row-count {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+}
+.ca-row-entries {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.ca-clear,
+.ca-recheck {
+  justify-self: end;
+  padding: 4px 9px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ca-clear:hover:not(:disabled),
+.ca-recheck:hover:not(:disabled) {
+  background: var(--flux-bg-hover);
+  border-color: var(--flux-dim);
+}
+.ca-clear:disabled,
+.ca-recheck:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ca-clear--armed {
+  border-color: var(--flux-danger);
+  color: var(--flux-danger);
+}
+.ca-clear--armed:hover:not(:disabled) {
+  background: var(--flux-danger-strong);
+  border-color: var(--flux-danger-strong);
+  color: var(--flux-text);
+}
+.ca-clear-spacer {
+  display: block;
+}
+.ca-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--flux-accent);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+.ca-group-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ca-stamp {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+}
+.ca-stamp--odd {
+  color: var(--flux-dim);
+}
+.ca-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.ca-freed {
+  margin: 0;
+  color: var(--flux-ok);
+  font-size: var(--flux-text-sm);
+}
