@@ -508,7 +508,7 @@ try {
        const before = tabs();
 
        const panelsIn = async () => {
-         const saved = await window.flux.store.get('workspaces');
+         const saved = await window.flux.store.get('layouts');
          return JSON.stringify(saved?.edit ?? null);
        };
 
@@ -559,7 +559,7 @@ try {
     // Put it back, so the checks after this one get the workspace they expect.
     await evaluate(
       cdp,
-      `await window.__fluxDev.commands.run('workspace.reset');
+      `await window.__fluxDev.commands.run('layout.reset');
        await new Promise(r => setTimeout(r, 900));
        return true;`,
     )
@@ -847,38 +847,38 @@ try {
     assert.equal(result.tag, 'last', `the later write should win, got tag=${result.tag}`)
   })
 
-  await check('each workspace keeps its own panels, switch after switch', async () => {
+  await check('each layout keeps its own panels, switch after switch', async () => {
     /*
-     * The bug this exists for only appears once there are two workspaces, and
+     * The bug this exists for only appears once there are two layouts, and
      * it appears on the *second* switch.
      *
      * Layout changes are saved on a debounce, and the save used to read the
      * active id from a render closure — so a change arriving just after a
-     * switch was filed under whichever workspace was open *before*. Each
+     * switch was filed under whichever layout was open *before*. Each
      * layout therefore got written under the other's name, and going back to
      * one you had already visited produced the other one's panels. With a
-     * single workspace it is invisible, which is exactly why it survived.
+     * single layout it is invisible, which is exactly why it survived.
      */
     const state = await evaluate(
       cdp,
       `const { commands, view } = window.__fluxDev;
        const tabs = () => [...document.querySelectorAll('.dv-tab')].map(e => e.textContent.trim()).sort();
        const go = async (id) => {
-         await commands.run('workspace.switch.' + id);
+         await commands.run('layout.switch.' + id);
          // Past the debounce, so a late save lands before the next switch.
          await new Promise(r => setTimeout(r, 900));
-         return { workspace: view.getView().workspace, tabs: tabs() };
+         return { layout: view.getView().layout, tabs: tabs() };
        };
        const edit = await go('edit');
        const exported = await go('export');
        const backToEdit = await go('edit');
        const backToExport = await go('export');
        // Put it back: every check after this one wants the Edit panels, and a
-       // check that leaves another workspace open breaks all of them.
+       // check that leaves another layout open breaks all of them.
        await go('edit');
        return { edit, exported, backToEdit, backToExport };`,
     )
-    assert.equal(state.exported.workspace, 'export')
+    assert.equal(state.exported.layout, 'export')
     assert.ok(
       state.exported.tabs.includes('To render'),
       `Export showed ${state.exported.tabs.join(', ')}`,
@@ -891,7 +891,7 @@ try {
     assert.deepEqual(
       state.backToExport.tabs,
       state.exported.tabs,
-      'the second visit to Export showed another workspace’s panels',
+      'the second visit to Export showed another layout’s panels',
     )
   })
 
@@ -1046,7 +1046,7 @@ try {
        const bridge = window.flux && window.flux.menu;
        const ids = () => commands.list().map(c => c.id);
 
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 700));
 
        const kept = layouts.layoutPresets();

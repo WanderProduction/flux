@@ -616,7 +616,7 @@ try {
          renderSettings.updateRenderSettings({ mode: 'clips', video: true, audio: true });
          // The command, not recordView: recording the id does not move any
          // panels, so the next switch can think it is already where it is going.
-         await commands.run('workspace.switch.edit');
+         await commands.run('layout.switch.edit');
          await new Promise(r => setTimeout(r, 400));
          renderQueue.clear();
          selection.setSelection(new Set(clips.slice(0, 3).map(c => c.id)));

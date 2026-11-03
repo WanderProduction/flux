@@ -231,7 +231,7 @@ export async function resetProject(cdp) {
       * nothing to do with what it is testing. setView records the id; only
       * the command rebuilds the panels.
       */
-     await commands.run('workspace.switch.edit');
+     await commands.run('layout.switch.edit');
      await new Promise(r => setTimeout(r, 400));
 
      // Put the Content Browser back where a suite expects to find it.

@@ -2,7 +2,7 @@
  * Where the app was arranged for this project — the part of a save that makes
  * reopening feel like coming back rather than starting over.
  *
- * A .prproj remembers which workspace you were in, how far the timeline was
+ * A .prproj remembers which layout you were in, how far the timeline was
  * zoomed and which bin you were looking at, and so does this. It rides in the
  * document alongside the assets and the sequence.
  *
@@ -21,8 +21,14 @@ import {
 export type BrowserLocation = { type: 'project' } | { type: 'folder'; path: string }
 
 export interface ViewState {
-  /** Active workspace id — see kernel/workspaces.ts. */
-  workspace: string
+  /**
+   * Active layout id — see kernel/layouts.ts.
+   *
+   * Was called `workspace` until the word was given to the thing that holds
+   * projects. Documents written before that still say `workspace`, so the
+   * reader below accepts either; the writer only ever emits `layout`.
+   */
+  layout: string
   timeline: {
     /** Pixels per second. 0 means "never set", so the panel picks its default. */
     zoom: number
@@ -81,7 +87,7 @@ export interface ViewState {
 
 export function defaultView(): ViewState {
   return {
-    workspace: 'edit',
+    layout: 'edit',
     timeline: { zoom: 0, follow: true },
     browser: { location: { type: 'project' } },
     viewer: {
@@ -118,7 +124,7 @@ export function getView(): ViewState {
  */
 export function recordView(patch: Partial<ViewState>): void {
   const next: ViewState = {
-    workspace: patch.workspace ?? view.workspace,
+    layout: patch.layout ?? view.layout,
     timeline: { ...view.timeline, ...patch.timeline },
     browser: { ...view.browser, ...patch.browser },
     viewer: { ...view.viewer, ...patch.viewer } as ViewState['viewer'],
@@ -131,14 +137,30 @@ export function recordView(patch: Partial<ViewState>): void {
 }
 
 /**
+ * The layout id out of a stored view, under either name.
+ *
+ * `layout` was called `workspace` until that word was given to the thing that
+ * holds projects, and every .flux written before the rename still says so.
+ * Reading both costs one line and means a project from last week opens in the
+ * arrangement it was left in rather than silently back in Edit.
+ */
+function readLayoutId(next: unknown): string | null {
+  const raw = next as { layout?: unknown; workspace?: unknown } | null | undefined
+  for (const value of [raw?.layout, raw?.workspace]) {
+    if (typeof value === 'string' && value) return value
+  }
+  return null
+}
+
+/**
  * Applies a document's view. Unknown or missing pieces fall back rather than
  * being trusted, so a hand-edited .flux cannot put the app in a state that has
- * no UI — an empty workspace id would leave no panels on screen.
+ * no UI — an empty layout id would leave no panels on screen.
  */
 export function setView(next: Partial<ViewState> | null | undefined): void {
   const base = defaultView()
   view = {
-    workspace: typeof next?.workspace === 'string' && next.workspace ? next.workspace : base.workspace,
+    layout: readLayoutId(next) ?? base.layout,
     /*
      * Every field read back, not only the zoom.
      *

@@ -3,7 +3,7 @@
 **A keyboard-driven media engine where the timeline and the node graph are the same project —
 and every kind of media can drive every other kind, in real time.**
 
-> **Status: pre-alpha.** The application frame is real — panels, workspaces, the command palette
+> **Status: pre-alpha.** The application frame is real — panels, layouts, the command palette
 > and the keyboard spine — and so now is a working slice of the engine: mp4 is demuxed here and
 > decoded through WebCodecs, sequences play with summed audio, the timeline edits, and
 > [Batch](#batch-a-folder-in-a-folder-out) imports a folder of footage and renders what survives
@@ -13,8 +13,12 @@ and every kind of media can drive every other kind, in real time.**
 > something, it does it — but this is a long way from a finished editor.
 
 - [`VISION.md`](VISION.md) — what this is and why it exists.
-- [`docs/INTERACTION-MODEL.md`](docs/INTERACTION-MODEL.md) — panels, workspaces, the nested node
+- [`docs/INTERACTION-MODEL.md`](docs/INTERACTION-MODEL.md) — panels, layouts, the nested node
   graph, and how the timeline and node map stay one thing.
+- [`docs/ACCOUNTS.md`](docs/ACCOUNTS.md) — the local account, the keypair, and what a workspace
+  is.
+- [`docs/SETTINGS.md`](docs/SETTINGS.md) — three levels, nineteen pages, and the order to build
+  them in.
 
 ---
 
@@ -150,16 +154,19 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 
 | | |
 |---|---|
-| **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
+| **Account** | Local, made on first run. A keypair this machine will be known by, encrypted with your password. Nothing is sent anywhere. |
+| **Workspaces** | A folder that holds projects. Name, picture, banner, and a folder of your choosing. |
+| **Dashboard** | Every project in the workspace as a card. Opening one files it automatically. |
+| **Projects** | Create or open one from the dashboard. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
-| **Workspaces** | Saved panel layouts. `1` Edit, `2` Export, `3` Settings. |
+| **Layouts** | Saved panel arrangements. `1` Edit, `2` Export, `3` Settings. |
 | **Settings** | `Ctrl ,` — three levels, nineteen pages. Three are real; the rest say what they will be. |
 | **Themes** | Three dark ones, five accents, density and text size — all of it token overrides. |
 | **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets. |
-| **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
+| **Layout persistence** | `Ctrl Alt S` saves the current layout's arrangement, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
-| **Panel focus** | `Ctrl 1`–`Ctrl 5`, opening the panel if the workspace doesn't have it. |
+| **Panel focus** | `Ctrl 1`–`Ctrl 5`, opening the panel if the layout doesn't have it. |
 | **Content Browser** | Browse the disks; `imports` is the project's bin. Thumbnails on cards. |
 | **Timeline** | Drop media — or a whole folder — on a track from anywhere: the browser, or Explorer. Drag clips to move and reorder them. |
 | **Trimming** | Drag either edge of a clip to change what it plays. Linked pairs trim together. |
@@ -203,10 +210,94 @@ The Node Map, Inspector and Mixer were removed: they were empty rooms named afte
 not exist yet, and a tour of empty rooms says less about where this is going than three that are
 furnished. They come back when there is something to put in them.
 
+### Accounts and workspaces: the three screens before the editor
+
+FLUX opens on whichever of four screens answers the first unanswered question — no account, no
+workspace, no project open, or editing. The order is fixed rather than routed, because it is not
+a navigation choice: you cannot pick a workspace before there is an account to own it, and a
+project card cannot be drawn before there is a workspace to list it in.
+
+[`docs/ACCOUNTS.md`](docs/ACCOUNTS.md) is the full model. The parts worth knowing here:
+
+#### The account is local, and the password encrypts something
+
+No email, no verification, no terms, nothing sent anywhere — and the first screen says so in
+those words, because an app that opens with a password field and does not explain itself has
+every user assuming the worst.
+
+There is an account at all because of what comes next. A workspace is going to be shareable —
+between your own two machines first, people after that — and sharing needs each end to say who
+it is without a company in the middle vouching for them. That is an **Ed25519 keypair**, and the
+account is where it lives.
+
+**A local password that only gates a screen protects nothing.** The projects are plain folders on
+the same disk; anybody sitting at the machine can open them with Explorer. So this one does real
+work: scrypt derives a key from it, and that key encrypts the private key with AES-256-GCM. The
+GCM tag *is* the password check — there is no separate comparison to get wrong, and it cannot be
+skipped by editing the JSON, because a wrong password produces a key that fails authentication.
+
+The consequence is on the screen where the password is chosen, stated precisely, because what
+most people will assume it means is the thing it does not mean: forgetting it loses the
+**identity**, not the work. Every project and every workspace is an ordinary folder that opens
+without any of this.
+
+**Two names**, shown as `laptop · nikoflow`. The device name is not decoration: the first time
+somebody runs FLUX on a tower as well as a laptop the nickname is identical on both, and the
+device name is the only thing telling two rows in a workspace apart. The machine's hostname is
+offered as the default, since it is already what you call this computer.
+
+The encrypted key never crosses the bridge to the renderer. What the UI gets is the names, the
+picture, the public key and a fingerprint — four groups of four hex characters, short enough to
+read down a phone line when two devices claim to be the same account.
+
+#### A workspace is a folder, and projects file themselves
+
+`workspace.json` in a directory, the same decision projects were given: copyable, backed up by
+anything that backs up files, openable by a FLUX that has never heard of it. It goes in FLUX's
+own data folder **by default rather than by rule** — the custom folder is offered when it is made,
+because a workspace is not something you want to move after twenty projects are filed under it.
+
+The project list is **stored, not scanned**, because a workspace's projects are mostly not inside
+its folder — they are wherever you put them, frequently on another drive. A missing one is
+reported as missing rather than removed: the usual cause is an unplugged drive, and an app that
+tidies your projects away while the drive is out is one you stop trusting. The card says "folder
+not found" and cannot be clicked.
+
+Opening a project files it under the workspace, so the dashboard fills itself. That runs off the
+**project subscription, not a React effect** — and that distinction was a bug before it was a
+design note: an effect keyed on the open project only sees states React renders, so a project
+created and closed inside one batch goes from null to null and is never filed at all.
+
+#### "Workspace" had to be taken back from the panel layouts
+
+FLUX already used Premiere's word for panel arrangements, and the collision was live in the
+command ids: `workspace.switch.edit` meant an arrangement while `workspace.general` in the
+settings pages already meant the project container. Panel arrangements are **layouts** now —
+`layout.switch.*`, category `Layout`, `kernel/layouts.ts`.
+
+Three migrations came with it, and missing any one would have been silent. A **stored keymap is
+the whole truth** by design, so anybody who had opened the Hotkeys page would have found `1`,
+`2` and `3` bound to commands that no longer exist with nothing on screen to say why — there
+is a rename table applied to the stored map and every preset. A **.flux written before the
+rename** says `workspace`; the reader takes either so a project from last week opens in the
+arrangement it was left in. And the layouts store was literally `workspaces.json`, which is the
+obvious name for the new registry — so the registry is `workspace-folders` instead.
+
+```bash
+npm run verify:accounts
+```
+
+Seventeen checks in three parts. The identity and workspace stores run against a real temp
+directory with no app, and the identity checks are built around **signing** rather than around
+the stored bytes — a password check that only compared a hash would pass a test written against
+the hash and still have lost the key. The screen checks adapt: on a profile with no account they
+drive the real first run, type a mismatched confirmation to watch the button stay disabled, and
+assert that the folder created is the one the screen promised.
+
 ### Projects
 
-FLUX opens on a launcher: name a project, choose a folder, and it creates a folder named after the
-project inside it:
+New projects are made from the dashboard: name one, choose a folder, and it creates a folder
+named after the project inside it:
 
 ```
 <your folder>/
@@ -959,7 +1050,7 @@ it twice means "I moved something", not "make me a second one I cannot tell apar
 > the Timeline goes.
 
 The menu is built in the main process and the panels live in the renderer, so the renderer does the
-telling: it sends a description — panels, which are open, the presets, the active workspace — and
+telling: it sends a description — panels, which are open, the presets, the active layout — and
 re-sends it whenever the layout changes. Every item sends one thing back: **a command id**. Nothing
 in `electron/appMenu.js` knows what `panel.toggle.timeline` means, which is what stops the menu
 becoming a second copy of the command table that drifts away from the first.
@@ -1573,7 +1664,7 @@ server already runs.
 #### It is a panel, which is what makes it a page
 
 Registered through the same `panels.register()` a community panel uses, shown in a workspace
-that fills the dock — the Export page's pattern, for the reason `kernel/workspaces.ts` gives.
+that fills the dock — the Export page's pattern, for the reason `kernel/layouts.ts` gives.
 Nothing in the shell knows settings exist, so deleting one line removes the page cleanly.
 
 It also means Settings docks beside the Timeline, which is the only honest way anybody has
@@ -1591,7 +1682,7 @@ registered.
 
 **That last check found the one real bug in it.** `app.performance` was registered by the
 *Timeline panel*, so the command existed only while that panel was mounted — and the Settings
-workspace has no Timeline in it, so the Cache page's button would have done nothing at all. The
+layout has no Timeline in it, so the Cache page's button would have done nothing at all. The
 dialog and its command belong to the app now, which is where a machine-wide setting always
 belonged. A setting that vanishes when a panel closes is the same shape of mistake as a mode
 owned by the panel that displays it, which is what `kernel/tools.ts` was written to avoid.
@@ -1879,7 +1970,7 @@ through the same queue, the same encode and the same verifier.
 
 #### `Ctrl M`, and a page rather than a dialog
 
-Select clips, press `Ctrl M`: they are queued and the **Export** workspace opens with them on
+Select clips, press `Ctrl M`: they are queued and the **Export** layout opens with them on
 screen, each with a frame from the footage. With nothing selected it takes the whole sequence.
 
 One keystroke doing two things, and that pairing is the point — "send this to render" is a single
@@ -3107,7 +3198,7 @@ in the skinning system.
 
 ```
 src/
-  kernel/       commands · panels · keymap · workspaces · store
+  kernel/       commands · panels · keymap · layouts · account · workspace · store
                 project · view · playback · fsBridge · assets · sequence
                 importPipeline · thumbnails · mediaProbe
                 batchImport · batchExport · renderBridge           (the seams)

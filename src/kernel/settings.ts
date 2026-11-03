@@ -113,11 +113,14 @@ export const settingsPages: SettingsPage[] = [
     blurb: 'Who you are, and what opens when you launch',
     ready: false,
     coming:
-      'The account itself: display name, email, the avatar other members see, and signing in ' +
-      'or out. Also which workspace and which project open on launch, and whether FLUX ' +
-      'reopens what you were last editing. An account is local first — it exists on this ' +
-      'machine whether or not it has ever talked to a server — so signing in is about ' +
-      'claiming an account that is already here, not about getting one.',
+      'Changing the nickname, the device name and the avatar after the fact, changing the ' +
+      'password that encrypts the identity key, and showing the key fingerprint so another ' +
+      'device can be checked against it. Also which workspace and which project open on ' +
+      'launch, and whether FLUX reopens what you were last editing.',
+    livesAt: {
+      what: 'The account itself — made on first run, with a keypair this machine is known by',
+      where: 'The first screen, before any workspace exists',
+    },
   },
   {
     id: 'account.appearance',
@@ -141,7 +144,7 @@ export const settingsPages: SettingsPage[] = [
     livesAt: {
       what: 'Panel arrangement, which is the other half of "how it looks"',
       where: 'The Window menu, and the workspace tabs in the top bar',
-      command: 'workspace.save',
+      command: 'layout.save',
     },
   },
   {
@@ -193,11 +196,13 @@ export const settingsPages: SettingsPage[] = [
     blurb: 'Its name, its mark, and the projects in it',
     ready: false,
     coming:
-      'The workspace name and logo, and the projects it holds — in an order you set, with ' +
-      'the ones you are not working on out of the way. Archiving a project without deleting ' +
-      'it, and seeing where each one actually lives on disk. A workspace is a folder of ' +
-      'projects plus the people and settings around them, so this page is mostly that list ' +
-      'and the handful of facts that are true of all of them.',
+      'Editing the name, description, logo and banner after the fact. Ordering the projects ' +
+      'and archiving the ones you are not working on without deleting them. Moving a ' +
+      'workspace to another folder, which today can only be chosen when it is made.',
+    livesAt: {
+      what: 'The workspace itself, its pictures, and every project in it as a card',
+      where: 'The dashboard — the screen in front of the editor',
+    },
   },
   {
     id: 'workspace.members',

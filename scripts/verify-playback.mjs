@@ -3119,7 +3119,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
        const asset = assets.getAssets().find(a => a.path === ${LONG})
@@ -3205,7 +3205,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
        const asset = assets.getAssets().find(a => a.path === ${LONG})
@@ -3444,7 +3444,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands, videoSource, performance: perf } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
        perf.setPerformance({ warmRadius: 1 });
 
@@ -3651,7 +3651,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
        const asset = assets.getAssets().find(a => a.path === ${LONG})
@@ -3738,7 +3738,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands, performance: perf, videoSource } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
        const names = ['clipA.mp4', 'long_take.mp4', 'open_gop.mp4', 'layer_blue.mp4',
@@ -3856,7 +3856,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands, videoSource, indexCache } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
        /*
@@ -3982,7 +3982,7 @@ try {
     const state = await evaluate(
       cdp,
       `const { assets, sequence, playback, view, commands, videoSource } = window.__fluxDev;
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
 
        const pick = async (path) => {

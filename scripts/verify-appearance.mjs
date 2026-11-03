@@ -119,7 +119,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands, settings } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 600));
        const link = [...document.querySelectorAll('.settings-link')].find(
          el => el.querySelector('.settings-link-name').textContent.trim() === 'Appearance');
@@ -212,7 +212,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { appearance, commands } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 400));
 
        const read = async (accent) => {
@@ -322,7 +322,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 400));
        const link = [...document.querySelectorAll('.settings-link')].find(
          el => el.querySelector('.settings-link-name').textContent.trim() === 'Appearance');
@@ -370,7 +370,7 @@ try {
         * was both more code and a weaker claim — this is the colour the
         * browser actually painted, which is the thing a reader sees.
         */
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 500));
        const link = [...document.querySelectorAll('.settings-link')].find(
          el => el.querySelector('.settings-link-name').textContent.trim() === 'Appearance');

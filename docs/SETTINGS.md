@@ -344,7 +344,7 @@ looking for a feature they already own.
 
 | Page | What exists | Where |
 |---|---|---|
-| Appearance | Panel arrangement and named layouts, which is the other half of how it looks | Window menu, workspace tabs |
+| Appearance | Panel arrangement and named layouts, which is the other half of how it looks | Window menu, layout tabs |
 | Automation and MCP | The control surface and the MCP server | Loopback port with a per-launch token, `mcp/server.mjs` |
 | Controllers + Hardware | What the machine would choose for playback, read from the machine | Performance dialog |
 | Audio | The sequence's rate and channel count | Sequence settings (a document fact, not a device one) |

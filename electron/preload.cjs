@@ -77,6 +77,34 @@ contextBridge.exposeInMainWorld('flux', {
    * for, and the second one also covers Chromium's caches, which `media` knows
    * nothing about. See the handlers in electron/main.js.
    */
+  /**
+   * The local account.
+   *
+   * `create` and `unlock` take the password and give nothing back but a
+   * verdict. The private key never crosses this bridge — it is decrypted in
+   * the main process and stays there, which is what makes encrypting it worth
+   * doing. See electron/identity.js.
+   */
+  account: {
+    read: () => ipcRenderer.invoke('account:read'),
+    suggestDeviceName: () => ipcRenderer.invoke('account:suggestDeviceName'),
+    create: (details) => ipcRenderer.invoke('account:create', details),
+    unlock: (password) => ipcRenderer.invoke('account:unlock', password),
+    locked: () => ipcRenderer.invoke('account:locked'),
+    update: (patch) => ipcRenderer.invoke('account:update', patch),
+    changePassword: (oldPassword, newPassword) =>
+      ipcRenderer.invoke('account:changePassword', oldPassword, newPassword),
+  },
+  /** Workspaces: folders that hold projects. See electron/workspace.js. */
+  workspace: {
+    defaultParent: () => ipcRenderer.invoke('workspace:defaultParent'),
+    create: (parent, details) => ipcRenderer.invoke('workspace:create', parent, details),
+    read: (root) => ipcRenderer.invoke('workspace:read', root),
+    is: (root) => ipcRenderer.invoke('workspace:is', root),
+    update: (root, patch) => ipcRenderer.invoke('workspace:update', root, patch),
+    remember: (root, project) => ipcRenderer.invoke('workspace:remember', root, project),
+    forget: (root, projectRoot) => ipcRenderer.invoke('workspace:forget', root, projectRoot),
+  },
   cache: {
     measure: () => ipcRenderer.invoke('cache:measure'),
     /** Everything, or one kind of entry. See mediaCache.clearCache. */

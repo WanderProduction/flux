@@ -15,7 +15,8 @@ import * as thumbnails from './kernel/thumbnails'
 import * as mediaWork from './kernel/mediaWork'
 import * as indexAhead from './kernel/indexAhead'
 import * as readiness from './kernel/readiness'
-import * as layouts from './kernel/layouts'
+import * as layouts from './kernel/layoutPresets'
+import * as layoutDefinitions from './kernel/layouts'
 import { commands } from './kernel/commands'
 import { panels } from './kernel/panels'
 import * as store from './kernel/store'
@@ -28,6 +29,9 @@ import * as importPipeline from './kernel/importPipeline'
 import * as videoSource from './kernel/media/videoSource'
 import * as performance from './kernel/performance'
 import * as cache from './kernel/cache'
+import * as account from './kernel/account'
+import * as workspace from './kernel/workspace'
+import * as pictures from './kernel/pictures'
 import * as indexCache from './kernel/media/indexCache'
 import * as ranges from './kernel/media/ranges'
 import * as peaks from './kernel/media/peaks'
@@ -102,6 +106,7 @@ if (import.meta.env.DEV) {
       indexAhead,
       readiness,
       layouts,
+      layoutDefinitions,
       commands,
       panels,
       store,
@@ -144,6 +149,9 @@ if (import.meta.env.DEV) {
       media: { audioSource },
       performance,
       cache,
+      account,
+      workspace,
+      pictures,
     },
   })
 }

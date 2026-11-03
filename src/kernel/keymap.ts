@@ -14,7 +14,7 @@ export type Keymap = Record<string, string> // chord -> command id
 export const defaultKeymap: Keymap = {
   'ctrl+k': 'palette.open',
   'ctrl+shift+p': 'palette.open',
-  '1': 'workspace.switch.edit',
+  '1': 'layout.switch.edit',
   'ctrl+1': 'panel.focus.viewer',
   'ctrl+2': 'panel.focus.timeline',
   'ctrl+3': 'panel.focus.content',
@@ -32,15 +32,15 @@ export const defaultKeymap: Keymap = {
   m: 'marker.add',
   'shift+m': 'marker.next',
   'ctrl+shift+m': 'marker.previous',
-  '2': 'workspace.switch.export',
-  '3': 'workspace.switch.settings',
+  '2': 'layout.switch.export',
+  '3': 'layout.switch.settings',
   /*
    * And the binding every application on every platform uses for settings, so
-   * nobody has to learn that this one is a workspace. It runs the same command
+   * nobody has to learn that this one is a layout. It runs the same command
    * the '3' above does — two chords, one answer, rather than a settings dialog
    * for people who press Ctrl+, and a settings page for people who press 3.
    */
-  'ctrl+,': 'workspace.switch.settings',
+  'ctrl+,': 'layout.switch.settings',
   /*
    * Send to render. The key every NLE uses for it — Premiere's Export, Media
    * Encoder's queue — so the muscle memory arrives with the user.
@@ -53,8 +53,8 @@ export const defaultKeymap: Keymap = {
    */
   'ctrl+n': 'sequence.new',
   'ctrl+s': 'project.save',
-  'ctrl+alt+s': 'workspace.save',
-  'ctrl+shift+r': 'workspace.reset',
+  'ctrl+alt+s': 'layout.save',
+  'ctrl+shift+r': 'layout.reset',
   /*
    * The marked span. '/' marks exactly what is selected, which is the span
    * someone almost always means — the clips you just picked are the clips you
@@ -276,7 +276,7 @@ export function formatChord(chord: string): string {
 
 /**
  * Typing must never trigger commands. Without this, pressing "1" while naming a
- * workspace would silently switch workspaces instead of typing a 1.
+ * layout would silently switch layouts instead of typing a 1.
  */
 export function isTextEntryTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null

@@ -72,6 +72,16 @@
   --flux-warn: #ffb648;
 
   /* Shape */
+  /*
+   * What sits between a dialog and the app behind it.
+   *
+   * A token because three places already wrote this value by hand, and
+   * because a lighter theme would want a lighter one — the scrim's job is to
+   * take the page back, and how much it has to take depends on what is under
+   * it.
+   */
+  --flux-scrim: rgba(0, 0, 0, 0.55);
+
   --flux-radius: 4px;
   --flux-radius-lg: 8px;
 

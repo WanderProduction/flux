@@ -1,111 +1,141 @@
-import { loadStore, saveStore } from './store'
-
 /**
- * Named panel arrangements the user saved, and can go back to.
+ * Layouts — named panel arrangements, switched by hotkey.
  *
- * Separate from `workspaces`, which are the *built-in* arrangements — Edit and
- * Export — each with one remembered layout. Those answer "what is FLUX for
- * right now". A preset answers "this is how I like it", and there can be as
- * many as someone wants: a wide timeline for assembling, a big viewer for
- * grading, a two-monitor arrangement for a long batch.
+ * This is the fix for DaVinci's pages described in docs/INTERACTION-MODEL.md:
+ * you get task-focused layouts, but they are *yours*, they are not rigid tabs,
+ * and switching one changes only the arrangement of windows — never the project,
+ * the selection or the playhead.
  *
- * Installation state rather than project state, and deliberately: a layout is
- * a property of the person and their screen, not of the work. Copy a project
- * to another machine and it should arrive with its sequences and its render
- * settings, not with somebody else's idea of where the Timeline goes.
+ * There are three, and each arrived with something worth arranging. Sound
+ * Design and Nodes / Motion were arrangements of a Mixer and a Node Map that
+ * did not exist — three tabs that all showed the same three panels in slightly
+ * different places — and they were removed for it. The mechanism is what
+ * matters and it is unchanged: add a definition here and it gets a tab, a
+ * command and a slot in the keymap.
  *
- * What is stored is dockview's own serialisation, opaque here on purpose — the
- * dock owns its format, and a kernel module that parsed it would have to be
- * changed every time the dock learned a new kind of group.
+ * A layout has two possible sources of truth:
+ *   - `build()`  — the shipped default, constructed programmatically.
+ *   - a saved serialized dockview layout, which wins once the user saves.
  */
 
-const STORE = 'layout-presets'
+import type { DockviewApi } from 'dockview'
 
-export interface LayoutPreset {
+export interface LayoutDefinition {
   id: string
   name: string
-  /** Dockview's serialised layout. Opaque. */
-  layout: unknown
-  savedAt: number
-  /** Which workspace it was saved from, so applying one can restore that too. */
-  workspace?: string
-}
-
-let presets: LayoutPreset[] = []
-let loaded = false
-const listeners = new Set<() => void>()
-
-function emit() {
-  listeners.forEach((listener) => listener())
-  void saveStore(STORE, presets)
-}
-
-export function subscribeLayouts(listener: () => void): () => void {
-  listeners.add(listener)
-  return () => listeners.delete(listener)
-}
-
-export function layoutPresets(): LayoutPreset[] {
-  return presets
-}
-
-export function layoutsLoaded(): boolean {
-  return loaded
-}
-
-/** Reads what was saved. Called once, as the app comes up. */
-export async function loadLayoutPresets(): Promise<void> {
-  const stored = await loadStore<LayoutPreset[]>(STORE, [])
-  presets = Array.isArray(stored) ? stored.filter((one) => one && one.id && one.name) : []
-  loaded = true
-  listeners.forEach((listener) => listener())
-}
-
-let counter = 0
-function nextId(): string {
-  counter += 1
-  return `lp${Date.now().toString(36)}${counter.toString(36)}`
+  /** Shown in the top bar; the actual binding lives in the keymap. */
+  hint: string
+  build: (api: DockviewApi) => void
 }
 
 /**
- * Saves the current arrangement under a name.
- *
- * A repeated name replaces rather than making a second entry with the same
- * label: "save it again, I moved something" is what pressing it twice means,
- * and two identical rows in a menu is a thing nobody can choose between.
+ * EDIT — Tools down the left, Viewer and Content Browser on top, Timeline full
+ * width beneath. The layout a reels editor lives in.
  */
-export function saveLayoutPreset(name: string, layout: unknown, workspace?: string): LayoutPreset {
-  const trimmed = name.trim() || 'Layout'
-  const existing = presets.find((one) => one.name.toLowerCase() === trimmed.toLowerCase())
-  const preset: LayoutPreset = {
-    id: existing?.id ?? nextId(),
-    name: trimmed,
-    layout,
-    savedAt: Date.now(),
-    workspace,
-  }
-  presets = existing
-    ? presets.map((one) => (one.id === preset.id ? preset : one))
-    : [...presets, preset]
-  emit()
-  return preset
+function buildEdit(api: DockviewApi) {
+  api.addPanel({ id: 'viewer', component: 'viewer', title: 'Viewer' })
+  // Left of everything and narrow: a tool strip is read at a glance and picked
+  // from without looking, which is why every editor puts it at an edge.
+  api.addPanel({
+    id: 'tools',
+    component: 'tools',
+    title: 'Tools',
+    position: { referencePanel: 'viewer', direction: 'left' },
+  })
+  api.addPanel({
+    id: 'content',
+    component: 'content',
+    title: 'Content Browser',
+    position: { referencePanel: 'viewer', direction: 'right' },
+  })
+  /*
+   * Tabbed with the Content Browser rather than given a column of its own.
+   *
+   * Both answer "what am I working with", only one is wanted at a time, and
+   * the editing layout has no width to spare beside the viewer. Premiere
+   * does the same — Effect Controls shares its frame with the Source monitor
+   * and the project bin.
+   */
+  api.addPanel({
+    id: 'effects',
+    component: 'effects',
+    title: 'Effect Controls',
+    position: { referencePanel: 'content', direction: 'within' },
+  })
+  api.addPanel({
+    id: 'timeline',
+    component: 'timeline',
+    title: 'Timeline',
+    position: { referencePanel: 'viewer', direction: 'below' },
+  })
+  api.getPanel('tools')?.api.setSize({ width: 150 })
+  api.getPanel('content')?.api.setActive()
 }
 
-export function getLayoutPreset(id: string): LayoutPreset | undefined {
-  return presets.find((one) => one.id === id)
+/**
+ * EXPORT — what is about to be rendered, what it will be rendered as, and the
+ * picture to check it against.
+ *
+ * The second layout, and the thing that made a second one worth having: the
+ * export question is not an arrangement of the editing panels, it is a
+ * different set of them. Premiere, Resolve and Media Encoder all reach the
+ * same answer — a whole page rather than a dialog — because "am I about to
+ * write the right files" is not a question anyone can answer from a corner of
+ * the screen.
+ *
+ * Left is the list with the pictures, middle is the settings, right is the
+ * Viewer. No Timeline and no Tools: this is not where you edit, and an export
+ * page that invited a trim would invite trimming something already queued,
+ * which the snapshot rule says will not take effect.
+ */
+function buildExport(api: DockviewApi) {
+  api.addPanel({ id: 'exportList', component: 'exportList', title: 'To render' })
+  api.addPanel({
+    id: 'render',
+    component: 'render',
+    title: 'Render',
+    position: { referencePanel: 'exportList', direction: 'right' },
+  })
+  api.addPanel({
+    id: 'viewer',
+    component: 'viewer',
+    title: 'Viewer',
+    position: { referencePanel: 'render', direction: 'right' },
+  })
+  api.getPanel('exportList')?.api.setSize({ width: 380 })
+  api.getPanel('exportList')?.api.setActive()
 }
 
-export function removeLayoutPreset(id: string): boolean {
-  const before = presets.length
-  presets = presets.filter((one) => one.id !== id)
-  if (presets.length === before) return false
-  emit()
-  return true
+/**
+ * SETTINGS — one panel, the whole dock.
+ *
+ * The third layout, and the second thing that was worth arranging. It is
+ * one panel rather than several on purpose: settings are *found* by scanning
+ * a list of nineteen pages, and a list that has to share the window with a
+ * viewer and a timeline is a list nobody scans. The same reasoning the export
+ * page is built on, applied to a question that is read rather than watched.
+ *
+ * No Viewer and no Timeline, and that is the difference from Export, which
+ * keeps the Viewer because checking what you are about to write means looking
+ * at it. Nothing on a settings page is checked by looking at the picture — and
+ * for the handful of settings that *are* (a cache budget, a preview
+ * resolution), the panel can be dragged next to the Timeline, which is better
+ * than a viewer pinned to the right of a page that rarely wants one.
+ */
+function buildSettings(api: DockviewApi) {
+  api.addPanel({ id: 'settings', component: 'settings', title: 'Settings' })
+  api.getPanel('settings')?.api.setActive()
 }
 
-/** For the harnesses, and for a project that wants a clean slate. */
-export function setLayoutPresets(next: LayoutPreset[]): void {
-  presets = Array.isArray(next) ? next : []
-  loaded = true
-  emit()
+export const layouts: LayoutDefinition[] = [
+  { id: 'edit', name: 'Edit', hint: '1', build: buildEdit },
+  { id: 'export', name: 'Export', hint: '2', build: buildExport },
+  { id: 'settings', name: 'Settings', hint: '3', build: buildSettings },
+]
+
+export function getLayout(id: string): LayoutDefinition | undefined {
+  return layouts.find((one) => one.id === id)
 }
+
+/** Saved arrangements, keyed by layout id. Serialized dockview JSON. */
+export type SavedLayouts = Record<string, unknown>

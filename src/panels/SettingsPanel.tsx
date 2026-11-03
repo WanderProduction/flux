@@ -32,7 +32,7 @@ import {
  * There is no settings *window*. It is a panel, registered through the same
  * `panels.register()` a community panel uses, shown in a workspace of its own
  * that fills the dock — exactly how the Export page works, and for the reason
- * written in kernel/workspaces.ts: Premiere, Resolve and Media Encoder all
+ * written in kernel/layouts.ts: Premiere, Resolve and Media Encoder all
  * reach the same answer because a question you cannot answer from a corner of
  * the screen should not be asked in a corner of the screen.
  *

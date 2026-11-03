@@ -77,12 +77,17 @@ export function safeFolderName(name) {
 }
 
 /**
- * The folder a project with this name would get inside `parent`.
+ * The folder a thing with this name would get inside `parent`.
+ *
+ * Projects and workspaces are both made this way, and both screens show the
+ * user the path before creating it — so the rule has to be one function or the
+ * two screens will eventually promise different folders than they make.
+ *
  * @param {string} parent
  * @param {string} name
  * @returns {string}
  */
-export function projectFolderPath(parent, name) {
+export function folderIn(parent, name) {
   const sep = parent.includes(BACKSLASH) ? BACKSLASH : '/'
   let trimmed = parent
   while (trimmed.endsWith('/') || trimmed.endsWith(BACKSLASH)) trimmed = trimmed.slice(0, -1)
@@ -108,3 +113,6 @@ export function projectChildPath(root, child) {
 
 /** The folder media is copied into. Named once, used on both sides. */
 export const IMPORTS_DIR = 'imports'
+
+/** The older name, kept because a project is the most common caller. */
+export const projectFolderPath = folderIn

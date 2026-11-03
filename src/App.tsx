@@ -17,7 +17,7 @@ import {
   subscribeKeybindings,
 } from './kernel/keybindings'
 import { loadStore, saveStore, isDesktop } from './kernel/store'
-import { workspaces, getWorkspace, type SavedLayouts } from './kernel/workspaces'
+import { layouts, getLayout, type SavedLayouts } from './kernel/layouts'
 import {
   getLayoutPreset,
   layoutPresets,
@@ -25,7 +25,7 @@ import {
   removeLayoutPreset,
   saveLayoutPreset,
   subscribeLayouts,
-} from './kernel/layouts'
+} from './kernel/layoutPresets'
 import { getSequence, subscribeSequence } from './kernel/sequence'
 import { getView, recordView } from './kernel/view'
 import { getSelection } from './kernel/selection'
@@ -37,6 +37,23 @@ import { MediaWorkRing } from './shell/MediaWorkRing'
 import { ImportChoiceHost } from './shell/ImportChoiceHost'
 import { PerformanceDialog } from './panels/PerformanceDialog'
 import { ProjectLauncher } from './launcher/ProjectLauncher'
+import { AccountSetup } from './launcher/AccountSetup'
+import { WorkspaceSetup } from './launcher/WorkspaceSetup'
+import { WorkspaceDashboard } from './launcher/WorkspaceDashboard'
+import {
+  accountLoaded,
+  getAccount,
+  hasAccounts,
+  loadAccount,
+  subscribeAccount,
+} from './kernel/account'
+import {
+  getWorkspace,
+  loadWorkspaces,
+  fileOpenedProjects,
+  subscribeWorkspace,
+  workspaceLoaded,
+} from './kernel/workspace'
 import {
   closeProject,
   getProject,
@@ -49,26 +66,68 @@ import {
 
 /**
  * Layouts are an app-level preference, the way a Premiere or AE workspace is:
- * how *you* like panels arranged, the same in every project. Which workspace is
+ * how *you* like panels arranged, the same in every project. Which layout is
  * currently open belongs to the project instead — it is where you left off in
  * this piece of work — so it rides in the .flux document. See kernel/view.ts.
  */
-const LAYOUTS_STORE = 'workspaces'
+const LAYOUTS_STORE = 'layouts'
+/** What that store was called before the word went to the project container. */
+const LEGACY_LAYOUTS_STORE = 'workspaces'
 
+/**
+ * Four states, in order: no account, no workspace, no project, editing.
+ *
+ * Each one is the screen for the first question that has no answer yet, which
+ * is why the order is fixed rather than a router: you cannot pick a workspace
+ * before there is an account to own it, and a project card cannot be shown
+ * before there is a workspace to list it in.
+ *
+ * The loading gate matters more than it looks. "There is no account" and "we
+ * have not read the file yet" are indistinguishable from a null, and showing
+ * the setup screen for the second one means every launch flashes a Create
+ * Account form at somebody who has had an account for months.
+ */
 export function App() {
   const [project, setProject] = useState<Project | null>(getProject)
+  const [, bump] = useState(0)
 
   useEffect(() => subscribeProject(() => setProject(getProject())), [])
+  useEffect(() => subscribeAccount(() => bump((n) => n + 1)), [])
+  useEffect(() => subscribeWorkspace(() => bump((n) => n + 1)), [])
+
+  useEffect(() => {
+    void loadAccount()
+    void loadWorkspaces()
+  }, [])
+
+  /*
+   * A project that is open is a project this workspace has — filed by
+   * kernel/workspace.ts, off the project subscription rather than off this
+   * component's render. See fileOpenedProjects for why that distinction is a
+   * bug fix and not a preference.
+   */
+  useEffect(() => fileOpenedProjects(), [])
 
   // The dock is unmounted entirely while no project is open, so panels can
   // assume a project exists rather than every one of them guarding for its
   // absence. It also guarantees their state is rebuilt when a different project
   // opens, instead of the previous project's timeline lingering on screen.
-  if (!project) return <ProjectLauncher />
-  return <Workspace key={project.root} project={project} />
+  if (project) return <Editor key={project.root} project={project} />
+
+  /*
+   * In a plain browser there is no main process to hold a key or make a
+   * folder, so the account layer cannot exist. `npm run dev:renderer` goes
+   * straight to the dashboard-less launcher rather than showing a setup screen
+   * whose Create button could never work.
+   */
+  if (!hasAccounts()) return <ProjectLauncher />
+  if (!accountLoaded() || !workspaceLoaded()) return <div className="launcher launcher--waiting" />
+  if (!getAccount()) return <AccountSetup />
+  if (!getWorkspace()) return <WorkspaceSetup />
+  return <WorkspaceDashboard />
 }
 
-function Workspace({ project }: { project: Project }) {
+function Editor({ project }: { project: Project }) {
   const apiRef = useRef<DockviewApi | null>(null)
   const savedRef = useRef<SavedLayouts>({})
   /*
@@ -89,14 +148,14 @@ function Workspace({ project }: { project: Project }) {
   }, [keymap])
 
   /**
-   * The workspace this project was saved in, read once at mount.
+   * The layout this project was saved in, read once at mount.
    *
    * Once, and into the initial state - not in the restore effect. activeId is
    * reported back into the view as it changes, so a default of 'edit' would
    * record 'edit' over the saved value before the restore ever got to read it,
    * and every project would reopen in Edit no matter what was saved.
    */
-  const openInRef = useRef(getWorkspace(getView().workspace) ? getView().workspace : 'edit')
+  const openInRef = useRef(getLayout(getView().layout) ? getView().layout : 'edit')
 
   const [ready, setReady] = useState(false)
   const [activeId, setActiveId] = useState(openInRef.current)
@@ -105,8 +164,8 @@ function Workspace({ project }: { project: Project }) {
    *
    * The debounced layout save fires half a second after a change, and `state`
    * is only new on the next render — so a save that read `activeId` from the
-   * closure would attribute a layout to **whichever workspace was open
-   * before**. With one workspace that is invisible; with two it means
+   * closure would attribute an arrangement to **whichever layout was open
+   * before**. With one layout that is invisible; with two it means
    * switching writes each layout under the other's name, and the second time
    * you switch you get the wrong panels. See `markActive`.
    */
@@ -122,7 +181,7 @@ function Workspace({ project }: { project: Project }) {
    * Owned here rather than by the Timeline, which used to own it. Nothing
    * about a decoder pool or a frame-memory budget is about the timeline, and
    * registering the command there meant it existed only while that panel was
-   * mounted — so it was missing from any workspace without a Timeline in it,
+   * mounted — so it was missing from any layout without a Timeline in it,
    * which the settings page then pointed at and could not reach.
    */
   const [performanceOpen, setPerformanceOpen] = useState(false)
@@ -151,12 +210,12 @@ function Workspace({ project }: { project: Project }) {
     window.setTimeout(() => setFlash((current) => (current === message ? null : current)), 1800)
   }, [])
 
-  /** Rebuild the dock for a workspace: saved layout if there is one, else the shipped default. */
+  /** Rebuild the dock for a layout: the saved arrangement if there is one, else the shipped default. */
   /**
    * True while a layout is being torn down and rebuilt.
    *
    * Every one of those steps fires a layout-change event, and the first thing
-   * `applyWorkspace` does is clear the dock — so without this the arrangement
+   * `applyLayout` does is clear the dock — so without this the arrangement
    * saved a moment later would be the empty one, and the layout would be lost
    * by the act of restoring it.
    */
@@ -174,10 +233,10 @@ function Workspace({ project }: { project: Project }) {
 
   const rearranging = useRef(false)
 
-  const applyWorkspace = useCallback((id: string) => {
+  const applyLayout = useCallback((id: string) => {
     const api = apiRef.current
-    const workspace = getWorkspace(id)
-    if (!api || !workspace) return
+    const layout = getLayout(id)
+    if (!api || !layout) return
 
     rearranging.current = true
     api.clear()
@@ -196,7 +255,7 @@ function Workspace({ project }: { project: Project }) {
         api.clear()
       }
     }
-    workspace.build(api)
+    layout.build(api)
     markActive(id)
     rearranging.current = false
   }, [markActive])
@@ -209,22 +268,22 @@ function Workspace({ project }: { project: Project }) {
     void saveStore(LAYOUTS_STORE, savedRef.current)
   }, [])
 
-  const saveWorkspace = useCallback(() => {
+  const saveLayout = useCallback(() => {
     if (!apiRef.current) return
     rememberLayout(activeRef.current)
-    say(`Saved "${getWorkspace(activeId)?.name}" layout`)
+    say(`Saved "${getLayout(activeId)?.name}" layout`)
   }, [activeId, rememberLayout, say])
 
-  const resetWorkspace = useCallback(() => {
+  const resetLayout = useCallback(() => {
     const next = { ...savedRef.current }
     delete next[activeId]
     savedRef.current = next
     void saveStore(LAYOUTS_STORE, next)
-    applyWorkspace(activeId)
-    say(`Reset "${getWorkspace(activeId)?.name}" to default`)
-  }, [activeId, applyWorkspace, say])
+    applyLayout(activeId)
+    say(`Reset "${getLayout(activeId)?.name}" to default`)
+  }, [activeId, applyLayout, say])
 
-  /** Focus a panel, opening it in the current workspace if it isn't there. */
+  /** Focus a panel, opening it in the current layout if it isn't there. */
   const focusPanel = useCallback((panelId: string) => {
     const api = apiRef.current
     const definition = panels.get(panelId)
@@ -256,7 +315,7 @@ function Workspace({ project }: { project: Project }) {
     [focusPanel],
   )
 
-  /** Saves the arrangement under a name, through the same serialisation the workspaces use. */
+  /** Saves the arrangement under a name, through the same serialisation the layouts use. */
   const savePreset = useCallback(
     (name: string) => {
       const api = apiRef.current
@@ -270,7 +329,7 @@ function Workspace({ project }: { project: Project }) {
   /**
    * Puts a saved arrangement back.
    *
-   * `rearranging` for the same reason applying a workspace sets it: restoring
+   * `rearranging` for the same reason applying a layout sets it: restoring
    * clears the dock first, and that clearing is a layout change which would
    * otherwise be written down as the user's current arrangement — losing the
    * thing being restored at the moment of restoring it.
@@ -283,9 +342,9 @@ function Workspace({ project }: { project: Project }) {
       rearranging.current = true
       try {
         api.fromJSON(preset.layout as Parameters<typeof api.fromJSON>[0])
-        if (preset.workspace) {
-          activeRef.current = preset.workspace
-          setActiveId(preset.workspace)
+        if (preset.layoutId) {
+          activeRef.current = preset.layoutId
+          setActiveId(preset.layoutId)
         }
         say(`Layout "${preset.name}"`)
       } catch {
@@ -302,22 +361,31 @@ function Workspace({ project }: { project: Project }) {
     setReady(true)
   }, [])
 
-  // Restore persisted layouts once the dock exists, then open the last workspace.
+  // Restore persisted arrangements once the dock exists, then open the last layout.
   useEffect(() => {
     if (!ready) return
     let cancelled = false
 
     void (async () => {
-      const layouts = await loadStore<SavedLayouts>(LAYOUTS_STORE, {})
+      /*
+       * Under the new key, or the old one if this installation predates the
+       * rename. Nothing is written back under the old name, so the first save
+       * after this migrates it for good; reading both costs one round trip on
+       * a machine that has already migrated and nothing afterwards.
+       */
+      let saved = await loadStore<SavedLayouts>(LAYOUTS_STORE, {})
+      if (Object.keys(saved).length === 0) {
+        saved = await loadStore<SavedLayouts>(LEGACY_LAYOUTS_STORE, {})
+      }
       if (cancelled) return
-      savedRef.current = layouts
-      applyWorkspace(openInRef.current)
+      savedRef.current = saved
+      applyLayout(openInRef.current)
     })()
 
     return () => {
       cancelled = true
     }
-  }, [ready, applyWorkspace])
+  }, [ready, applyLayout])
 
   /**
    * The arrangement is written down as it changes.
@@ -333,7 +401,7 @@ function Workspace({ project }: { project: Project }) {
    * the window.
    *
    * `rearranging` is what keeps a restore from overwriting what it is
-   * restoring: applying a workspace clears the dock first, and that clearing
+   * restoring: applying a layout clears the dock first, and that clearing
    * is itself a layout change.
    */
   useEffect(() => {
@@ -356,11 +424,11 @@ function Workspace({ project }: { project: Project }) {
     }
   }, [ready, activeId, rememberLayout])
 
-  // Reopening the project brings back the workspace it was left in. Recorded,
-  // not saved: switching workspaces is not an edit and must not light the
+  // Reopening the project brings back the layout it was left in. Recorded,
+  // not saved: switching layouts is not an edit and must not light the
   // unsaved dot — it travels with the next real save.
   useEffect(() => {
-    if (ready) recordView({ workspace: activeId })
+    if (ready) recordView({ layout: activeId })
   }, [ready, activeId])
 
   // Everything the app can do is registered here as a command; the keymap and
@@ -375,12 +443,12 @@ function Workspace({ project }: { project: Project }) {
         category: 'View',
         run: () => setPaletteOpen(true),
       },
-      ...workspaces.map((workspace) => ({
-        id: `workspace.switch.${workspace.id}`,
-        title: `Switch to ${workspace.name}`,
-        category: 'Workspace',
+      ...layouts.map((layout) => ({
+        id: `layout.switch.${layout.id}`,
+        title: `Switch to ${layout.name}`,
+        category: 'Layout',
         detail: 'Rearranges panels only — project, selection and playhead are untouched',
-        run: () => applyWorkspace(workspace.id),
+        run: () => applyLayout(layout.id),
       })),
       {
         id: 'app.performance',
@@ -390,17 +458,17 @@ function Workspace({ project }: { project: Project }) {
         run: () => setPerformanceOpen(true),
       },
       {
-        id: 'workspace.save',
+        id: 'layout.save',
         title: 'Save Current Layout',
         category: 'Workspace',
-        detail: 'Stores the current panel arrangement for this workspace',
-        run: saveWorkspace,
+        detail: 'Stores the current panel arrangement for this layout',
+        run: saveLayout,
       },
       {
-        id: 'workspace.reset',
+        id: 'layout.reset',
         title: 'Reset Layout to Default',
         category: 'Workspace',
-        run: resetWorkspace,
+        run: resetLayout,
       },
       {
         id: 'project.save',
@@ -562,7 +630,7 @@ function Workspace({ project }: { project: Project }) {
         id: 'render.send',
         title: 'Send to Render',
         category: 'Render',
-        detail: 'Queues the selected clips and opens the Export workspace',
+        detail: 'Queues the selected clips and opens the Export layout',
         run: () => {
           const settings = getRenderSettings()
           const scope =
@@ -572,7 +640,7 @@ function Workspace({ project }: { project: Project }) {
                 ? 'selection'
                 : 'sequence'
           const result = addToQueue(scope)
-          applyWorkspace('export')
+          applyLayout('export')
           const parts: string[] = []
           if (result.added) parts.push(`${result.added} queued`)
           if (result.replaced) parts.push(`${result.replaced} updated`)
@@ -618,9 +686,9 @@ function Workspace({ project }: { project: Project }) {
     return () => handle.dispose()
   }, [
     ready,
-    applyWorkspace,
-    saveWorkspace,
-    resetWorkspace,
+    applyLayout,
+    saveLayout,
+    resetLayout,
     focusPanel,
     togglePanel,
     applyPreset,
@@ -652,8 +720,8 @@ function Workspace({ project }: { project: Project }) {
           open: open.has(panel.id),
         })),
         presets: presets.map((preset) => ({ id: preset.id, name: preset.name })),
-        workspaces: workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name })),
-        activeWorkspace: activeId,
+        layouts: layouts.map((layout) => ({ id: layout.id, name: layout.name })),
+        activeLayout: activeId,
       })
     }
 
@@ -691,16 +759,16 @@ function Workspace({ project }: { project: Project }) {
           {project.name}
         </button>
 
-        <nav className="workspace-tabs">
-          {workspaces.map((workspace) => (
+        <nav className="layout-tabs">
+          {layouts.map((layout) => (
             <button
-              key={workspace.id}
-              className={`ws-tab${workspace.id === activeId ? ' ws-tab--active' : ''}`}
-              onClick={() => applyWorkspace(workspace.id)}
-              title={`Switch to ${workspace.name}`}
+              key={layout.id}
+              className={`ws-tab${layout.id === activeId ? ' ws-tab--active' : ''}`}
+              onClick={() => applyLayout(layout.id)}
+              title={`Switch to ${layout.name}`}
             >
-              {workspace.name}
-              <kbd>{workspace.hint}</kbd>
+              {layout.name}
+              <kbd>{layout.hint}</kbd>
             </button>
           ))}
         </nav>

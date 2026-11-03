@@ -47,13 +47,13 @@ try {
 
        const open = () => !!document.querySelector('.settings-nav');
 
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 600));
        const byCommand = open();
 
        // Away and back, by the key this time — dispatched on the window, which
        // is where the keymap listens.
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 500));
        const leftIt = !open();
 
@@ -73,7 +73,7 @@ try {
     )
 
     console.log(`       workspace tabs: ${result.tabs.join(' · ')}`)
-    assert.equal(result.byCommand, true, 'workspace.switch.settings did not open the page')
+    assert.equal(result.byCommand, true, 'layout.switch.settings did not open the page')
     assert.equal(result.leftIt, true, 'switching away from settings left the panel on screen')
     assert.equal(result.byKey, true, 'Ctrl+, did not open the settings page')
     assert.ok(result.tab, 'there is no Settings tab in the top bar')
@@ -84,7 +84,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands, settings } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 500));
 
        const levels = [...document.querySelectorAll('.settings-level')].map(el => ({
@@ -171,7 +171,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 400));
 
        const offenders = [];
@@ -208,7 +208,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 400));
 
        const box = document.querySelector('.settings-search');
@@ -270,7 +270,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands, settings } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 400));
 
        // Every command a livesAt points at must be a command that exists —

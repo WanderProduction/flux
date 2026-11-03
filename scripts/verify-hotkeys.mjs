@@ -56,11 +56,11 @@ try {
         * an editor does, and it is what makes the numbers below mean
         * something.
         */
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 900));
        const loadedInEdit = commands.list().length;
 
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 600));
        const loadedInSettings = commands.list().length;
        const known = commands.catalogue().length;
@@ -129,7 +129,7 @@ try {
     const result = await evaluate(
       cdp,
       `const { commands, settings } = window.__fluxDev;
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 400));
 
        /*
@@ -170,7 +170,7 @@ try {
         * through the page's state. 'timeline.addTrack' is the probe because
         * its effect is countable and undoable: it adds a track.
         */
-       await commands.run('workspace.switch.edit');
+       await commands.run('layout.switch.edit');
        await new Promise(r => setTimeout(r, 700));
        sequence.clearSequence();
 
@@ -397,7 +397,7 @@ try {
       `const { commands, keybindings, sequence } = window.__fluxDev;
        keybindings.resetAllKeybindings();
 
-       await commands.run('workspace.switch.settings');
+       await commands.run('layout.switch.settings');
        await new Promise(r => setTimeout(r, 500));
        const link = [...document.querySelectorAll('.settings-link')].find(
          el => el.querySelector('.settings-link-name').textContent.trim() === 'Hotkeys & Presets');

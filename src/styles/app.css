@@ -59,7 +59,7 @@ kbd {
   color: var(--flux-accent);
 }
 
-.workspace-tabs {
+.layout-tabs {
   display: flex;
   gap: 2px;
 }
@@ -4632,4 +4632,482 @@ kbd {
   margin: 0;
   color: var(--flux-ok);
   font-size: var(--flux-text-sm);
+}
+
+/* ── accounts, workspaces and the dashboard ───────────────────
+ *
+ * Tokens only, like everything else: verify:appearance counts colour literals
+ * and hardcoded font sizes and fails the run on a new one. These screens are
+ * the first thing anybody ever sees, so a theme has to reach them too.
+ */
+
+/* The gap between "the account file has not been read" and the first screen.
+   Painted, so the window is never a pale flash on a dark app. */
+.launcher--waiting {
+  background: var(--flux-bg);
+}
+
+/* ── setup screens ── */
+.setup {
+  max-width: 640px;
+}
+.setup--wide {
+  max-width: 760px;
+}
+.setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 2px 2px;
+}
+.setup-title {
+  margin: 0;
+  font-size: calc(19px * var(--flux-text-scale));
+  font-weight: 600;
+}
+.setup-subtitle {
+  margin: 0 0 6px;
+  font-size: var(--flux-text-md);
+  font-weight: 600;
+  color: var(--flux-text-dim);
+}
+.setup-lede {
+  margin: -6px 0 2px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-md);
+  line-height: 1.55;
+  max-width: 60ch;
+}
+.setup-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.setup-names {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+.setup-row {
+  display: flex;
+  gap: 12px;
+}
+.setup-row .field {
+  flex: 1;
+  min-width: 0;
+}
+.setup-preview {
+  margin: -4px 0 0;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+}
+.setup-preview strong {
+  color: var(--flux-text);
+  font-weight: 600;
+}
+.setup-warn {
+  margin: -8px 0 0;
+  color: var(--flux-danger);
+  font-size: var(--flux-text-sm);
+}
+.setup-note {
+  margin: 0;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.55;
+  max-width: 68ch;
+}
+.setup-note--tight {
+  margin-top: 2px;
+}
+.setup-note em {
+  color: var(--flux-text-dim);
+  font-style: normal;
+  font-weight: 600;
+}
+.setup-where {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.setup-path {
+  margin: 0;
+}
+.setup-path code {
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+  overflow-wrap: anywhere;
+}
+.setup-existing,
+.setup-planned {
+  border-top: 1px solid var(--flux-border);
+  padding-top: 12px;
+}
+.setup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--flux-text-sm);
+}
+.field-aside {
+  color: var(--flux-text-faint);
+  font-weight: 400;
+}
+
+/* ── the picture picker ── */
+.pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pick--banner {
+  flex-direction: column;
+  align-items: stretch;
+}
+.pick-target {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  overflow: hidden;
+  border: 1px dashed var(--flux-border-strong);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text-faint);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  cursor: pointer;
+}
+.pick--circle .pick-target {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+}
+.pick--banner .pick-target {
+  width: 100%;
+  height: 92px;
+  border-radius: var(--flux-radius);
+}
+.pick-target:hover,
+.pick-target--over {
+  border-color: var(--flux-accent);
+  color: var(--flux-text-dim);
+}
+.pick-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.pick-empty {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.pick-hint {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 2px 0;
+  background: var(--flux-bg-active);
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+  opacity: 0;
+}
+.pick-target:hover .pick-hint {
+  opacity: 1;
+}
+.pick-input {
+  display: none;
+}
+.pick-clear {
+  align-self: flex-start;
+}
+.pick-error {
+  margin: 0;
+  color: var(--flux-danger);
+  font-size: var(--flux-text-sm);
+}
+
+/* ── who you are, wherever it is shown ── */
+.who {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.who-name {
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+}
+.who-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-block;
+  vertical-align: middle;
+}
+.who-avatar--empty {
+  display: inline-grid;
+  place-items: center;
+  background: var(--flux-bg-active);
+  color: var(--flux-text-dim);
+  font-size: calc(9px * var(--flux-text-scale));
+  font-weight: 700;
+}
+
+/* ── the dashboard ── */
+.dash {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: auto;
+  background: var(--flux-bg);
+}
+.dash-banner {
+  height: 168px;
+  background-size: cover;
+  background-position: center;
+  flex: none;
+}
+.dash-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 26px 14px;
+  flex-wrap: wrap;
+}
+/* Lifted over the banner, so the title sits on the image rather than under it. */
+.dash-head--over {
+  margin-top: -58px;
+  padding-top: 0;
+}
+.dash-identity {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.dash-avatar {
+  width: 68px;
+  height: 68px;
+  border-radius: var(--flux-radius-lg);
+  object-fit: cover;
+  flex: none;
+  border: 2px solid var(--flux-bg);
+  background: var(--flux-bg-elevated);
+}
+.dash-avatar--empty {
+  display: grid;
+  place-items: center;
+  color: var(--flux-text-dim);
+  font-size: calc(22px * var(--flux-text-scale));
+  font-weight: 700;
+}
+.dash-titles {
+  min-width: 0;
+}
+.dash-title {
+  margin: 0;
+  font-size: calc(23px * var(--flux-text-scale));
+  font-weight: 600;
+  line-height: 1.2;
+}
+.dash-desc {
+  margin: 3px 0 0;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-md);
+}
+.dash-who {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+.dash-switch {
+  padding: 4px 7px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  color: var(--flux-text);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  max-width: 220px;
+}
+.dash-body {
+  flex: 1;
+  padding: 6px 26px 20px;
+}
+.dash-bar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.dash-section {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--flux-text-lg);
+  font-weight: 600;
+}
+.dash-count {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.dash-empty {
+  margin: 10px 2px;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+}
+.dash-foot {
+  padding: 0 26px 16px;
+}
+
+/* ── project cards ── */
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  gap: 12px;
+}
+.card {
+  position: relative;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+  overflow: hidden;
+}
+.card:hover {
+  border-color: var(--flux-border-strong);
+}
+.card-open,
+.card-new {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-height: 92px;
+  padding: 13px 14px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.card-open:hover:not(:disabled),
+.card-new:hover {
+  background: var(--flux-bg-hover);
+}
+.card-open:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.card-name {
+  font-size: var(--flux-text-lg);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* RTL so a long path keeps its tail — the folder name is what identifies it. */
+.card-path {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  font-family: var(--flux-font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.card-when {
+  margin-top: auto;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+}
+.card--missing {
+  border-style: dashed;
+}
+.card--missing .card-when {
+  color: var(--flux-danger);
+}
+.card--new {
+  border-style: dashed;
+  border-color: var(--flux-border-strong);
+  background: none;
+}
+.card-new {
+  align-items: center;
+  justify-content: center;
+  color: var(--flux-text-dim);
+}
+.card-plus {
+  font-size: calc(22px * var(--flux-text-scale));
+  line-height: 1;
+}
+.card-forget {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--flux-radius);
+  background: none;
+  color: var(--flux-text-faint);
+  font-family: inherit;
+  font-size: var(--flux-text-md);
+  cursor: pointer;
+  opacity: 0;
+}
+.card:hover .card-forget {
+  opacity: 1;
+}
+.card-forget:hover {
+  background: var(--flux-bg-active);
+  color: var(--flux-text);
+}
+
+/* ── the new-project sheet ── */
+.sheet {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--flux-scrim);
+  z-index: 40;
+}
+.sheet-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(460px, calc(100vw - 48px));
+  padding: 18px 20px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius-lg);
+  background: var(--flux-bg-panel);
+}
+.sheet-title {
+  margin: 0;
+  font-size: var(--flux-text-lg);
+  font-weight: 600;
+}
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

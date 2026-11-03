@@ -173,7 +173,7 @@ await ensureProject(cdp, path.join(os.homedir(), 'flux-verify-project'))
 
 /** Opens Settings and lands on a page by its name in the side nav. */
 const OPEN = (name) => `
-  await window.__fluxDev.commands.run('workspace.switch.settings');
+  await window.__fluxDev.commands.run('layout.switch.settings');
   await new Promise((r) => setTimeout(r, 500));
   const link = [...document.querySelectorAll('.settings-link')].find(
     (el) => el.querySelector('.settings-link-name').textContent.trim() === ${JSON.stringify(name)});

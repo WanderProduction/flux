@@ -109,17 +109,54 @@ export function getActivePreset(): string | null {
  * taken as the whole truth — which is also why `resetAll` exists as an
  * explicit act.
  */
+/**
+ * Command ids that have been renamed, old to new.
+ *
+ * A stored keymap is the whole truth — deliberately, so a binding somebody
+ * cleared stays cleared — and the cost of that is this table. Without it, the
+ * layout commands kept their keys for exactly as long as nobody had ever
+ * opened the Hotkeys page: anyone who had saved a map would find `1`, `2` and
+ * `3` bound to commands that no longer exist, with nothing on screen to say
+ * why. Presets have the same problem and get the same treatment, since a
+ * preset is a whole map too.
+ *
+ * Entries are kept, not deleted once "everybody has migrated" — there is no
+ * way to know that, and a line in a table is cheaper than a key that stops
+ * working on one person's machine.
+ */
+const RENAMED: Record<string, string> = {
+  'workspace.switch.edit': 'layout.switch.edit',
+  'workspace.switch.export': 'layout.switch.export',
+  'workspace.switch.settings': 'layout.switch.settings',
+  'workspace.save': 'layout.save',
+  'workspace.reset': 'layout.reset',
+}
+
+/** The same map with renamed commands moved over. Untouched when none apply. */
+function migrate(map: Keymap): Keymap {
+  let moved = false
+  const out: Keymap = {}
+  for (const [chord, command] of Object.entries(map)) {
+    const renamed = RENAMED[command]
+    if (renamed) moved = true
+    out[chord] = renamed ?? command
+  }
+  return moved ? out : map
+}
+
 export async function loadKeybindings(): Promise<void> {
   const stored = await loadStore<Stored>(STORE, {})
 
   if (stored.keymap && typeof stored.keymap === 'object') {
-    keymap = { ...stored.keymap }
+    keymap = migrate({ ...stored.keymap })
   }
   if (Array.isArray(stored.presets)) {
-    presets = stored.presets.filter(
-      (one): one is KeymapPreset =>
-        !!one && typeof one.id === 'string' && typeof one.name === 'string' && !!one.keymap,
-    )
+    presets = stored.presets
+      .filter(
+        (one): one is KeymapPreset =>
+          !!one && typeof one.id === 'string' && typeof one.name === 'string' && !!one.keymap,
+      )
+      .map((one) => ({ ...one, keymap: migrate(one.keymap) }))
   }
   activePreset = typeof stored.activePreset === 'string' ? stored.activePreset : null
 

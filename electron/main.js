@@ -8,6 +8,21 @@ import os from 'node:os'
 import { DIALOG_FILTERS, mediaKindOf } from '../shared/mediaTypes.js'
 import { clamp, defaultsFor, LIMITS } from '../shared/performanceDefaults.js'
 import {
+  changePassword,
+  createAccount,
+  readAccount,
+  unlockAccount,
+  updateAccount,
+} from './identity.js'
+import {
+  createWorkspace,
+  forgetProject,
+  isWorkspace,
+  readWorkspace,
+  rememberProject,
+  updateWorkspace,
+} from './workspace.js'
+import {
   existsMany,
   isServableMediaPath,
   listDirectory,
@@ -715,6 +730,74 @@ ipcMain.handle('cache:clearWindow', async () => {
   const after = (await windowCaches()).bytes
   return { bytes: Math.max(0, before - after) }
 })
+
+/*
+ * ── who this installation is, and what it holds ───────────────
+ *
+ * The account lives beside the app's other state and the workspaces live in a
+ * folder next to it by default — but only by default. See electron/identity.js
+ * and electron/workspace.js, both of which take their directory as an argument
+ * so neither needs an app running to be exercised.
+ */
+
+/**
+ * The decrypted private key, for as long as this process runs.
+ *
+ * Never sent to the renderer and never written anywhere. Nothing uses it yet;
+ * pairing a second device is what it is for. Holding it in a module variable
+ * rather than handing it across the bridge means the only way to get at it is
+ * to be this process, which is the point of encrypting it in the first place.
+ */
+let unlockedKey = null
+
+ipcMain.handle('account:read', () => readAccount(app.getPath('userData')))
+/**
+ * What to call this machine, before anybody types anything.
+ *
+ * The hostname is what the person already calls this computer, and it is
+ * usually right — "nikoflow-laptop" needs a comma taken out of it, not
+ * inventing from scratch. A default that is nearly right is read and
+ * corrected; an empty field is a question.
+ */
+ipcMain.handle('account:suggestDeviceName', () => os.hostname())
+ipcMain.handle('account:create', async (_e, details) => {
+  const result = await createAccount(app.getPath('userData'), details)
+  // Created unlocked: the password was just typed, twice, seconds ago. Asking
+  // for it again to reach a key nothing is using yet would be ceremony.
+  if (result.ok) {
+    const opened = await unlockAccount(app.getPath('userData'), details?.password)
+    if (opened.ok) unlockedKey = opened.privateKey
+  }
+  return result
+})
+ipcMain.handle('account:unlock', async (_e, password) => {
+  const opened = await unlockAccount(app.getPath('userData'), password)
+  if (opened.ok) unlockedKey = opened.privateKey
+  return { ok: opened.ok, reason: opened.ok ? undefined : opened.reason }
+})
+ipcMain.handle('account:locked', () => unlockedKey === null)
+ipcMain.handle('account:update', (_e, patch) => updateAccount(app.getPath('userData'), patch))
+ipcMain.handle('account:changePassword', async (_e, oldPassword, newPassword) => {
+  const result = await changePassword(app.getPath('userData'), oldPassword, newPassword)
+  if (result.ok) {
+    const opened = await unlockAccount(app.getPath('userData'), newPassword)
+    if (opened.ok) unlockedKey = opened.privateKey
+  }
+  return result
+})
+
+/** Where workspaces go unless the user says otherwise. */
+const workspacesPath = () => path.join(app.getPath('userData'), 'workspaces')
+
+ipcMain.handle('workspace:defaultParent', () => workspacesPath())
+ipcMain.handle('workspace:create', async (_e, parent, details) =>
+  createWorkspace(parent || workspacesPath(), details),
+)
+ipcMain.handle('workspace:read', (_e, root) => readWorkspace(root))
+ipcMain.handle('workspace:is', (_e, root) => isWorkspace(root))
+ipcMain.handle('workspace:update', (_e, root, patch) => updateWorkspace(root, patch))
+ipcMain.handle('workspace:remember', (_e, root, project) => rememberProject(root, project))
+ipcMain.handle('workspace:forget', (_e, root, projectRoot) => forgetProject(root, projectRoot))
 
 /** Opens the cache directory, which is the other half of saying where it is. */
 ipcMain.handle('cache:reveal', async () => {
