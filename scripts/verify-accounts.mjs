@@ -250,6 +250,35 @@ await check('forgetting a project does not touch the folder', async () => {
 
 const cdp = await attach(Number(process.env.FLUX_CDP_PORT) || 9222)
 
+/*
+ * Put the app back in a state these checks can start from.
+ *
+ * The adoption check below closes the open workspace on purpose, and a run
+ * that fails between that and its restore leaves the app on the setup screen
+ * with a workspace it knows about and has not opened. Every check after it
+ * then fails for a reason that has nothing to do with the code under test,
+ * which is the most expensive kind of red there is.
+ */
+const settled = await evaluate(
+  cdp,
+  `const { workspace, project } = window.__fluxDev;
+   for (let i = 0; i < 40 && !workspace.workspaceLoaded(); i++) {
+     await new Promise((r) => setTimeout(r, 150));
+   }
+   if (project.getProject()) project.closeProject();
+   if (!workspace.getWorkspace() && workspace.knownWorkspaces().length > 0) {
+     await workspace.openWorkspace(workspace.knownWorkspaces()[0]);
+   }
+   await new Promise((r) => setTimeout(r, 400));
+   return { open: Boolean(workspace.getWorkspace()), known: workspace.knownWorkspaces().length };`,
+)
+if (!settled.open && settled.known > 0) {
+  throw new Error(
+    `could not open any of the ${settled.known} known workspaces — the app is not in a state ` +
+      'these checks can start from',
+  )
+}
+
 try {
   await check('the layout commands were renamed, and nothing answers to the old ones', async () => {
     /*
@@ -488,48 +517,65 @@ try {
      * exactly where they left it — because the recents list was the only
      * record of what they had been working on.
      *
-     * Driven by closing the open workspace and making a second one, so this
-     * runs on any profile rather than only on a fresh machine.
+     * Driven by closing the open workspace and making a second one, so it runs
+     * on any profile rather than only on a fresh machine. Everything it
+     * disturbs is put back in a `finally`: an earlier version of this check
+     * returned early when its workspace already existed, left the app with
+     * none open, and every check after it failed for a reason that had nothing
+     * to do with the code.
      */
     const out = await evaluate(
       cdp,
       `const { workspace, project, store } = window.__fluxDev;
        const first = workspace.getWorkspace();
-       // Asked for rather than sliced off the root: a path separator inside a
-       // template literal inside a harness is three levels of escaping, and it
-       // has already cost this file one debugging round.
-       const parent = await workspace.defaultParent();
+       const held = await store.loadStore('recent-projects', []);
 
-       // Stand in for a history this profile may not have. Written through the
-       // same store the launcher reads, then loaded the way a launch loads it.
+       // Stand in for a history this profile may not have, written through the
+       // same store the launcher reads.
        const planted = first.projects.filter((one) => !one.missing).slice(0, 3)
          .map((one, i) => ({ root: one.root, name: one.name, openedAt: Date.now() - i * 1000 }));
        if (planted.length === 0) return { skipped: true };
-       await store.saveStore('recent-projects', planted);
-       await store.flushStores();
-       await project.loadRecents();
 
-       workspace.closeWorkspace();
-       for (let i = 0; i < 40 && !document.querySelector('.setup-title'); i++) {
-         await new Promise((r) => setTimeout(r, 150));
-       }
-       const backToSetup = document.querySelector('.setup-title')?.textContent.trim();
+       // A name no earlier run can have taken, so this is re-runnable.
+       const title = 'Adopted ' + Date.now().toString(36);
+       let made = null;
+       try {
+         await store.saveStore('recent-projects', planted);
+         await store.flushStores();
+         await project.loadRecents();
 
-       const made = await workspace.createWorkspace(parent, { title: 'Adopted' });
-       if (!made.ok) return { failed: made.reason };
-       // The seeding lives in the setup screen, which this did not go through,
-       // so it is replayed here exactly as that screen replays it.
-       for (const recent of [...project.getRecents()].reverse()) {
-         await workspace.rememberProject({ root: recent.root, name: recent.name });
-       }
-       await new Promise((r) => setTimeout(r, 400));
+         workspace.closeWorkspace();
+         for (let i = 0; i < 40 && !document.querySelector('.setup-title'); i++) {
+           await new Promise((r) => setTimeout(r, 150));
+         }
+         const backToSetup = document.querySelector('.setup-title')?.textContent.trim();
 
-       const seeded = workspace.getWorkspace().projects.map((one) => one.name);
-       // Put the first workspace back and clear the stand-in history.
-       await workspace.openWorkspace(first.root);
-       await store.saveStore('recent-projects', []);
-       await store.flushStores();
-       return { backToSetup, planted: planted.map((one) => one.name), seeded };`,
+         // Asked for rather than sliced off the root: a path separator inside a
+         // template literal inside a harness is three levels of escaping.
+         const parent = await workspace.defaultParent();
+         made = await workspace.createWorkspace(parent, { title });
+         if (!made.ok) return { failed: made.reason };
+
+         // The seeding lives in the setup screen, which this did not go
+         // through, so it is replayed exactly as that screen replays it.
+         for (const recent of [...project.getRecents()].reverse()) {
+           await workspace.rememberProject({ root: recent.root, name: recent.name });
+         }
+         await new Promise((r) => setTimeout(r, 400));
+
+         return {
+           backToSetup,
+           title,
+           planted: planted.map((one) => one.name),
+           seeded: workspace.getWorkspace().projects.map((one) => one.name),
+         };
+       } finally {
+         await workspace.openWorkspace(first.root);
+         await store.saveStore('recent-projects', held);
+         await store.flushStores();
+         await project.loadRecents();
+         await new Promise((r) => setTimeout(r, 300));
+       }`,
     )
 
     if (out.skipped) {
@@ -538,7 +584,7 @@ try {
     }
     assert.ok(!out.failed, `could not make a second workspace: ${out.failed}`)
     assert.equal(out.backToSetup, 'Make a workspace', 'closing a workspace did not offer a new one')
-    console.log(`       adopted ${out.seeded.join(', ')}`)
+    console.log(`       ${out.title} adopted ${out.seeded.join(', ')}`)
     assert.deepEqual(
       [...out.seeded].sort(),
       [...out.planted].sort(),
@@ -595,6 +641,244 @@ try {
     }
     assert.equal(out.gone, true, 'the card survived being forgotten')
     assert.equal(out.stillThere, true, 'forgetting a card deleted the project on disk')
+  })
+  /**
+   * Opens Settings on a page, by level and name.
+   *
+   * Two pages are called "General", so the level has to disambiguate — and the
+   * settings layout belongs to the editor, so a project has to be open before
+   * the command exists at all.
+   */
+  const OPEN_SETTINGS = (level, name) => `
+    // Block-scoped: the check bodies below destructure the same names, and a
+    // second \`const workspace\` in one scope is a SyntaxError the page throws
+    // before any of it runs.
+    {
+      const { project, workspace } = window.__fluxDev;
+      if (!project.getProject()) {
+        const first = workspace.getWorkspace().projects.find((one) => !one.missing);
+        if (!first) throw new Error('no project to open');
+        await project.openProject(first.root);
+        for (let i = 0; i < 60 && !document.querySelector('.dock-host'); i++) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+    }
+    await window.__fluxDev.commands.run('layout.switch.settings');
+    await new Promise((r) => setTimeout(r, 500));
+    {
+      const want = ${JSON.stringify(name)};
+      const level = ${JSON.stringify(level)};
+      const matches = [...document.querySelectorAll('.settings-link')].filter(
+        (el) => el.querySelector('.settings-link-name').textContent.trim() === want);
+      if (matches.length === 0) throw new Error('no settings page called ' + want);
+      const link = matches.length === 1 ? matches[0] : matches[level === 'account' ? 0 : 1];
+      link.click();
+      await new Promise((r) => setTimeout(r, 450));
+      const crumb = document.querySelector('.settings-page-crumb')?.textContent.trim() ?? '';
+      if (!crumb.toLowerCase().startsWith(level)) {
+        throw new Error('landed on ' + crumb + ' rather than ' + level);
+      }
+    }`
+
+  /** Sets a React-controlled input the way a person typing into it would. */
+  const TYPE = `
+    const type = (el, value) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, value);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };`
+
+  await check('the Account page renames without touching the key', async () => {
+    const out = await evaluate(
+      cdp,
+      `${OPEN_SETTINGS('account', 'General')}
+       ${TYPE}
+       const { account } = window.__fluxDev;
+       const before = { ...account.getAccount() };
+       const save = () => [...document.querySelectorAll('.ac-actions .hk-btn')]
+         .find((el) => el.textContent.trim() === 'Save');
+
+       const idle = save().disabled;
+       const fields = [...document.querySelectorAll('.ac-fields .field-input')];
+       type(fields[0], 'renamed-by-harness');
+       await new Promise((r) => setTimeout(r, 200));
+       const armed = !save().disabled;
+
+       // A blank name must not be savable: the main process would refuse the
+       // record anyway, and a button offering a doomed save is worse than one
+       // that is off.
+       type(fields[0], '   ');
+       await new Promise((r) => setTimeout(r, 150));
+       const blankBlocked = save().disabled;
+
+       type(fields[0], 'renamed-by-harness');
+       await new Promise((r) => setTimeout(r, 150));
+       save().click();
+       for (let i = 0; i < 40 && account.getAccount().nickname !== 'renamed-by-harness'; i++) {
+         await new Promise((r) => setTimeout(r, 150));
+       }
+       const after = { ...account.getAccount() };
+
+       // Put the name back through the same path, so a second run starts here.
+       type(fields[0], before.nickname);
+       await new Promise((r) => setTimeout(r, 200));
+       save()?.click();
+       await new Promise((r) => setTimeout(r, 600));
+       return { idle, armed, blankBlocked, before, after, restored: account.getAccount().nickname };`,
+    )
+
+    assert.equal(out.idle, true, 'Save was offered before anything had changed')
+    assert.equal(out.armed, true, 'Save stayed off after a change')
+    assert.equal(out.blankBlocked, true, 'a blank nickname could be saved')
+    assert.equal(out.after.nickname, 'renamed-by-harness', 'the rename did not land')
+    // The thing that must not move.
+    assert.equal(out.after.publicKey, out.before.publicKey, 'a rename changed the identity key')
+    assert.equal(out.after.fingerprint, out.before.fingerprint, 'the fingerprint moved')
+    assert.equal(out.restored, out.before.nickname, 'the name was not put back')
+    console.log(`       ${out.before.nickname} → renamed-by-harness → ${out.restored}`)
+  })
+
+  await check('the Account page changes the password and keeps the identity', async () => {
+    const out = await evaluate(
+      cdp,
+      `${OPEN_SETTINGS('account', 'General')}
+       ${TYPE}
+       const { account } = window.__fluxDev;
+       const before = { ...account.getAccount() };
+       const fields = [...document.querySelectorAll('.ac-password .field-input')];
+       const button = () => [...document.querySelectorAll('.ac-actions .hk-btn')]
+         .find((el) => /password/i.test(el.textContent));
+
+       // Mismatched, then too short, then right: the button must stay off for
+       // the first two.
+       type(fields[0], 'a good long password');
+       type(fields[1], 'the second password');
+       type(fields[2], 'something else');
+       await new Promise((r) => setTimeout(r, 150));
+       const mismatchBlocked = button().disabled;
+
+       type(fields[1], 'short');
+       type(fields[2], 'short');
+       await new Promise((r) => setTimeout(r, 150));
+       const shortBlocked = button().disabled;
+
+       type(fields[1], 'the second password');
+       type(fields[2], 'the second password');
+       await new Promise((r) => setTimeout(r, 150));
+       button().click();
+       await new Promise((r) => setTimeout(r, 2500));
+
+       // The real check: the new one opens the key and the old one does not.
+       const opensWithNew = await window.flux.account.unlock('the second password');
+       const opensWithOld = await window.flux.account.unlock('a good long password');
+
+       // And back, so the profile ends where it started.
+       const back = await window.flux.account.changePassword(
+         'the second password', 'a good long password');
+       return {
+         mismatchBlocked, shortBlocked, opensWithNew, opensWithOld, back,
+         key: account.getAccount().publicKey, before: before.publicKey,
+       };`,
+    )
+
+    assert.equal(out.mismatchBlocked, true, 'two different new passwords were accepted')
+    assert.equal(out.shortBlocked, true, 'a five-character password was accepted')
+    assert.equal(out.opensWithNew.ok, true, 'the new password does not open the key')
+    assert.equal(out.opensWithOld.ok, false, 'the old password still opens the key')
+    assert.equal(out.key, out.before, 'changing the password changed the identity')
+    assert.equal(out.back.ok, true, 'the password could not be put back')
+    console.log('       re-encrypted, same key, and put back')
+  })
+
+  await check('the Workspace page renames, and says where the folder is', async () => {
+    const out = await evaluate(
+      cdp,
+      `${OPEN_SETTINGS('workspace', 'General')}
+       ${TYPE}
+       const { workspace } = window.__fluxDev;
+       const before = { ...workspace.getWorkspace() };
+       const page = document.querySelector('.settings-page').innerText;
+       const save = () => [...document.querySelectorAll('.ac-actions .hk-btn')]
+         .find((el) => el.textContent.trim() === 'Save');
+
+       const fields = [...document.querySelectorAll('.ac-fields .field-input')];
+       type(fields[0], 'Renamed By Harness');
+       await new Promise((r) => setTimeout(r, 200));
+       save().click();
+       for (let i = 0; i < 40 && workspace.getWorkspace().title !== 'Renamed By Harness'; i++) {
+         await new Promise((r) => setTimeout(r, 150));
+       }
+       const after = { ...workspace.getWorkspace() };
+
+       type(fields[0], before.title);
+       await new Promise((r) => setTimeout(r, 200));
+       save()?.click();
+       await new Promise((r) => setTimeout(r, 600));
+       return { page, before, after, restored: workspace.getWorkspace().title };`,
+    )
+
+    assert.equal(out.after.title, 'Renamed By Harness', 'the rename did not land')
+    // Renaming a workspace must not move it: the folder is named after the
+    // title it was made with, and chasing that would orphan every project path
+    // underneath.
+    assert.equal(out.after.id, out.before.id, 'renaming changed the workspace id')
+    assert.equal(out.after.root, out.before.root, 'renaming moved the folder')
+    assert.equal(out.after.projects.length, out.before.projects.length, 'renaming dropped projects')
+    assert.equal(out.restored, out.before.title, 'the title was not put back')
+    // "Where did my workspace go" is the question that section exists for.
+    assert.ok(out.page.includes(out.before.root), 'the page does not name the folder')
+    console.log(`       renamed and put back, folder ${out.after.root}`)
+  })
+
+  await check('removing a project from the page takes two clicks', async () => {
+    const out = await evaluate(
+      cdp,
+      `${OPEN_SETTINGS('workspace', 'General')}
+       const { workspace } = window.__fluxDev;
+       const rows = () => [...document.querySelectorAll('.ac-project')];
+       const before = rows().length;
+       if (before === 0) return { skipped: true };
+
+       const name = rows()[0].querySelector('.ac-project-name').textContent.trim();
+       const root = rows()[0].querySelector('.ac-path').textContent.trim();
+
+       // One click arms it and must remove nothing.
+       rows()[0].querySelector('.hk-btn').click();
+       await new Promise((r) => setTimeout(r, 250));
+       const afterFirst = rows().length;
+       const armedLabel = rows()[0].querySelector('.hk-btn').textContent.trim();
+
+       // "Keep" backs out, also without removing anything.
+       [...rows()[0].querySelectorAll('.hk-btn')]
+         .find((el) => el.textContent.trim() === 'Keep').click();
+       await new Promise((r) => setTimeout(r, 250));
+       const afterKeep = rows().length;
+
+       // Now really remove it, and check the folder survived.
+       rows()[0].querySelector('.hk-btn').click();
+       await new Promise((r) => setTimeout(r, 250));
+       [...rows()[0].querySelectorAll('.hk-btn')]
+         .find((el) => /Remove from the list/.test(el.textContent)).click();
+       await new Promise((r) => setTimeout(r, 600));
+       const afterRemove = workspace.getWorkspace().projects.length;
+       const folderStillThere = await window.flux.project.is(root);
+
+       await workspace.rememberProject({ root, name });
+       return { name, before, afterFirst, armedLabel, afterKeep, afterRemove, folderStillThere };`,
+    )
+
+    if (out.skipped) {
+      console.log('       no projects listed')
+      return
+    }
+    assert.equal(out.afterFirst, out.before, 'the first click removed a project')
+    assert.match(out.armedLabel, /Remove from the list/, `armed button says "${out.armedLabel}"`)
+    assert.equal(out.afterKeep, out.before, '"Keep" removed the project anyway')
+    assert.equal(out.afterRemove, out.before - 1, 'the second click did not remove it')
+    assert.equal(out.folderStillThere, true, 'removing a row deleted the project on disk')
+    console.log(`       ${out.name}: armed, kept, then removed with the folder intact`)
   })
 } finally {
   await fs.rm(scratch, { recursive: true, force: true }).catch(() => {})

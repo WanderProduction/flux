@@ -5111,3 +5111,159 @@ kbd {
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ── settings: Account and Workspace ──────────────────────────
+ *
+ * Both pages share a shape — an identity block, then sections of prose and
+ * controls — so they share a prefix. Tokens only: verify:appearance fails the
+ * run on a new colour literal or a hardcoded font size.
+ */
+.ac {
+  display: flex;
+  flex-direction: column;
+}
+.ac .ap-row + .ap-row {
+  margin-top: 18px;
+}
+.ac-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.ac-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+}
+.ac-banner {
+  display: block;
+  max-width: 520px;
+  margin-bottom: 10px;
+}
+.ac-preview {
+  margin: 0 0 10px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+}
+.ac-preview strong {
+  color: var(--flux-text);
+  font-weight: 600;
+}
+.ac-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ac-aside {
+  margin: 0;
+}
+.ac-ok {
+  color: var(--flux-ok);
+  font-size: var(--flux-text-sm);
+}
+.ac-error {
+  color: var(--flux-danger);
+  font-size: var(--flux-text-sm);
+}
+.ac-password {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 10px;
+  max-width: 560px;
+}
+.ac-password .field {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The key, the folder: a value to read and one thing to do with it. */
+.ac-key {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.ac-fingerprint {
+  padding: 4px 9px;
+  border: 1px solid var(--flux-border);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-elevated);
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-md);
+  letter-spacing: 0.06em;
+}
+.ac-path {
+  font-family: var(--flux-font-mono);
+  font-size: var(--flux-text-sm);
+  color: var(--flux-text-dim);
+  overflow-wrap: anywhere;
+}
+.ac-born {
+  margin: 0 0 4px;
+  max-width: 72ch;
+  line-height: 1.5;
+}
+.ac-born strong {
+  color: var(--flux-text-dim);
+}
+.ac-others-head {
+  margin-top: 12px;
+}
+.ac-others {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ac-others li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ac-count {
+  margin-left: 7px;
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.ac-projects {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  border-top: 1px solid var(--flux-border);
+}
+.ac-project {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--flux-border);
+}
+.ac-project-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.ac-project-name {
+  font-size: var(--flux-text-md);
+}
+.ac-project--missing .ac-project-name {
+  color: var(--flux-text-dim);
+}
+.ac-project-tag {
+  color: var(--flux-danger);
+  font-size: var(--flux-text-sm);
+  white-space: nowrap;
+}

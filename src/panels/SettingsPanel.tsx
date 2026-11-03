@@ -3,9 +3,11 @@ import { useCallback, useMemo, useState } from 'react'
 import type { FunctionComponent } from 'react'
 
 import { PanelFrame } from './PanelFrame'
+import { AccountPage } from './settings/AccountPage'
 import { AppearancePage } from './settings/AppearancePage'
 import { CachePage } from './settings/CachePage'
 import { HotkeysPage } from './settings/HotkeysPage'
+import { WorkspacePage } from './settings/WorkspacePage'
 import { commands } from '../kernel/commands'
 import {
   FIRST_SETTINGS_PAGE,
@@ -163,8 +165,10 @@ export function SettingsPanel() {
 // like a mistake rather than the point.
 const BUILT: Record<string, FunctionComponent | undefined> = {
   'account.appearance': AppearancePage,
+  'account.general': AccountPage,
   'account.hotkeys': HotkeysPage,
   'device.cache': CachePage,
+  'workspace.general': WorkspacePage,
 }
 
 /** One page: the built ones render themselves, the rest state the plan. */

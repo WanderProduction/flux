@@ -6,6 +6,10 @@
 > not, and the screen that will offer it says so rather than showing a disabled field. This
 > file is what each layer is for, what is actually stored, and what the next piece needs.
 
+Once past them, **Settings → Account** and **Settings → Workspace** edit the same two records:
+the names, the pictures, the password, the key fingerprint, where the workspace folder is, and
+every project filed under it.
+
 FLUX opens on one of four screens, and which one is decided by the first question that has no
 answer yet:
 
@@ -194,19 +198,20 @@ Somebody shares a workspace, the account proves it is you, and the workspace app
 own. It needs a transport — the two devices have to be able to reach each other — and a format
 for the invitation, and both of those are decisions this file does not make yet.
 
-**Editing after the fact.** The account and workspace are set up once and cannot currently be
-changed: `updateAccount`, `changePassword` and `updateWorkspace` all exist and are tested,
-and nothing in the UI calls them. That is the `account.general` and `workspace.general`
-settings pages, and both now point at where the thing they describe lives.
+**Archiving a project** rather than removing it from the list. Today removing takes it off the
+dashboard and leaves the folder alone, which is the honest minimum. Ordering is the same gap:
+most-recently-opened is the right default and the wrong answer for somebody with forty projects
+and six they care about.
 
-**Archiving a project** rather than removing the card. Today "forget" takes it off the dashboard
-and leaves the folder alone, which is the honest minimum.
+**Moving a workspace** to another folder. It is chosen once, when the workspace is made, because
+moving means moving a directory and rewriting every path that points into it — and a
+half-finished version of that loses track of projects.
 
 ```bash
 npm run verify:accounts
 ```
 
-Seventeen checks in three parts. The identity and the workspace store run against a real temp
+Twenty-two checks in three parts. The identity and the workspace store run against a real temp
 directory from plain Node with no app — and the identity checks are built around *signing*
 rather than around the stored bytes, because a password check that only compared a hash would
 pass a test written against the hash and still have lost the key.
@@ -215,3 +220,6 @@ The screen checks run against the app and adapt: on a profile with no account th
 real first run, type a mismatched confirmation to see the button stay disabled, and assert that
 the folder created is the one the screen promised. On a profile that already has an account they
 check the invariants that do not need a fresh machine. The suite says which it did.
+
+The settings pages are driven the same way: a rename typed in and saved, a password changed and
+changed back, a project removed from the list with the folder checked afterwards.

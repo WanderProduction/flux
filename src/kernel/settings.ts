@@ -110,17 +110,12 @@ export const settingsPages: SettingsPage[] = [
     id: 'account.general',
     level: 'account',
     name: 'General',
-    blurb: 'Who you are, and what opens when you launch',
-    ready: false,
+    blurb: 'Who you are, and the key this machine is known by',
+    ready: true,
     coming:
-      'Changing the nickname, the device name and the avatar after the fact, changing the ' +
-      'password that encrypts the identity key, and showing the key fingerprint so another ' +
-      'device can be checked against it. Also which workspace and which project open on ' +
-      'launch, and whether FLUX reopens what you were last editing.',
-    livesAt: {
-      what: 'The account itself — made on first run, with a keypair this machine is known by',
-      where: 'The first screen, before any workspace exists',
-    },
+      'Which workspace and which project open on launch, and whether FLUX reopens what you ' +
+      'were last editing — which needs a decision about what reopening an unsaved project ' +
+      'should do before it is worth building.',
   },
   {
     id: 'account.appearance',
@@ -194,13 +189,14 @@ export const settingsPages: SettingsPage[] = [
     level: 'workspace',
     name: 'General',
     blurb: 'Its name, its mark, and the projects in it',
-    ready: false,
+    ready: true,
     coming:
-      'Editing the name, description, logo and banner after the fact. Ordering the projects ' +
-      'and archiving the ones you are not working on without deleting them. Moving a ' +
-      'workspace to another folder, which today can only be chosen when it is made.',
+      'Ordering the projects and archiving the ones you are not working on without deleting ' +
+      'them. Moving a workspace to another folder, which today can only be chosen when it is ' +
+      'made — moving means rewriting every path that points into it, and a half-finished ' +
+      'version of that loses track of projects.',
     livesAt: {
-      what: 'The workspace itself, its pictures, and every project in it as a card',
+      what: 'Every project in the workspace as a card, and opening one',
       where: 'The dashboard — the screen in front of the editor',
     },
   },

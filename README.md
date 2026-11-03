@@ -160,7 +160,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Projects** | Create or open one from the dashboard. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
 | **Layouts** | Saved panel arrangements. `1` Edit, `2` Export, `3` Settings. |
-| **Settings** | `Ctrl ,` — three levels, nineteen pages. Three are real; the rest say what they will be. |
+| **Settings** | `Ctrl ,` — three levels, nineteen pages. Five are real; the rest say what they will be. |
 | **Themes** | Three dark ones, five accents, density and text size — all of it token overrides. |
 | **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets. |
 | **Layout persistence** | `Ctrl Alt S` saves the current layout's arrangement, `Ctrl Shift R` resets it. |
@@ -1639,10 +1639,10 @@ A *project* setting is a fourth thing and it already has a home: sequence settin
 else's computer has to live. If a setting ever wants to be in the document, it is not a
 settings page, it is a document field.
 
-#### Three pages of nineteen are real, and the rest say so
+#### Five pages of nineteen are real, and the rest say so
 
-**Hotkeys & Presets**, **Appearance** and **Cache** are built — see below. The other sixteen
-are reachable and each states
+**Account**, **Workspace**, **Hotkeys & Presets**, **Appearance** and **Cache** are built —
+see below. The other fourteen are reachable and each states
 what it will hold, specifically enough to disagree with, which is the point: the ordering of
 this work is worth arguing about before any of it exists.
 [`docs/SETTINGS.md`](docs/SETTINGS.md) is the same content with the dependencies and the build
@@ -1808,7 +1808,56 @@ set an attribute nothing responded to would pass any test written against the st
 is one of the seven: new literals fail the run, as does any `var(--flux-…, literal)`, since a
 fallback is how four tokens hid for months.
 
-#### Cache: the page that found the prune was wrong
+#### Account and Workspace: the two that were already underneath
+
+Both of these were strange pages to be missing. `updateAccount`, `changePassword` and
+`updateWorkspace` were written with the first-run screens, covered by the suite, and called by
+nothing — so a typo in a nickname was permanent. That is not a missing feature so much as a
+sign nobody had used the thing, and it is exactly the gap these two close.
+
+**Account** holds the two names and the avatar, the password, and the key. **Workspace** holds
+the name, description, logo and banner, where the folder is, and every project filed under it.
+
+#### Saving is a button, and that is a deliberate difference from Appearance
+
+Appearance writes on every click because a theme is its own preview — there is nothing to
+preview, the app *is* the preview, and an Apply button would exist only to make the change feel
+expensive. A nickname is the opposite: it has an invalid state halfway through being typed, and
+saving per keystroke would write "n", "ni", "nik" to disk and show each of them to every
+workspace the account is in. So these fields are a draft, Save commits, and the button is off
+until something has actually changed.
+
+#### Changing the password re-encrypts; it does not re-key
+
+Said on the page as well as in the code, because it is the first question anybody careful asks:
+*does changing my password make my other devices stop recognising me?* It does not. The keypair
+is re-encrypted under the new password and the identity is untouched — and the harness proves it
+by reading the public key either side of the change, then unlocking with the new password and
+confirming the old one no longer opens anything.
+
+#### The fingerprint is on the page for a day that has not happened yet
+
+Four groups of four hex characters, with a Copy button. It is what you read down a phone line
+when two devices claim to be the same account, which is useless today and unreasonably hard to
+find later if it were not here. The private half is never in the window at all.
+
+#### Renaming a workspace does not move its folder
+
+The folder is named after the title it was made with, and chasing a rename would mean moving a
+directory and rewriting every path that points into it. A half-finished version of that loses
+track of projects, so moving is **not built** and the page says so rather than offering a button
+that mostly works. What the page does do is name the folder and open it, which is the question
+that section actually gets asked: *where did my workspace go.*
+
+#### "Remove" on a row of somebody's work takes two clicks
+
+And the second button spells out which thing it means — "Remove from the list", not "Remove".
+On a row labelled with a project, the short word reads as *delete my footage*, and being wrong
+about that once is unforgivable. The harness checks all three states: the first click removes
+nothing, "Keep" backs out removing nothing, and the second click removes the row while the
+folder on disk survives.
+
+### Cache: the page that found the prune was wrong
 
 Where the caches are, how much is in them by kind, and a button for each. FLUX could not answer
 any of those before — the honest answer was "open AppData and look", which is the answer every

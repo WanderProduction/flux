@@ -2,10 +2,10 @@
 
 ### Three levels, nineteen pages, and the order to build them in
 
-> Plan doc. The shell is built and every page in it is reachable. **Three of the nineteen are
-> real** — Hotkeys & Presets, Appearance and Cache — and seven of the rest point at a setting
-> that already exists somewhere else in FLUX. This is the document that says what each page
-> will hold and, more usefully, what has to exist underneath it first.
+> Plan doc. The shell is built and every page in it is reachable. **Five of the nineteen are
+> real** — Account, Workspace, Hotkeys & Presets, Appearance and Cache — and seven of the rest
+> point at a setting that already exists somewhere else in FLUX. This is the document that says
+> what each page will hold and, more usefully, what has to exist underneath it first.
 >
 > Open it in the app with `3` or `Ctrl ,` and read it there: each page states its own plan,
 > and the side panel's search reads those plans, so "VST" finds Plugins without knowing it is
@@ -49,7 +49,7 @@ Four pages. These are the ones a person notices in the first ten minutes.
 
 | Page | What it will hold | Needs first |
 |---|---|---|
-| **General** | Display name, email, avatar, sign in and out. Which workspace and project open on launch. | An account record on disk, and a store for it that is not the project document |
+| **General** | **Built.** The two names, the avatar, the password, and the key fingerprint. Still to come: what opens on launch. | — |
 | **Appearance** | **Built.** Three dark themes, five accents, density and text size. Still to come: a custom stylesheet, and fonts once FLUX ships some. | — |
 | **Notifications** | Per event: render done, render failed, batch finished, update ready, a collaborator saved. Toast, the work ring, the OS, or a phone. | An event bus worth subscribing to; most of these events are already emitted somewhere |
 | **Hotkeys & Presets** | **Built.** Every command with its binding, click to rebind, conflict detection, named sets. Export and import are a clipboard round trip. | — |
@@ -195,7 +195,7 @@ Seven pages. This is where the collaboration story lives, and where almost nothi
 
 | Page | What it will hold | Needs first |
 |---|---|---|
-| **General** | Name, logo, the projects in it, in an order you set. Archive without deleting. | A workspace record, and projects knowing which workspace they are in |
+| **General** | **Built.** Name, description, logo, banner, where the folder is, and every project filed under it. Still to come: ordering, archiving, moving the folder. | — |
 | **Members and devices** | Invited people with roles, and your own machines — laptop, phone, workstation — each named and each sign-out-able | Identity, and then the sync layer |
 | **Automation and MCP** | Triggers and actions. The MCP server as something you can see: running, which tools, which model, and a log of what it did | Partly built — the control surface and MCP server work today |
 | **API and Webhooks** | Keys you can issue, scope and revoke. Webhooks per event with payload shapes, a delivery log and a retry | The same event bus Notifications needs |
