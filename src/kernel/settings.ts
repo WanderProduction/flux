@@ -124,14 +124,22 @@ export const settingsPages: SettingsPage[] = [
     level: 'account',
     name: 'Appearance',
     blurb: 'How the interface looks',
-    ready: false,
+    /*
+     * The second page built, and the prediction in docs/SETTINGS.md held: a
+     * theme is a block of token overrides selected by an attribute on the
+     * root, so the switcher uses the same mechanism a hand-written skin will.
+     * What it cost was the two holes in the token system that the audit found
+     * — four names used and never declared, and two near-black chrome
+     * surfaces left as literals. See kernel/appearance.ts.
+     */
+    ready: true,
     coming:
-      'Theme, accent, panel density, the font and its size, and how much chrome a panel ' +
-      'draws. Later: a custom stylesheet, dropped in and applied live. The panels already ' +
-      'take their look from one place — PanelFrame and the variables in styles/app.css — so ' +
-      'a skin is a question of exposing those rather than of restyling anything.',
+      'A custom stylesheet, dropped in and applied live, which is the thing the token system ' +
+      'exists for. Fonts: a choice needs fonts FLUX ships with, since offering a stack that ' +
+      'may not be installed is offering nothing. And a light theme is deliberately not ' +
+      'coming — an interface brighter than the picture changes how you read the picture.',
     livesAt: {
-      what: 'Panel arrangement, which is the half of "how it looks" that already works',
+      what: 'Panel arrangement, which is the other half of "how it looks"',
       where: 'The Window menu, and the workspace tabs in the top bar',
       command: 'workspace.save',
     },

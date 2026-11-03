@@ -2,10 +2,10 @@
 
 ### Three levels, nineteen pages, and the order to build them in
 
-> Plan doc. The shell is built and every page in it is reachable. **One of the nineteen is
-> real** — Hotkeys & Presets — and seven of the rest point at a setting that already exists
-> somewhere else in FLUX. This is the document that says what each page will hold and, more
-> usefully, what has to exist underneath it first.
+> Plan doc. The shell is built and every page in it is reachable. **Two of the nineteen are
+> real** — Hotkeys & Presets and Appearance — and seven of the rest point at a setting that
+> already exists somewhere else in FLUX. This is the document that says what each page will
+> hold and, more usefully, what has to exist underneath it first.
 >
 > Open it in the app with `3` or `Ctrl ,` and read it there: each page states its own plan,
 > and the side panel's search reads those plans, so "VST" finds Plugins without knowing it is
@@ -50,14 +50,93 @@ Four pages. These are the ones a person notices in the first ten minutes.
 | Page | What it will hold | Needs first |
 |---|---|---|
 | **General** | Display name, email, avatar, sign in and out. Which workspace and project open on launch. | An account record on disk, and a store for it that is not the project document |
-| **Appearance** | Theme, accent, density, font and size, panel chrome. Later a custom stylesheet applied live. | Nothing — `styles/theme.css` is already the single place every colour resolves through |
+| **Appearance** | **Built.** Three dark themes, five accents, density and text size. Still to come: a custom stylesheet, and fonts once FLUX ships some. | — |
 | **Notifications** | Per event: render done, render failed, batch finished, update ready, a collaborator saved. Toast, the work ring, the OS, or a phone. | An event bus worth subscribing to; most of these events are already emitted somewhere |
 | **Hotkeys & Presets** | **Built.** Every command with its binding, click to rebind, conflict detection, named sets. Export and import are a clipboard round trip. | — |
 
 **Appearance and Hotkeys were the two to build first**, for the same reason: the data model was
 already right. A skin is a file that redefines the tokens in `styles/theme.css` and nothing
 else; a keymap editor is a view over `defaultKeymap`. Neither needs an account, a workspace, or
-a server — so they are the pages that prove the shell with the least underneath them.
+a server — so they are the pages that prove the shell with the least underneath them. Both are
+built now, and both found the same shape of problem: the model was right and something was
+quietly bypassing it.
+
+### Three dark themes, and no light one
+
+Default, Darker and Neutral. A theme is a block of token overrides selected by
+`data-flux-theme`, which is the mechanism a hand-written skin will use — so the switcher could
+not invent a second one. The blocks are not rooted to `:root`, which is what lets each theme's
+swatch on the page carry its own `data-flux-theme` and be painted by the very block it selects.
+A picker whose swatches are hardcoded approximations stops matching the first time somebody
+edits the palette.
+
+**No light theme, deliberately.** An editor is dark because the picture is the brightest thing
+on screen and anything around it biases how you read it. A light theme for a tool whose job is
+judging images is not a preference, it is a worse instrument. So the axis offered is how dark
+and how neutral — the same axis Resolve and Premiere offer, and the one people actually ask for.
+
+Neutral is the one with a real argument behind it: a tinted interface shifts your perception of
+a grade and a desaturated one does not, which is also why it pairs with the grey accent. Nothing
+in that theme has one channel differing from another, and the harness asserts it.
+
+**Contrast is measured, not eyeballed.** Three text tiers against the panel they sit on,
+in all three themes. Body reads 13.1–13.6:1 and dim 4.7–5.2:1, which clear AAA and AA. The
+faint tier reads 2.9:1 in the shipped default — below AA, and already true before this page
+existed — so the harness holds every theme to *at least* the default rather than pretending
+otherwise. Both new themes measure 3.3:1, above the 3:1 line the default misses. Raising the
+default palette is a design decision for whoever owns the app, not something to slip into a
+settings page.
+
+**Density and text size are separate controls**, because "I cannot fit enough on screen" and "I
+cannot read this" are different complaints and one slider for both makes each harder to fix.
+Density moves chrome heights and the gutter; the scale moves only type. The harness asserts the
+separation in both directions.
+
+### And the audit Appearance forced
+
+`styles/theme.css` opens by saying that a component which hardcodes a colour has punched a hole
+in the skinning system. Measured on the way into this page, `app.css` held **54 colour literals
+and 67 hardcoded font sizes** — so the claim was decoration, and a theme switcher built on top
+of it would have half worked in a way nobody could have predicted from reading the file.
+
+Two kinds of hole mattered.
+
+**Four token names that were used and never declared.** `--flux-ok`, `--flux-danger`,
+`--flux-dim` and `--flux-line` appeared only as `var(--flux-dim, #8b93a1)`, with the fallback
+doing all the work. A skin that redefined them would in fact have worked, which makes this the
+worst kind of hole in a token system: not broken, just undiscoverable. They are declared now,
+the dead fallbacks are gone, and the harness fails on any `var(--flux-…, literal)` because a
+fallback is how this hid for months.
+
+One of them was hiding a second value. `--flux-danger` had two different fallbacks — `#d05f5f`
+on borders and text, `#b3403a` on a filled destructive hover — so collapsing them would have
+lightened a button. The fill has its own token now, at exactly the value it had.
+
+**Two near-black chrome surfaces.** The viewer stage and the node-map backdrop were literals, so
+a darker theme would have left two large rectangles at the old brightness. They are
+`--flux-bg-stage` and `--flux-bg-canvas`.
+
+**And the type.** 67 font sizes were hardcoded px against 106 that used the tokens, so a text
+scale would have resized 61% of the interface and left the rest — which reads as a bug, not as a
+setting. Every one of them is `calc(Npx * var(--flux-text-scale))` now, identical at 100%.
+
+#### What is still hardcoded, and why
+
+Not everything should be a token, and the two groups that stay are worth naming because the
+reasons are different.
+
+**Content black** — the viewer frame, the letterbox bars, a sequence thumbnail. A picture is
+judged against black, not against whatever the chrome happens to be; theming these would make
+the app lie about the footage. **Shadows** — black at low alpha, which reads correctly over any
+surface in any theme.
+
+Those, plus fourteen cosmetic details (tinted text on tinted badges, the grid dot, the two
+shades of the loading barber pole), are held in an allowlist in `verify-appearance.mjs` as a
+budget *per reason* rather than one total — so removing a shadow does not quietly buy somebody
+the right to hardcode a surface. A new literal fails the run. That is what turns the paragraph
+at the top of `theme.css` from a claim into a check.
+
+
 
 ### What building Hotkeys actually took
 
@@ -188,7 +267,7 @@ looking for a feature they already own.
 
 | Page | What exists | Where |
 |---|---|---|
-| Appearance | Panel arrangement and named layouts | Window menu, workspace tabs |
+| Appearance | Panel arrangement and named layouts, which is the other half of how it looks | Window menu, workspace tabs |
 | Automation and MCP | The control surface and the MCP server | Loopback port with a per-launch token, `mcp/server.mjs` |
 | Controllers + Hardware | What the machine would choose for playback, read from the machine | Performance dialog |
 | Audio | The sequence's rate and channel count | Sequence settings (a document fact, not a device one) |

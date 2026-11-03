@@ -78,8 +78,11 @@ try {
          dormant: document.querySelectorAll('.hk-row-dormant').length,
          groups: [...document.querySelectorAll('.hk-group-head')].map(el => el.textContent.trim()),
          wide: !!document.querySelector('.settings-page--built'),
-         // The registry's own count of built pages, which the toolbar shows.
-         built: settings.settingsPages.filter(one => one.ready).length,
+         // Which pages are built, by id. Not a count: a count pins this check
+         // to the number of pages finished at the time it was written, and it
+         // failed the moment Appearance landed for a reason that had nothing
+         // to do with hotkeys.
+         built: settings.settingsPages.filter(one => one.ready).map(one => one.id),
          loadedInEdit, loadedInSettings, known,
        };`,
     )
@@ -92,7 +95,10 @@ try {
     assert.equal(result.ready, true, 'the page is still marked as a plan')
     assert.equal(result.badge, false, 'a built page is still wearing the Planned badge')
     assert.equal(result.wide, true, 'the built page did not get the wider column')
-    assert.equal(result.built, 1, `${result.built} pages claim to be built`)
+    assert.ok(
+      result.built.includes('account.hotkeys'),
+      `the registry does not list this page as built — it lists ${result.built.join(', ')}`,
+    )
 
     /*
      * The finding this check exists for. With Settings open, far fewer

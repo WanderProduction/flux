@@ -47,6 +47,7 @@ import * as sequenceExport from './kernel/sequenceExport'
 import * as keymap from './kernel/keymap'
 import * as settings from './kernel/settings'
 import * as keybindings from './kernel/keybindings'
+import * as appearance from './kernel/appearance'
 import * as renderBridge from './kernel/renderBridge'
 
 // Panels register before the first render so the dock's component map is
@@ -137,6 +138,7 @@ if (import.meta.env.DEV) {
       keymap,
       settings,
       keybindings,
+      appearance,
       renderBridge,
       media: { audioSource },
       performance,
@@ -144,9 +146,27 @@ if (import.meta.env.DEV) {
   })
 }
 
-// No StrictMode: dockview owns imperative DOM and a double-invoked effect
-// rebuilds the layout twice on boot, which shows up as panels flickering.
-createRoot(container).render(<App />)
+/*
+ * The look is read before anything is drawn, and the render waits for it.
+ *
+ * A theme applied *after* the first paint is a visible flash of the other
+ * one, and on a near-black interface a flash of the default blue-grey is the
+ * most noticeable thing the app could do on launch. One store read, so the
+ * wait is a single IPC round trip.
+ *
+ * `finally` rather than `then`: a settings read that fails must still let the
+ * app start. The worst case is booting on the shipped look, which is exactly
+ * what a first launch does anyway.
+ *
+ * Not top-level `await`, which Vite's default build target does not support —
+ * it would build here and fail the packaged bundle.
+ *
+ * No StrictMode: dockview owns imperative DOM and a double-invoked effect
+ * rebuilds the layout twice on boot, which shows up as panels flickering.
+ */
+void appearance.loadAppearance().finally(() => {
+  createRoot(container).render(<App />)
+})
 
 /*
  * Started here rather than left to the module's own wiring.

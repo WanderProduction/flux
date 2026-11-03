@@ -24,6 +24,46 @@
   --flux-text-dim: #838a9c;
   --flux-text-faint: #5a6070;
 
+  /*
+   * Behind the picture, and behind a canvas.
+   *
+   * Darker than any panel because what sits on them is footage, and chrome
+   * brighter than the thing you are judging is chrome you end up judging
+   * against. These were literals — `#08090c` in the viewer stage and the
+   * thumbnail backing, `#0a0b0f` in the node map — which meant a darker
+   * theme left two large rectangles at the old brightness. Both values are
+   * exactly what they replaced.
+   *
+   * Not to be confused with the content blacks, which are still literal and
+   * must stay that way: the viewer frame, the letterbox bars and a sequence
+   * thumbnail are `#000` because a picture is judged against black, not
+   * against a theme.
+   */
+  --flux-bg-stage: #08090c;
+  --flux-bg-canvas: #0a0b0f;
+
+  /*
+   * Four names that were being *used* and never declared.
+   *
+   * `var(--flux-dim, #8b93a1)` and three like it, scattered through app.css,
+   * with the fallback doing all the work. A skin that redefined them would in
+   * fact have worked, which makes this the worst kind of hole in a token
+   * system: not broken, just undiscoverable. Declared with the values their
+   * fallbacks had, so nothing moves.
+   *
+   * `--flux-dim` and `--flux-line` overlap `--flux-text-dim` and
+   * `--flux-border` in meaning and not in value, and they are kept apart
+   * rather than merged: collapsing them would change the look, and this
+   * change is supposed to be invisible.
+   */
+  --flux-ok: #5fd08a;
+  --flux-danger: #d05f5f;
+  /* Filled rather than outlined. Was the second fallback on --flux-danger, so
+     collapsing the two would have lightened a destructive button. */
+  --flux-danger-strong: #b3403a;
+  --flux-dim: #8b93a1;
+  --flux-line: #2a3140;
+
   /* Signal — the accent identity: cyan for flow, violet for drivers */
   --flux-accent: #4cc2ff;
   --flux-accent-dim: #2b7fa8;
@@ -38,9 +78,19 @@
   /* Type */
   --flux-font: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --flux-font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
-  --flux-text-sm: 11px;
-  --flux-text-md: 12px;
-  --flux-text-lg: 13px;
+  /*
+   * Type, through one multiplier.
+   *
+   * `--flux-text-scale` is set inline on the root by kernel/appearance.ts and
+   * defaults to 1, so a build that never touches it is exactly as it was. The
+   * sizes are `calc` rather than three separate settings because "make the
+   * text bigger" is one intention, and three numbers that could disagree
+   * would be three ways to get it wrong.
+   */
+  --flux-text-scale: 1;
+  --flux-text-sm: calc(11px * var(--flux-text-scale));
+  --flux-text-md: calc(12px * var(--flux-text-scale));
+  --flux-text-lg: calc(13px * var(--flux-text-scale));
 
   /* Chrome metrics */
   --flux-topbar-h: 34px;
@@ -82,4 +132,109 @@
 
   --dv-floating-box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
   --dv-active-sash-color: var(--flux-accent);
+}
+
+/*
+ * ── Themes ─────────────────────────────────────────────────────
+ *
+ * A theme is this and nothing else: a block that redefines tokens, selected by
+ * `data-flux-theme` on the root. No classes on components, no second
+ * stylesheet, no JavaScript that walks the DOM. That is the whole point of the
+ * token system, and the switcher in kernel/appearance.ts had to use the same
+ * mechanism a hand-written skin will or there would be two ways to do it.
+ *
+ * All three are dark, which is a decision. An editor is dark because the
+ * picture is the brightest thing on screen and anything around it biases how
+ * you read it; a light theme for a tool whose job is judging images is not a
+ * preference, it is a worse instrument. So the axis is how dark and how
+ * neutral — the same axis Resolve and Premiere offer.
+ *
+ * `default` has no block. It is what `:root` already says, so the shipped
+ * look is the absence of an override rather than a copy of one that could
+ * drift from it.
+ */
+
+/* Near black, for a dim room. Text comes down with the surfaces: full-strength
+   white-grey on near-black is harsher than it is on the default panel. */
+[data-flux-theme='darker'] {
+  --flux-bg: #050609;
+  --flux-bg-panel: #0b0c10;
+  --flux-bg-elevated: #111319;
+  --flux-bg-hover: #171a22;
+  --flux-bg-active: #1f232c;
+  --flux-border: #191c24;
+  --flux-border-strong: #262b36;
+  --flux-text: #d4d7e0;
+  --flux-text-dim: #767d8e;
+  /* Lifted, not matched to the surfaces: the panel came down, so a faint that
+     came down with it measured 2.6:1 against the default theme's 2.9. */
+  --flux-text-faint: #5c6374;
+  --flux-bg-stage: #000000;
+  --flux-bg-canvas: #030406;
+  --flux-line: #1e2430;
+  --flux-dim: #7d8595;
+}
+
+/* Desaturated throughout: no channel differs from any other, so nothing in
+   the interface can tint what is being graded. The accent still can, which is
+   why this theme pairs with the grey accent — see kernel/appearance.ts. */
+[data-flux-theme='neutral'] {
+  --flux-bg: #121212;
+  --flux-bg-panel: #191919;
+  --flux-bg-elevated: #202020;
+  --flux-bg-hover: #282828;
+  --flux-bg-active: #313131;
+  --flux-border: #262626;
+  --flux-border-strong: #363636;
+  --flux-text: #dedede;
+  --flux-text-dim: #8a8a8a;
+  /* Same reasoning as the darker theme above. */
+  --flux-text-faint: #6b6b6b;
+  --flux-bg-stage: #0a0a0a;
+  --flux-bg-canvas: #0d0d0d;
+  --flux-line: #2b2b2b;
+  --flux-dim: #909090;
+}
+
+/*
+ * ── Accents ────────────────────────────────────────────────────
+ *
+ * Two tokens, because every accented thing in the app uses one or the other:
+ * the bright one for an outline or a playhead, the dim one for a filled
+ * button where the bright one would shout. `cyan` has no block for the same
+ * reason `default` has no theme block.
+ */
+[data-flux-accent='violet'] {
+  --flux-accent: #a06bff;
+  --flux-accent-dim: #6540a8;
+}
+[data-flux-accent='green'] {
+  --flux-accent: #46d39a;
+  --flux-accent-dim: #2a8663;
+}
+[data-flux-accent='amber'] {
+  --flux-accent: #ffb648;
+  --flux-accent-dim: #a6762c;
+}
+[data-flux-accent='grey'] {
+  --flux-accent: #9aa3b5;
+  --flux-accent-dim: #5c6472;
+}
+
+/*
+ * ── Density ────────────────────────────────────────────────────
+ *
+ * Spacing and chrome only, never type: "I cannot fit enough on screen" and "I
+ * cannot read this" are different complaints, and one control for both makes
+ * each of them worse to fix. The type is `--flux-text-scale` above.
+ */
+:root[data-flux-density='compact'] {
+  --flux-topbar-h: 29px;
+  --flux-statusbar-h: 19px;
+  --flux-app-gutter: 4px;
+}
+:root[data-flux-density='comfortable'] {
+  --flux-topbar-h: 40px;
+  --flux-statusbar-h: 26px;
+  --flux-app-gutter: 12px;
 }

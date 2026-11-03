@@ -3,6 +3,7 @@ import { useCallback, useMemo, useState } from 'react'
 import type { FunctionComponent } from 'react'
 
 import { PanelFrame } from './PanelFrame'
+import { AppearancePage } from './settings/AppearancePage'
 import { HotkeysPage } from './settings/HotkeysPage'
 import { commands } from '../kernel/commands'
 import {
@@ -160,6 +161,7 @@ export function SettingsPanel() {
 // believed always returned a component would make the `Built &&` below look
 // like a mistake rather than the point.
 const BUILT: Record<string, FunctionComponent | undefined> = {
+  'account.appearance': AppearancePage,
   'account.hotkeys': HotkeysPage,
 }
 

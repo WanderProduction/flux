@@ -153,7 +153,8 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Projects** | Create or open a project on launch. `Ctrl S` saves it to a `.flux` document. |
 | **Dockable panels** | Drag, split, tab, float, resize — Premiere/FL-style, via `dockview`. |
 | **Workspaces** | Saved panel layouts. `1` Edit, `2` Export, `3` Settings. |
-| **Settings** | `Ctrl ,` — three levels, nineteen pages. One is real so far; the rest say what they will be. |
+| **Settings** | `Ctrl ,` — three levels, nineteen pages. Two are real; the rest say what they will be. |
+| **Themes** | Three dark ones, five accents, density and text size — all of it token overrides. |
 | **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets. |
 | **Layout persistence** | `Ctrl Alt S` saves the current workspace's layout, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
@@ -1547,9 +1548,10 @@ A *project* setting is a fourth thing and it already has a home: sequence settin
 else's computer has to live. If a setting ever wants to be in the document, it is not a
 settings page, it is a document field.
 
-#### One page of nineteen is real, and the rest say so
+#### Two pages of nineteen are real, and the rest say so
 
-**Hotkeys & Presets** is built — see below. The other eighteen are reachable and each states
+**Hotkeys & Presets** and **Appearance** are built — see below. The other seventeen are
+reachable and each states
 what it will hold, specifically enough to disagree with, which is the point: the ordering of
 this work is worth arguing about before any of it exists.
 [`docs/SETTINGS.md`](docs/SETTINGS.md) is the same content with the dependencies and the build
@@ -1653,6 +1655,67 @@ real key event and counting the command's real side effect, a conflict is proved
 *not* having changed hands until it is answered, and persistence is proved by reading the store
 back the way a cold boot does — including that a binding you deliberately cleared stays cleared,
 which it would not if the stored map were merged over the defaults.
+
+#### Appearance: three dark themes, and the audit they forced
+
+Theme, accent, density and text size, and every one of them is a set of values for the tokens in
+`styles/theme.css`. A theme is `data-flux-theme` on an element plus a block of overrides —
+no classes on components, no second stylesheet, no JavaScript walking the DOM. That is what the
+token system was for, so the switcher had to use the same mechanism a hand-written skin will or
+there would have been two ways to do it.
+
+The blocks are deliberately not rooted to `:root`, which buys something small and nice: each
+theme's swatch on the page carries its own `data-flux-theme`, so it is painted by the very
+block it selects. A picker whose swatches are hardcoded approximations stops matching the
+palette the first time somebody edits it.
+
+**No light theme, and that is a decision rather than a gap.** An editor is dark because the
+picture is the brightest thing on screen and anything around it biases how you read it; a light
+theme for a tool whose job is judging images is not a preference, it is a worse instrument. So
+the axis is how dark and how neutral. **Neutral** is the one with a real argument behind it — a
+tinted interface shifts your perception of a grade and a desaturated one does not, which is why
+it pairs with the grey accent and why no channel in it differs from any other.
+
+**Density and text size are two controls on purpose.** "I cannot fit enough on screen" and "I
+cannot read this" are different complaints, and one slider for both makes each harder to fix.
+Density moves chrome heights and the gutter; the scale moves only type.
+
+#### The claim at the top of theme.css was not true
+
+That file opens by saying a component which hardcodes a colour has punched a hole in the
+skinning system. Measured on the way into this page: **54 colour literals and 67 hardcoded font
+sizes** in `app.css`. So a theme switcher built on it would have half worked, in a way nobody
+could have predicted by reading the file.
+
+Two kinds of hole mattered. **Four token names used and never declared** — `--flux-ok`,
+`--flux-danger`, `--flux-dim`, `--flux-line` — appearing only as `var(--flux-dim, #8b93a1)`
+with the fallback doing all the work. A skin redefining them would in fact have worked, which
+makes it the worst kind of hole: not broken, just undiscoverable. One of them was hiding a
+second value, too — `--flux-danger` had a lighter fallback on borders and a darker one on a
+filled destructive hover, so collapsing them would have lightened a button. And **two near-black
+chrome surfaces**, the viewer stage and the node-map backdrop, which a darker theme would have
+left at the old brightness as two large rectangles.
+
+**The type was worse.** 67 hardcoded px against 106 using the tokens, so a text scale would have
+resized 61% of the interface and left the rest — which reads as a bug rather than a setting.
+All 67 are `calc(Npx * var(--flux-text-scale))` now, identical at 100%.
+
+What stays hardcoded is named and budgeted. **Content black** — the viewer frame, the letterbox
+bars, a sequence thumbnail — because a picture is judged against black and not against the
+chrome; theming those would make the app lie about the footage. **Shadows**, black at low alpha,
+which read correctly over any surface. And fourteen cosmetic details. Those live in an allowlist
+with a budget *per reason* rather than one total, so removing a shadow does not quietly buy
+somebody the right to hardcode a surface.
+
+```bash
+npm run verify:appearance
+```
+
+Seven checks. None of them asks whether a choice was *stored* — each reads `getComputedStyle`
+on a real element and asserts the colour or size it actually resolved to, because a theme that
+set an attribute nothing responded to would pass any test written against the store. The audit
+is one of the seven: new literals fail the run, as does any `var(--flux-…, literal)`, since a
+fallback is how four tokens hid for months.
 
 ### Batch: a folder in, a folder out
 

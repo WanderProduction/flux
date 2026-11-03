@@ -23,7 +23,7 @@ body {
 
 kbd {
   font-family: var(--flux-font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   padding: 1px 5px;
   border: 1px solid var(--flux-border-strong);
   border-bottom-width: 2px;
@@ -129,7 +129,7 @@ kbd {
   background: none;
   color: var(--flux-text-faint);
   font-family: var(--flux-font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   cursor: pointer;
 }
 .work-ring-button:hover,
@@ -216,7 +216,7 @@ kbd {
   border: none;
   background: none;
   color: var(--flux-text-faint);
-  font-size: 15px;
+  font-size: calc(15px * var(--flux-text-scale));
   line-height: 1;
   cursor: pointer;
 }
@@ -236,7 +236,7 @@ kbd {
 .work-peek-divider {
   margin: 0;
   padding: 6px 11px 3px;
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--flux-text-faint);
@@ -384,7 +384,7 @@ kbd {
   color: var(--flux-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
 }
 .tool-value {
   color: var(--flux-text-dim);
@@ -418,7 +418,7 @@ kbd {
   position: absolute;
   inset: 0 0 62px 0;
   overflow: hidden;
-  background: #08090c;
+  background: var(--flux-bg-stage);
 }
 
 /* Positioned rather than laid out, because its size is a zoom level and its
@@ -538,7 +538,7 @@ kbd {
   background: var(--flux-bg-elevated);
   color: var(--flux-text);
   font-family: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1;
   cursor: pointer;
 }
@@ -660,7 +660,7 @@ kbd {
 .seq-tab-add {
   padding: 0 4px;
   font-family: var(--flux-font-mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--flux-text-scale));
   line-height: 1;
   color: var(--flux-text-dim);
   background: transparent;
@@ -674,7 +674,7 @@ kbd {
 .seq-tab-add {
   align-self: center;
   padding: 2px 8px;
-  font-size: 13px;
+  font-size: calc(13px * var(--flux-text-scale));
 }
 
 /* Settings sit over the panel rather than in a window: what they describe is
@@ -801,7 +801,7 @@ kbd {
   display: grid;
   place-items: center;
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   line-height: 1;
   color: var(--flux-text-dim);
   background: var(--flux-bg-elevated);
@@ -826,7 +826,7 @@ kbd {
    track is the one that has been turned off. */
 .track-toggle--eye {
   color: var(--flux-accent);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
 }
 .track-toggle--eye.track-toggle--off {
   color: var(--flux-text-dim);
@@ -837,7 +837,7 @@ kbd {
   min-width: 32px;
   text-align: right;
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   color: var(--flux-text-dim);
   cursor: ew-resize;
   user-select: none;
@@ -935,7 +935,7 @@ kbd {
    distinguishable at a glance from `baked` beneath it, which every clip in a
    scanned project has and which is why this bar used to be one flat colour. */
 .tl-ready-live {
-  background: var(--flux-ok, #5fd08a);
+  background: var(--flux-ok);
 }
 /* Saved to disk — ready now and still ready after a reopen. */
 .tl-ready-baked {
@@ -949,7 +949,7 @@ kbd {
   background: var(--flux-warn);
 }
 .tl-ready-broken {
-  background: var(--flux-danger, #d05f5f);
+  background: var(--flux-danger);
 }
 /* Nothing has looked at it yet. The quietest of the five, but it has
    to read as a *state*: at 45% of a faint grey on a dark panel this
@@ -1065,7 +1065,7 @@ kbd {
   border-left: 1px solid var(--flux-border);
   padding-left: 4px;
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   color: var(--flux-text-faint);
   line-height: 22px;
   white-space: nowrap;
@@ -1146,7 +1146,7 @@ kbd {
 .clip-link {
   flex: none;
   margin-left: 4px;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   line-height: 1;
   opacity: 0.55;
   pointer-events: none;
@@ -1403,7 +1403,7 @@ kbd {
 }
 
 .tool-glyph {
-  font-size: 13px;
+  font-size: calc(13px * var(--flux-text-scale));
   text-align: center;
   opacity: 0.9;
 }
@@ -1414,7 +1414,7 @@ kbd {
 }
 .tool-key {
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   opacity: 0.6;
 }
 
@@ -1446,7 +1446,7 @@ kbd {
   background: color-mix(in srgb, var(--flux-warn) 30%, rgba(0, 0, 0, 0.5));
   color: #ffe6bd;
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
 }
 
 /* ── Node Map ──────────────────────────────────────────────── */
@@ -1454,7 +1454,7 @@ kbd {
 .nodemap {
   position: absolute;
   inset: 0;
-  background: #0a0b0f;
+  background: var(--flux-bg-canvas);
 }
 .nodemap-canvas {
   width: 100%;
@@ -1483,7 +1483,7 @@ kbd {
 .node-label {
   fill: var(--flux-text-dim);
   font-family: var(--flux-font);
-  font-size: 11px;
+  font-size: calc(11px * var(--flux-text-scale));
 }
 .node-flag--element {
   fill: var(--flux-accent);
@@ -1567,7 +1567,7 @@ kbd {
 .cb-rail-title {
   margin: 0;
   padding: 0 10px 4px;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.09em;
@@ -1587,7 +1587,7 @@ kbd {
   background: var(--flux-bg-panel);
   color: var(--flux-text-dim);
   font-family: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1732,7 +1732,7 @@ kbd {
 .tree-note {
   margin-left: auto;
   padding-left: 6px;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   color: var(--flux-text-faint);
   font-family: var(--flux-font-mono);
 }
@@ -1779,7 +1779,7 @@ kbd {
   border-radius: var(--flux-radius);
   background: var(--flux-bg-panel);
   color: var(--flux-text-dim);
-  font-size: 12px;
+  font-size: calc(12px * var(--flux-text-scale));
   cursor: pointer;
 }
 .cb-icon-button:hover:not(:disabled) {
@@ -1854,7 +1854,7 @@ kbd {
   left: 5px;
   padding: 1px 5px;
   border-radius: 2px;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   letter-spacing: 0.05em;
   text-transform: uppercase;
   background: color-mix(in srgb, var(--flux-audio) 28%, rgba(0, 0, 0, 0.65));
@@ -2034,7 +2034,7 @@ kbd {
   width: 100%;
   aspect-ratio: 4 / 3;
   object-fit: cover;
-  background: #08090c;
+  background: var(--flux-bg-stage);
 }
 .thumb--loading,
 .thumb--failed,
@@ -2042,7 +2042,7 @@ kbd {
 .thumb--folder {
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   color: var(--flux-text-faint);
 }
 .thumb--loading {
@@ -2087,7 +2087,7 @@ kbd {
 }
 .card-sub {
   color: var(--flux-text-faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   font-family: var(--flux-font-mono);
 }
 
@@ -2097,7 +2097,7 @@ kbd {
   left: 5px;
   padding: 1px 5px;
   border-radius: 2px;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.06em;
   backdrop-filter: blur(4px);
@@ -2123,7 +2123,7 @@ kbd {
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.55);
   color: var(--flux-text-dim);
-  font-size: 14px;
+  font-size: calc(14px * var(--flux-text-scale));
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -2160,7 +2160,7 @@ kbd {
   color: var(--flux-driver);
 }
 .param-state {
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.07em;
   padding: 1px 5px;
@@ -2223,7 +2223,7 @@ kbd {
   border: 1px solid var(--flux-border-strong);
 }
 .strip-name {
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   color: var(--flux-text-dim);
   text-align: center;
   white-space: nowrap;
@@ -2296,7 +2296,7 @@ kbd {
 }
 .palette-cat {
   flex: 0 0 auto;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--flux-text-faint);
@@ -2368,7 +2368,7 @@ kbd {
   border-bottom: 1px solid var(--flux-border);
 }
 .launcher-brand {
-  font-size: 24px;
+  font-size: calc(24px * var(--flux-text-scale));
 }
 .launcher-tagline {
   margin: 6px 0 0;
@@ -2566,7 +2566,7 @@ kbd {
 }
 .recent-path {
   color: var(--flux-text-faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   font-family: var(--flux-font-mono);
   white-space: nowrap;
   overflow: hidden;
@@ -2574,7 +2574,7 @@ kbd {
 }
 .recent-tag {
   color: var(--flux-warn);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.07em;
 }
@@ -2584,7 +2584,7 @@ kbd {
   border: 0;
   background: none;
   color: var(--flux-text-faint);
-  font-size: 14px;
+  font-size: calc(14px * var(--flux-text-scale));
   cursor: pointer;
   opacity: 0;
 }
@@ -2689,7 +2689,7 @@ kbd {
 }
 .project-dot {
   margin-left: 6px;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   line-height: 1;
   color: var(--flux-warn);
 }
@@ -2721,13 +2721,13 @@ kbd {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 .import-error {
-  border-color: var(--flux-danger, #d05f5f);
+  border-color: var(--flux-danger);
   color: #ffd7d7;
   cursor: pointer;
 }
 .import-error-dismiss {
   color: var(--flux-text-faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -2779,7 +2779,9 @@ kbd {
   padding-top: 7px;
 }
 .ctx-item--danger:hover:not(:disabled) {
-  background: var(--flux-danger, #b3403a);
+  /* The filled one, which wants a deeper red than the border and text use —
+     its own token rather than a second value for --flux-danger. */
+  background: var(--flux-danger-strong);
   color: #fff;
 }
 .ctx-label {
@@ -2787,7 +2789,7 @@ kbd {
 }
 .ctx-hint {
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   color: var(--flux-text-dim);
 }
 .ctx-item:hover:not(:disabled) .ctx-hint {
@@ -2811,7 +2813,7 @@ kbd {
 }
 .seq-thumb-time {
   font-family: var(--flux-font-mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--flux-text-scale));
   color: var(--flux-text-dim);
   letter-spacing: 0.04em;
 }
@@ -2850,17 +2852,17 @@ kbd {
 .seq-settings-sub {
   margin-left: 8px;
   font-family: var(--flux-font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   color: var(--flux-text-dim);
 }
 .seq-note {
   font-family: var(--flux-font-mono);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   color: var(--flux-text-dim);
 }
 .seq-warn {
   margin: 2px 0 6px;
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1.45;
   color: var(--flux-warn);
 }
@@ -2908,7 +2910,7 @@ kbd {
   background: var(--flux-bg-active);
   color: var(--flux-text-dim);
   font-family: var(--flux-font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
 }
 .batch-button {
   align-self: flex-start;
@@ -2971,7 +2973,7 @@ kbd {
   gap: 1px;
 }
 .batch-facts dt {
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--flux-text-faint);
@@ -3080,7 +3082,7 @@ kbd {
   max-height: 180px;
   overflow-y: auto;
   font-family: var(--flux-font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -3130,7 +3132,7 @@ kbd {
   gap: 3px;
 }
 .render-label {
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--flux-text-faint);
@@ -3150,7 +3152,7 @@ kbd {
   opacity: 0.5;
 }
 .render-hint {
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1.45;
   color: var(--flux-text-dim);
 }
@@ -3188,7 +3190,7 @@ kbd {
   background: none;
   padding: 0;
   color: var(--flux-text-faint);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   text-transform: none;
   letter-spacing: 0;
   text-decoration: underline;
@@ -3233,7 +3235,7 @@ kbd {
   background: none;
   padding: 0;
   color: var(--flux-text);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -3245,7 +3247,7 @@ kbd {
 }
 .xs-chevron {
   color: var(--flux-text-faint);
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   width: 9px;
 }
 /* Off and not-yet both read as "this is not part of the render", so they
@@ -3255,7 +3257,7 @@ kbd {
   color: var(--flux-text-dim);
 }
 .xs-pending {
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   color: var(--flux-text-faint);
   font-style: italic;
 }
@@ -3265,7 +3267,7 @@ kbd {
 .xs-hint {
   margin: 0 0 8px;
   padding-left: 15px;
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1.45;
   color: var(--flux-text-dim);
 }
@@ -3366,7 +3368,7 @@ kbd {
 }
 .export-card-meta,
 .export-card-status {
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   color: var(--flux-text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3456,12 +3458,12 @@ kbd {
 }
 .render-meta {
   color: var(--flux-text-faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   white-space: nowrap;
 }
 .render-status {
   color: var(--flux-text-dim);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   white-space: nowrap;
   max-width: 220px;
   overflow: hidden;
@@ -3478,7 +3480,7 @@ kbd {
   background: none;
   color: var(--flux-text-faint);
   cursor: pointer;
-  font-size: 14px;
+  font-size: calc(14px * var(--flux-text-scale));
   line-height: 1;
   padding: 0;
 }
@@ -3683,7 +3685,7 @@ kbd {
   border: none;
   background: none;
   color: var(--flux-text-faint);
-  font-size: 15px;
+  font-size: calc(15px * var(--flux-text-scale));
   line-height: 1;
   cursor: pointer;
 }
@@ -3705,7 +3707,7 @@ kbd {
 }
 
 .perf-unit {
-  color: var(--flux-dim, #8b93a1);
+  color: var(--flux-dim);
   font-size: 0.85em;
 }
 
@@ -3715,13 +3717,13 @@ kbd {
 }
 
 .perf-following {
-  color: var(--flux-dim, #8b93a1);
+  color: var(--flux-dim);
 }
 
 /* Spans the whole row, under the control it explains. */
 .perf-detail {
   grid-column: 1 / -1;
-  color: var(--flux-dim, #8b93a1);
+  color: var(--flux-dim);
   font-size: 0.85em;
   line-height: 1.35;
   padding-bottom: 0.35rem;
@@ -3729,7 +3731,7 @@ kbd {
 
 .perf-prose {
   margin: 0 0 0.6rem;
-  color: var(--flux-dim, #8b93a1);
+  color: var(--flux-dim);
   font-size: 0.85em;
   line-height: 1.45;
   max-width: 52ch;
@@ -3738,12 +3740,12 @@ kbd {
 .cb-btn--quiet {
   background: transparent;
   border-color: transparent;
-  color: var(--flux-dim, #8b93a1);
+  color: var(--flux-dim);
   padding: 0 0.3rem;
 }
 
 .cb-btn--quiet:hover {
-  border-color: var(--flux-line, #2a3140);
+  border-color: var(--flux-line);
   color: inherit;
 }
 
@@ -3851,14 +3853,14 @@ kbd {
   color: var(--flux-text-dim);
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   font-weight: 700;
 }
 .settings-level-blurb {
   display: block;
   margin-top: 2px;
   color: var(--flux-text-faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1.4;
 }
 
@@ -3893,7 +3895,7 @@ kbd {
   display: block;
   margin-top: 1px;
   color: var(--flux-text-faint);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
   line-height: 1.35;
 }
 /* A planned page is dimmer in the list and says so on the page itself. Dimmer
@@ -3930,7 +3932,7 @@ kbd {
   color: var(--flux-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   font-weight: 700;
 }
 
@@ -3944,7 +3946,7 @@ kbd {
 
 .settings-page-title {
   margin: 6px 0 0;
-  font-size: 19px;
+  font-size: calc(19px * var(--flux-text-scale));
   font-weight: 600;
   color: var(--flux-text);
 }
@@ -3970,7 +3972,7 @@ kbd {
   color: var(--flux-audio);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   font-weight: 700;
 }
 .settings-lives-what {
@@ -4012,7 +4014,7 @@ kbd {
   color: var(--flux-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   font-weight: 700;
 }
 .settings-plan-body {
@@ -4161,7 +4163,7 @@ kbd {
   color: var(--flux-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 9px;
+  font-size: calc(9px * var(--flux-text-scale));
   font-weight: 700;
 }
 
@@ -4191,7 +4193,7 @@ kbd {
   display: block;
   color: var(--flux-text-faint);
   font-family: var(--flux-font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--flux-text-scale));
 }
 
 .hk-row-keys {
@@ -4212,7 +4214,7 @@ kbd {
   background: none;
   color: var(--flux-text-faint);
   font-family: inherit;
-  font-size: 13px;
+  font-size: calc(13px * var(--flux-text-scale));
   line-height: 1;
   cursor: pointer;
 }
@@ -4288,6 +4290,153 @@ kbd {
   color: var(--flux-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  font-size: 8px;
+  font-size: calc(8px * var(--flux-text-scale));
   vertical-align: 1px;
+}
+
+/* ── Settings: Appearance ──────────────────────────────────── */
+
+.ap-row + .ap-row {
+  margin-top: 20px;
+}
+.ap-row:first-child {
+  margin-top: 18px;
+}
+.ap-note {
+  margin: 4px 0 9px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+.ap-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.ap-card {
+  display: block;
+  width: 168px;
+  padding: 9px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-panel);
+  color: inherit;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ap-card:hover {
+  border-color: var(--flux-accent-dim);
+}
+.ap-card--on {
+  border-color: var(--flux-accent);
+  background: var(--flux-bg-elevated);
+}
+.ap-card-name {
+  display: block;
+  margin-top: 7px;
+  color: var(--flux-text);
+  font-size: var(--flux-text-md);
+}
+.ap-card-blurb {
+  display: block;
+  margin-top: 2px;
+  color: var(--flux-text-faint);
+  font-size: calc(10px * var(--flux-text-scale));
+  line-height: 1.4;
+}
+
+/* Three bands drawn from the theme's own tokens. The swatch carries the
+   `data-flux-theme` attribute itself, so it is painted by the very block it
+   selects and cannot drift from the theme it claims to show. */
+.ap-swatch {
+  display: flex;
+  height: 34px;
+  border: 1px solid var(--flux-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ap-swatch-bg {
+  flex: 2;
+  background: var(--flux-bg);
+}
+.ap-swatch-panel {
+  flex: 3;
+  background: var(--flux-bg-panel);
+}
+.ap-swatch-accent {
+  flex: 1;
+  background: var(--flux-accent);
+}
+
+.ap-accents {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ap-accent {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.ap-accent:hover {
+  border-color: var(--flux-border-strong);
+}
+/* The ring is the token rather than the swatch's own colour, so the selected
+   state reads the same on every accent including the grey one. */
+.ap-accent--on {
+  border-color: var(--flux-text);
+}
+.ap-accent-name {
+  margin-left: 4px;
+  color: var(--flux-text-dim);
+  font-size: var(--flux-text-sm);
+}
+
+.ap-choices {
+  display: flex;
+  gap: 0;
+}
+.ap-choice {
+  padding: 4px 12px;
+  border: 1px solid var(--flux-border-strong);
+  background: var(--flux-bg-panel);
+  color: var(--flux-text-dim);
+  font-family: inherit;
+  font-size: var(--flux-text-sm);
+  cursor: pointer;
+}
+.ap-choice + .ap-choice {
+  border-left: 0;
+}
+.ap-choice:first-child {
+  border-radius: var(--flux-radius) 0 0 var(--flux-radius);
+}
+.ap-choice:last-child {
+  border-radius: 0 var(--flux-radius) var(--flux-radius) 0;
+}
+.ap-choice:hover {
+  background: var(--flux-bg-hover);
+  color: var(--flux-text);
+}
+.ap-choice--on {
+  background: var(--flux-bg-active);
+  border-color: var(--flux-accent);
+  color: var(--flux-text);
+}
+/* The selected segment draws its own left border back, or the neighbour's
+   removed one leaves it open on that side. */
+.ap-choice--on + .ap-choice {
+  border-left: 1px solid var(--flux-border-strong);
+}
+
+.ap-foot {
+  margin-top: 22px;
+  padding-top: 12px;
+  border-top: 1px solid var(--flux-border);
 }
