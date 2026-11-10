@@ -2612,7 +2612,44 @@ buffers with none late.
 ruler scrubs.
 
 **There is exactly one clock**, in [`src/kernel/playback.ts`](src/kernel/playback.ts). Panels read
-it and render; only commands move it. The moment two panels each keep their own time they disagree,
+it and render; only commands move it.
+
+#### The playhead is drawn at a time that is not the time
+
+The one place the single clock is deliberately not used directly.
+
+The mixer is the clock, and the mixer advances in blocks: 512 samples at 48kHz is 10.67ms,
+against an animation frame of 13.35ms. They do not divide, so between two frames the clock has
+moved one block or two and never one frame's worth — and the playhead, painted straight from it,
+stepped **0.64px, 0.64px, 1.28px, 0, 1.28px**. Measured over six seconds: five frames where the
+line did not move at all, twenty-two where it jumped, a coefficient of variation of **0.391**
+against the display's own **0.008**.
+
+Not one of those frames was late. The clock was right every time it was read. It was right in
+steps that do not line up with the steps the screen is drawn in, and a person reads that as a
+stutter in an app that is keeping perfect time.
+
+So `getDrawTime()` predicts forward from the last drawn position by wall time and takes a tenth
+of the distance to where the clock says — a one-pole filter that converges without ever being
+asked to jump. Two rules keep it honest: it **never moves against the direction of play**,
+because a playhead that slips back a pixel is worse than one that waits; and a gap wider than a
+quarter second is **taken whole**, because that is a seek or a loop, not jitter, and easing it
+would draw the line sliding through material nobody played.
+
+**It is for drawing and nothing else.** The Viewer picks its frame from `getTime()`, the
+readiness strip reads `getTime()`, a cut at the playhead uses `getTime()`. A decision made from
+the smoothed value would land a frame away from where the user saw the line, which is a far worse
+bug than the one this fixes.
+
+```bash
+npm run probe:playhead
+```
+
+A measurement, not a suite — run it either side of a change. It samples the transport's time and
+the pixel the Timeline actually drew, per animation frame, and reports the spread of both against
+the wall clock's own. After: cv **0.07**, zero frozen frames, zero jumps. The idea is
+[FilmCraft's](docs/PRIOR-ART-FILMCRAFT.md); the numbers are this machine's.
+ The moment two panels each keep their own time they disagree,
 and "the picture is a few frames off the timeline" is the kind of bug that makes an editor stop
 trusting the tool.
 

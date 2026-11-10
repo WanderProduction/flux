@@ -64,6 +64,14 @@ export type ClockName = (typeof CLOCK_ORDER)[number]
 
 let playing = false
 let time = 0
+/**
+ * Where the playhead is *drawn*, which is not where it is.
+ *
+ * See `drawTime`. Null whenever there is nothing to smooth — paused, or the
+ * first tick after a seek — and the true time is used instead.
+ */
+let drawn: number | null = null
+let drawnAt = 0
 let frame: number | null = null
 let lastTick = 0
 const sources = new Map<ClockName, ClockSource>()
@@ -104,6 +112,80 @@ function emit() {
 export function subscribePlayback(listener: () => void): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
+}
+
+/**
+ * How much of the error is taken each frame, and how far out of line the drawn
+ * playhead may be before it gives up and snaps.
+ *
+ * A tenth is filmcraft's figure and it is a good one: fast enough that the
+ * drawn playhead is never visibly behind, slow enough that a single late block
+ * does not produce a lurch. A quarter of a second is far beyond any clock
+ * jitter and well inside the shortest deliberate jump, so it separates "the
+ * audio device stuttered" from "something moved the playhead".
+ */
+const DRAW_CORRECTION = 0.1
+const DRAW_SNAP_S = 0.25
+
+/**
+ * The playhead to draw, which is deliberately not the playhead that is.
+ *
+ * ## Why the clock cannot be drawn directly
+ *
+ * The mixer is the clock, and the mixer advances in blocks: measured on this
+ * machine, 512 samples at 48kHz is 10.67ms, against an animation frame of
+ * 13.35ms. So between two frames the clock has moved either one block or two
+ * and never one frame's worth — the playhead steps 0.64px, 0.64px, 1.28px, 0,
+ * 1.28px. Over six seconds that was five frames where it did not move at all
+ * and twenty-two where it jumped: a coefficient of variation of **0.391**
+ * against the display's own 0.008.
+ *
+ * None of that is a timing error. The clock is right every time it is read;
+ * it is right in steps that do not line up with the steps the screen is drawn
+ * in, and a person reads that as a stutter in an app that is keeping perfect
+ * time. `scripts/probe-playhead.mjs` is the measurement.
+ *
+ * ## What this does instead
+ *
+ * Predict forward from the last drawn position by the wall time since, then
+ * take a tenth of the distance to where the clock actually says. A one-pole
+ * filter: it converges on the truth without ever being asked to jump to it.
+ *
+ * Two rules keep it honest. It **never moves against the direction of play**,
+ * because a playhead that slips backwards by a pixel is worse than one that
+ * waits — that is the artefact the clamp exists to prevent, and it is the one
+ * thing a naive low-pass filter will do on a late block. And a gap wider than
+ * `DRAW_SNAP_S` is **taken whole**, because that is not jitter, it is a seek,
+ * a loop or a shuttle rung, and smoothing those would draw the playhead
+ * sliding through material it never played.
+ *
+ * ## It is for drawing, and for nothing else
+ *
+ * Nothing may decide anything from this value. The Viewer picks its frame from
+ * `getTime`, the readiness strip reads `getTime`, a command that cuts at the
+ * playhead uses `getTime`. If a decision were ever made from the smoothed one
+ * the app would cut a frame away from where the user saw the line, which is a
+ * far worse bug than the stutter this fixes.
+ */
+function drawTime(clock: number, now: number): number {
+  if (!playing || drawn === null) return clock
+
+  const predicted = drawn + ((now - drawnAt) / 1000) * rate
+  const error = clock - predicted
+  if (!Number.isFinite(predicted) || Math.abs(error) > DRAW_SNAP_S) return clock
+
+  const next = predicted + error * DRAW_CORRECTION
+  return rate >= 0 ? Math.max(next, drawn) : Math.min(next, drawn)
+}
+
+/**
+ * The time to draw the playhead at.
+ *
+ * Every caller that paints a playhead should use this; every caller that
+ * *decides* something should use `getTime`. See `drawTime`.
+ */
+export function getDrawTime(): number {
+  return drawn ?? time
 }
 
 export function getTime(): number {
@@ -172,6 +254,8 @@ export function shuttle(direction: 1 | -1): number {
  * picture claimed otherwise.
  */
 export function setRate(next: number): void {
+  // A new rung predicts forward at the old speed for one frame otherwise.
+  drawn = null
   const wanted = Math.max(-16, Math.min(16, next))
   if (wanted === rate) return
   rate = wanted
@@ -262,6 +346,8 @@ function tick(now: number) {
   }
 
   time = next
+  drawn = drawTime(next, now)
+  drawnAt = now
   emit()
   frame = requestAnimationFrame(tick)
 }
@@ -292,6 +378,10 @@ export function play(): void {
   if (rate > 0 && time >= end) time = 0
   if (rate < 0 && time <= 0) time = end
   playing = true
+  // Nothing to smooth from: the first tick draws the true time and the filter
+  // starts from there. Carrying a position over from the last play would make
+  // the playhead crawl out of wherever it stopped.
+  drawn = null
   lastTick = performance.now()
   lastFrame = performance.now()
   frame = requestAnimationFrame(tick)
@@ -302,6 +392,10 @@ export function play(): void {
 export function pause(): void {
   if (!playing) return
   playing = false
+  // A paused playhead is drawn where it actually is. Leaving the smoothed
+  // value behind would park the line a few pixels off the frame on screen,
+  // and a cut made there would look like it landed in the wrong place.
+  drawn = null
   // A stopped transport is a 1x transport: the ladder starts from the bottom
   // next time, which is what a hand that has just stopped expects.
   rate = 1
@@ -320,6 +414,10 @@ export function seek(seconds: number): void {
   const clamped = Math.min(Math.max(0, seconds), Math.max(0, end))
   if (clamped === time) return
   time = clamped
+  // A seek is not jitter. `drawTime` would snap anyway once the error passed a
+  // quarter second, but a short drag is inside that window and would be drawn
+  // as a slide through material nobody played.
+  drawn = null
   seekToken += 1
   // Reset the tick baseline, or the next frame would charge the playhead for
   // however long the drag took.

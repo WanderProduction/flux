@@ -24,6 +24,7 @@ import {
   formatTimecode,
   getRate,
   shuttle,
+  getDrawTime,
   getTime,
   isPlaying,
   pause,
@@ -681,7 +682,14 @@ export function TimelinePanel() {
    * two of them cost nothing on a tick that only moved the clock.
    */
   const placePlayhead = useCallback(() => {
-    const time = getTime()
+    /*
+     * The *drawn* time, not the real one — see `drawTime` in kernel/playback.
+     * The mixer clocks in 512-sample blocks that do not line up with animation
+     * frames, so painting this line straight from the clock made it step
+     * 0.64px, 0.64px, 1.28px, 0. Everything else in this panel still reads
+     * `getTime`, because everything else is a decision.
+     */
+    const time = getDrawTime()
     const left = `${time * zoomForPlayhead.current}px`
     if (playheadRef.current) playheadRef.current.style.left = left
     if (gripRef.current) gripRef.current.style.left = left

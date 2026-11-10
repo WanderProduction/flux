@@ -36,6 +36,7 @@
     "verify:appearance": "node scripts/verify-appearance.mjs",
     "verify:launch": "node scripts/verify-launch.mjs",
     "verify:playback": "node scripts/verify-playback.mjs",
+    "probe:playhead": "node scripts/probe-playhead.mjs",
     "verify:demux": "node scripts/verify-demux.mjs",
     "verify:edit-import": "node scripts/verify-edit-import.mjs",
     "verify:control": "node scripts/verify-control.mjs",

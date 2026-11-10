@@ -76,11 +76,48 @@ function clean(raw, root) {
   }
 }
 
+/**
+ * One queue per workspace, so two writes to the same manifest run in order.
+ *
+ * Every writer here is a read-modify-write of one JSON file, and a project
+ * files itself whenever one opens — so two of them overlap the moment anything
+ * opens projects back to back, which `verify:timeline` does. Two things went
+ * wrong and the second is the one that loses work: both renames raced for the
+ * same temp name and the loser threw ENOENT, and underneath that both had read
+ * the same manifest, so whichever wrote second saved a list the first project
+ * had never been in.
+ *
+ * Same shape, and the same reason, as the per-key chain in kernel/store.ts.
+ */
+const queues = new Map()
+
+/** Runs `job` after whatever is already queued for `root`. */
+function inOrder(root, job) {
+  const key = path.resolve(root).toLowerCase()
+  const next = (queues.get(key) ?? Promise.resolve()).then(job, job)
+  // Dropped once nothing is waiting, so the map does not keep an entry for
+  // every workspace ever touched.
+  const forget = () => {
+    if (queues.get(key) === next) queues.delete(key)
+  }
+  queues.set(key, next.then(forget, forget))
+  return next
+}
+
+/** A temp name no concurrent write can be using: this process, and a counter. */
+let writeCounter = 0
+
 async function write(root, record) {
   const target = manifestPath(root)
-  const temp = `${target}.tmp-${process.pid}`
-  await fs.writeFile(temp, JSON.stringify(record, null, 2), 'utf8')
-  await fs.rename(temp, target)
+  writeCounter += 1
+  const temp = `${target}.tmp-${process.pid}-${writeCounter}`
+  try {
+    await fs.writeFile(temp, JSON.stringify(record, null, 2), 'utf8')
+    await fs.rename(temp, target)
+  } catch (err) {
+    await fs.rm(temp, { force: true }).catch(() => {})
+    throw err
+  }
 }
 
 /**
@@ -143,25 +180,27 @@ export async function readWorkspace(root) {
 }
 
 /** Title, description, picture. Never the id, and never the project list. */
-export async function updateWorkspace(root, patch = {}) {
-  let raw
-  try {
-    raw = JSON.parse(await fs.readFile(manifestPath(root), 'utf8'))
-  } catch {
-    return { ok: false, reason: 'not-a-workspace' }
-  }
+export function updateWorkspace(root, patch = {}) {
+  return inOrder(root, async () => {
+    let raw
+    try {
+      raw = JSON.parse(await fs.readFile(manifestPath(root), 'utf8'))
+    } catch {
+      return { ok: false, reason: 'not-a-workspace' }
+    }
 
-  if (patch.title !== undefined) {
-    const next = String(patch.title).trim()
-    if (!next) return { ok: false, reason: 'no-title' }
-    raw.title = next
-  }
-  if (patch.description !== undefined) raw.description = String(patch.description).trim()
-  if (patch.avatar !== undefined) raw.avatar = patch.avatar || null
-  if (patch.banner !== undefined) raw.banner = patch.banner || null
+    if (patch.title !== undefined) {
+      const next = String(patch.title).trim()
+      if (!next) return { ok: false, reason: 'no-title' }
+      raw.title = next
+    }
+    if (patch.description !== undefined) raw.description = String(patch.description).trim()
+    if (patch.avatar !== undefined) raw.avatar = patch.avatar || null
+    if (patch.banner !== undefined) raw.banner = patch.banner || null
 
-  await write(root, raw)
-  return { ok: true, workspace: await readWorkspace(root) }
+    await write(root, raw)
+    return { ok: true, workspace: await readWorkspace(root) }
+  })
 }
 
 /**
@@ -172,31 +211,35 @@ export async function updateWorkspace(root, patch = {}) {
  * its name and moves it to the front, which is what "I just worked on this"
  * should do to a list sorted by recency.
  */
-export async function rememberProject(root, { root: projectRoot, name, file } = {}) {
-  if (!projectRoot) return { ok: false, reason: 'no-project' }
-  let raw
-  try {
-    raw = JSON.parse(await fs.readFile(manifestPath(root), 'utf8'))
-  } catch {
-    return { ok: false, reason: 'not-a-workspace' }
-  }
+export function rememberProject(root, { root: projectRoot, name, file } = {}) {
+  if (!projectRoot) return Promise.resolve({ ok: false, reason: 'no-project' })
+  // The whole read-modify-write is queued, not just the write: two opens in
+  // quick succession would otherwise both read before either wrote, and the
+  // second would save a list the first project had never been in.
+  return inOrder(root, async () => {
+    let raw
+    try {
+      raw = JSON.parse(await fs.readFile(manifestPath(root), 'utf8'))
+    } catch {
+      return { ok: false, reason: 'not-a-workspace' }
+    }
 
-  const resolved = path.resolve(projectRoot)
-  const same = (one) =>
-    path.resolve(one.root).toLowerCase() === resolved.toLowerCase()
+    const resolved = path.resolve(projectRoot)
+    const same = (one) => path.resolve(one.root).toLowerCase() === resolved.toLowerCase()
 
-  const existing = (raw.projects ?? []).find(same)
-  const entry = {
-    root: resolved,
-    name: name ?? existing?.name ?? path.basename(resolved),
-    file: file ?? existing?.file,
-    addedAt: existing?.addedAt ?? Date.now(),
-    openedAt: Date.now(),
-  }
-  raw.projects = [entry, ...(raw.projects ?? []).filter((one) => !same(one))]
+    const existing = (raw.projects ?? []).find(same)
+    const entry = {
+      root: resolved,
+      name: name ?? existing?.name ?? path.basename(resolved),
+      file: file ?? existing?.file,
+      addedAt: existing?.addedAt ?? Date.now(),
+      openedAt: Date.now(),
+    }
+    raw.projects = [entry, ...(raw.projects ?? []).filter((one) => !same(one))]
 
-  await write(root, raw)
-  return { ok: true, workspace: await readWorkspace(root) }
+    await write(root, raw)
+    return { ok: true, workspace: await readWorkspace(root) }
+  })
 }
 
 /**
@@ -206,17 +249,19 @@ export async function rememberProject(root, { root: projectRoot, name, file } = 
  * next to a project card reads as "delete my work" to anybody who has not
  * thought about it, and being wrong about that once is unforgivable.
  */
-export async function forgetProject(root, projectRoot) {
-  let raw
-  try {
-    raw = JSON.parse(await fs.readFile(manifestPath(root), 'utf8'))
-  } catch {
-    return { ok: false, reason: 'not-a-workspace' }
-  }
-  const resolved = path.resolve(projectRoot).toLowerCase()
-  raw.projects = (raw.projects ?? []).filter(
-    (one) => path.resolve(one.root).toLowerCase() !== resolved,
-  )
-  await write(root, raw)
-  return { ok: true, workspace: await readWorkspace(root) }
+export function forgetProject(root, projectRoot) {
+  return inOrder(root, async () => {
+    let raw
+    try {
+      raw = JSON.parse(await fs.readFile(manifestPath(root), 'utf8'))
+    } catch {
+      return { ok: false, reason: 'not-a-workspace' }
+    }
+    const resolved = path.resolve(projectRoot).toLowerCase()
+    raw.projects = (raw.projects ?? []).filter(
+      (one) => path.resolve(one.root).toLowerCase() !== resolved,
+    )
+    await write(root, raw)
+    return { ok: true, workspace: await readWorkspace(root) }
+  })
 }

@@ -144,6 +144,113 @@ try {
     assert.equal(state.placeholder, false)
   })
 
+  await check('the drawn playhead is smooth, and never steps back', async () => {
+    /*
+     * The mixer clocks in 512-sample blocks (10.67ms at 48kHz) and the screen
+     * is drawn in animation frames (13.35ms here). They do not line up, so the
+     * clock advances one block or two between frames and never one frame's
+     * worth — which drew the playhead at 0.64px, 0.64px, 1.28px, 0.
+     *
+     * `getDrawTime` is the smoothed value for painting; `getTime` stays the
+     * truth for every decision. Measured either side by
+     * `scripts/probe-playhead.mjs`: a coefficient of variation of 0.391 before
+     * and 0.07 after, against a floor of 0.005.
+     *
+     * This asserts the two properties that make it safe rather than the
+     * smoothness itself, which is what the probe is for.
+     */
+    const out = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       playback.seek(0.5);
+       await new Promise((r) => setTimeout(r, 400));
+
+       // Paused, the drawn time is the real one: a line parked a few pixels
+       // off the frame on screen would make every cut land where it was not.
+       const pausedGap = Math.abs(playback.getDrawTime() - playback.getTime());
+
+       playback.play();
+       const draws = [];
+       const trues = [];
+       await new Promise((done) => {
+         const until = performance.now() + 2500;
+         const step = () => {
+           draws.push(playback.getDrawTime());
+           trues.push(playback.getTime());
+           if (performance.now() < until && playback.isPlaying()) requestAnimationFrame(step);
+           else done();
+         };
+         requestAnimationFrame(step);
+       });
+       playback.pause();
+       await new Promise((r) => setTimeout(r, 200));
+       const stoppedGap = Math.abs(playback.getDrawTime() - playback.getTime());
+
+       const backwards = draws.slice(1).filter((v, i) => v < draws[i] - 1e-9).length;
+       const lag = draws.map((v, i) => Math.abs(v - trues[i]));
+       return {
+         pausedGap, stoppedGap, backwards, samples: draws.length,
+         worstLag: Math.max(...lag),
+         meanLag: lag.reduce((a, b) => a + b, 0) / lag.length,
+       };`,
+    )
+
+    console.log(
+      `       ${out.samples} samples, worst lag ${(out.worstLag * 1000).toFixed(1)}ms, ` +
+        `${out.backwards} backward steps`,
+    )
+    assert.ok(out.samples > 60, `only ${out.samples} samples while playing`)
+    assert.equal(out.pausedGap, 0, 'a paused playhead is not drawn where it actually is')
+    assert.equal(out.stoppedGap, 0, 'the drawn playhead was left behind after stopping')
+
+    // The property their own test is named for. A playhead that slips back a
+    // pixel reads worse than one that waits, and it is what a plain low-pass
+    // filter does on a late block.
+    assert.equal(out.backwards, 0, `the drawn playhead stepped back ${out.backwards} times`)
+
+    // And it tracks: smoothing that drifted would be a clock of its own.
+    assert.ok(
+      out.worstLag < 0.08,
+      `the drawn playhead ran ${(out.worstLag * 1000).toFixed(1)}ms from the clock`,
+    )
+  })
+
+  await check('a seek is taken whole, not slid through', async () => {
+    /*
+     * A jump is not jitter. Smoothing one would draw the playhead sliding
+     * through material nobody played — and the short ones are inside the
+     * quarter-second window where the filter would otherwise ease.
+     */
+    const out = await evaluate(
+      cdp,
+      `const { playback } = window.__fluxDev;
+       playback.pause();
+       playback.seek(1);
+       await new Promise((r) => setTimeout(r, 300));
+       playback.play();
+       await new Promise((r) => setTimeout(r, 600));
+
+       // Mid-play, a small jump: well inside the snap threshold.
+       playback.seek(playback.getTime() + 0.12);
+       const afterSmall = playback.getDrawTime() - playback.getTime();
+       // And a large one.
+       playback.seek(playback.getTime() + 3);
+       const afterLarge = playback.getDrawTime() - playback.getTime();
+       playback.pause();
+       return { afterSmall, afterLarge };`,
+    )
+
+    assert.ok(
+      Math.abs(out.afterSmall) < 1e-9,
+      `a 120ms seek left the drawn playhead ${(out.afterSmall * 1000).toFixed(1)}ms behind`,
+    )
+    assert.ok(
+      Math.abs(out.afterLarge) < 1e-9,
+      `a 3s seek left the drawn playhead ${(out.afterLarge * 1000).toFixed(1)}ms behind`,
+    )
+  })
+
   await check('playing advances the sequence clock', async () => {
     const state = await evaluate(
       cdp,
