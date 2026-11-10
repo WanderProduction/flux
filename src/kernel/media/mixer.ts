@@ -5,7 +5,9 @@ import {
   getTime,
   isPlaying,
   setClockSource,
+  stalledClock,
   subscribePlayback,
+  trustClockAgain,
 } from '../playback'
 import {
   getSequence,
@@ -89,6 +91,36 @@ const START_LEAD = 0.08
 const LATE_TOLERANCE = 0.005
 
 /**
+ * How often a stalled output is rebuilt while playback goes on without it.
+ *
+ * A device that stops responding mid-playback no longer freezes the transport
+ * — see `reported` in kernel/playback.ts — but without this the sound stays
+ * gone until somebody presses stop and play. Two seconds is FilmCraft's
+ * figure: long enough that a dead device is not rebuilt in a tight loop, short
+ * enough that a reconnected one is heard again before it is reported as a bug.
+ */
+const RETRY_MS = 2000
+
+/**
+ * The transport rates this mixer will play.
+ *
+ * Forward only, and not past four. Web Audio's `playbackRate` cannot be
+ * negative, so reverse has nothing to play with — and past four a voice is two
+ * octaves up and four times the decode, which buys nothing anybody can use.
+ * FilmCraft draws its band at 0.5 to 4 and refuses the rest; this is the same
+ * line through FLUX's ladder of 1, 2, 4, 8, 16.
+ *
+ * **Pitch rises with the speed.** Web Audio resamples, so faster is higher,
+ * the way a tape machine is. FilmCraft corrects it with a pitch shifter ahead
+ * of the rate change; nothing in the platform does that for us and writing one
+ * is a bigger piece of work than the feature. Chipmunk speech is still speech,
+ * which is what a shuttle is for.
+ */
+const AUDIBLE_RATES = new Set([1, 2, 4])
+
+export const soundsAtRate = (rate: number): boolean => AUDIBLE_RATES.has(rate)
+
+/**
  * How long a level change takes to happen.
  *
  * Short enough to feel immediate, long enough that the waveform bends rather
@@ -106,6 +138,18 @@ export interface MixerStats {
   scheduled: number
   /** Frames dropped for arriving after their moment. */
   late: number
+  /**
+   * The least headroom any buffer was scheduled with, in milliseconds.
+   *
+   * How close the mixer came to missing a deadline. `late` counts the ones it
+   * already missed; this is the warning before that — a figure drifting toward
+   * zero is a mixer about to drop out, and it is the only number that says so
+   * while the sound is still perfect.
+   *
+   * Null until something has been scheduled. FilmCraft's ring reports the same
+   * thing as `minLeadMs`, measured against its own lead rather than ours.
+   */
+  minLeadMs: number | null
   /**
    * Nodes sounding from the current scrub grain.
    *
@@ -171,10 +215,22 @@ let timer: number | null = null
 /** The moment on the context's clock that `anchorSequence` corresponds to. */
 let anchorContext = 0
 let anchorSequence = 0
+/**
+ * The transport rate this mix was anchored at.
+ *
+ * Sequence time runs `mixRate` times faster than the context's clock, so it
+ * divides where sequence time is turned into a moment and multiplies where a
+ * moment is turned back into sequence time. Set once per start; a new rung
+ * stops and starts the mix rather than bending the one that is playing,
+ * because a buffer already handed to the device cannot be re-rated.
+ */
+let mixRate = 1
 const voices = new Map<string, Voice>()
 
 let scheduled = 0
 let late = 0
+/** Least `when - currentTime` of anything scheduled since the last start. */
+let minLead: number | null = null
 let anchors = 0
 
 export function mixerStats(): MixerStats {
@@ -185,6 +241,7 @@ export function mixerStats(): MixerStats {
     late,
     scrubNodes: grainNodes.size,
     scrubSources: grainSources.size,
+    minLeadMs: minLead === null ? null : minLead * 1000,
     anchors,
     sampleRate: context?.sampleRate ?? 0,
     state: context?.state ?? 'none',
@@ -286,7 +343,7 @@ export function hasAudioOutput(): boolean {
 }
 
 function sequenceToContext(time: number): number {
-  return anchorContext + (time - anchorSequence)
+  return anchorContext + (time - anchorSequence) / mixRate
 }
 
 /**
@@ -297,10 +354,19 @@ function sequenceToContext(time: number): number {
  * the moment the first sample belongs to, and reporting that would walk the
  * playhead backwards before it had moved at all.
  */
-export function mixerTime(): number | null {
+export function mixerTime(rate: number = mixRate): number | null {
   if (!running || !context) return null
+  /*
+   * A rung the mix has not been rebuilt for yet.
+   *
+   * The transport changes rate and this mix is restarted from the
+   * subscription, which is a tick later. In between, the buffers in the device
+   * are still the old speed, so reporting against them would pull the playhead
+   * at the wrong rate for one frame.
+   */
+  if (rate !== mixRate) return null
   if (voices.size === 0) return null
-  const now = anchorSequence + (context.currentTime - anchorContext)
+  const now = anchorSequence + (context.currentTime - anchorContext) * mixRate
   return Math.max(anchorSequence, now)
 }
 
@@ -312,7 +378,9 @@ function clipsAt(time: number): Clip[] {
   )
   return sequence.clips.filter(
     (clip) =>
-      audio.has(clip.trackId) && time < clip.start + clip.duration && time + SCHEDULE_AHEAD > clip.start,
+      audio.has(clip.trackId) &&
+      time < clip.start + clip.duration &&
+      time + SCHEDULE_AHEAD * mixRate > clip.start,
   )
 }
 
@@ -348,7 +416,13 @@ async function tick() {
   if (!running || !ctx) return
 
   const now = mixerTime() ?? anchorSequence
-  const horizon = now + SCHEDULE_AHEAD
+  /*
+   * The window is a wall-clock promise, so at speed it has to reach further
+   * through the sequence to cover the same seconds of device time. Without the
+   * rate here, shuttling at four times would schedule a quarter of the
+   * lookahead and drop out on the first slow decode.
+   */
+  const horizon = now + SCHEDULE_AHEAD * mixRate
   const wanted = clipsAt(now)
   const live = new Set(wanted.map((clip) => clip.id))
 
@@ -424,7 +498,10 @@ async function tick() {
          * held. Set before start(), because a source node's rate cannot be
          * changed once it is playing.
          */
-        if (clip.speed !== 1) node.playbackRate.value = clip.speed
+        // The clip's own stretch and the transport's rate are the same kind of
+        // thing to a source node, so they multiply.
+        const rate = clip.speed * mixRate
+        if (rate !== 1) node.playbackRate.value = rate
         // Into its track's fader, not straight at the master: that is what
         // makes a level change apply to everything already scheduled.
         node.connect(gainFor(clip.trackId) ?? (master as GainNode))
@@ -432,6 +509,8 @@ async function tick() {
           voice?.nodes.delete(node)
           node.disconnect()
         }
+        const lead = when - ctx.currentTime
+        if (minLead === null || lead < minLead) minLead = lead
         node.start(Math.max(when, ctx.currentTime))
         voice.nodes.add(node)
         scheduled += 1
@@ -676,14 +755,17 @@ export function endScrub(): void {
   releaseGrainSources()
 }
 
-export function startMix(at: number): void {
+export function startMix(at: number, rate = 1): void {
   const ctx = ensureContext()
   if (!ctx) return
+  if (!soundsAtRate(rate)) return
 
   stopMix()
+  mixRate = rate
   running = true
   scheduled = 0
   late = 0
+  minLead = null
   anchors = 0
   // Resuming can be refused before any user gesture. Nothing to recover: the
   // context stays suspended, no sound comes out, and the wall clock keeps the
@@ -697,6 +779,16 @@ export function startMix(at: number): void {
   // null when no clip is sounding, and the transport falls through to the wall
   // clock — a silent stretch still has to pass at the right speed.
   setClockSource('mixer', mixerTime)
+  /*
+   * And trusted again, because it has just been re-anchored to `at`.
+   *
+   * A mix that stalled during the last play is marked in the transport and
+   * stays marked, so a recovered device cannot drag the playhead backwards to
+   * wherever its clock had reached. Re-anchoring removes that risk — this
+   * mix's idea of the time starts from the time the transport is at — which is
+   * what makes the retry below safe.
+   */
+  trustClockAgain('mixer')
   schedule()
   timer = window.setInterval(schedule, TICK_MS)
 }
@@ -737,8 +829,34 @@ export function seekMix(at: number): void {
  * Viewer tells them apart — "the time changed" is not a reason to do anything,
  * or every tick would restart the audio.
  */
+/**
+ * Rebuilds a stalled output while playback carries on.
+ *
+ * Only while the transport says this mix has stalled, and the rebuild
+ * re-anchors to the time the transport is *now* at — so when a device comes
+ * back the sound resumes beside the picture rather than wherever its own clock
+ * had stopped. A device that never comes back costs one rebuild every two
+ * seconds and nothing else.
+ */
+let retry: number | null = null
+
+function startRetry(): void {
+  stopRetry()
+  retry = window.setInterval(() => {
+    if (!isPlaying() || getRate() !== 1) return
+    if (stalledClock() !== 'mixer') return
+    startMix(getTime())
+  }, RETRY_MS)
+}
+
+function stopRetry(): void {
+  if (retry !== null) window.clearInterval(retry)
+  retry = null
+}
+
 export function connectMixer(): () => void {
   let wasPlaying = isPlaying()
+  let wasRate = getRate()
   let lastSeek = getSeekToken()
 
   /*
@@ -775,24 +893,36 @@ export function connectMixer(): () => void {
 
   const stopPlayback = subscribePlayback(() => {
     /*
-     * A shuttle is silent.
+     * A shuttle sounds up to four times, and is silent past it.
      *
-     * The mixer schedules real buffers at real moments on a device that runs at
-     * one speed forwards; four times or backwards is not something it can play,
-     * and pretending otherwise would put the sound somewhere the picture is
-     * not. So anything but 1x counts as stopped here, and the sound comes back
-     * when the transport does.
+     * This used to say that a shuttle is silent full stop, on the grounds that
+     * the device runs at one speed forwards. That was right about reverse and
+     * wrong about the rest: a source node takes a `playbackRate`, which this
+     * file was already using for a stretched clip, and the mixer's anchor is
+     * arithmetic that a rate divides. What a device cannot do is run
+     * backwards, and no rate makes eight times useful.
+     *
+     * So 1, 2 and 4 play and everything else counts as stopped here, with the
+     * sound coming back when the transport returns to a rung that has one.
      */
-    const playing = isPlaying() && getRate() === 1
+    const rate = getRate()
+    const playing = isPlaying() && soundsAtRate(rate)
     const token = getSeekToken()
 
-    if (playing && !wasPlaying) {
-      // The transport takes the device back; a grain half-played would be
-      // heard underneath the first second of playback.
+    if (playing && (!wasPlaying || rate !== wasRate)) {
+      /*
+       * A new rung restarts the mix rather than bending it. Buffers already
+       * handed to the device cannot be re-rated, so the only way to change
+       * speed is to throw away what is queued and queue it again — which is
+       * also why the rungs are a ladder rather than a dial.
+       */
       endScrub()
-      startMix(getTime())
-    } else if (!playing && wasPlaying) stopMix()
-    else if (playing && token !== lastSeek) seekMix(getTime())
+      startMix(getTime(), rate)
+      startRetry()
+    } else if (!playing && wasPlaying) {
+      stopRetry()
+      stopMix()
+    } else if (playing && token !== lastSeek) seekMix(getTime())
     else if (!playing && token !== lastSeek && pointerDown && scrubAudio()) {
       // Stopped, the playhead moved, and a button is down: a drag through the
       // material rather than a jump to a mark.
@@ -800,10 +930,12 @@ export function connectMixer(): () => void {
     }
 
     wasPlaying = playing
+    wasRate = rate
     lastSeek = token
   })
 
   return () => {
+    stopRetry()
     window.removeEventListener('pointerdown', onDown, true)
     window.removeEventListener('pointerup', onUp, true)
     window.removeEventListener('pointercancel', onUp, true)

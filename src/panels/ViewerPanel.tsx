@@ -1284,7 +1284,11 @@ export function ViewerPanel() {
       setClockSource('element', null)
       return
     }
-    setClockSource('element', () => {
+    setClockSource('element', (rate) => {
+      // One speed only. Nothing sets the element's own rate to the
+      // transport's, so at 2x it would report time passing at 1x and drag the
+      // sequence back down to it.
+      if (rate !== 1) return null
       const media = mediaRef.current
       if (!media || media.paused || media.readyState < 2) return null
       return clip.start + (media.currentTime - clip.offset) / clip.speed

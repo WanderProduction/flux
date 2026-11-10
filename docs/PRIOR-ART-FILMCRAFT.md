@@ -443,7 +443,24 @@ Min/max pairs at 256 samples per bucket, one screen column per pixel, a normalis
 the clip's own peak, and an option for dynamic scaling. FLUX's `shared/peaks.js` does the same
 job the same way. Nothing to take.
 
-## What is worth taking, in order
+## All four were taken
+
+Written before any of them were built; all four are in as of 0.0.58. What each one cost, and
+what changed from the plan:
+
+| | |
+|---|---|
+| **Scrub audio** | As described. Two of its four constants are ours — a decode-per-grain gap and a decoder idle, because FLUX has no output stream to keep open but does have decoders. |
+| **Stall detection** | Found a **permanent transport freeze**, not a missing feature: a clock that stopped advancing froze the playhead at 7.000 for ever. |
+| **Device retry** | Their two seconds. The re-anchor is what makes it safe to trust the clock again. |
+| **Shuttle audio** | 1x, 2x and 4x. Their 0.5x is not on FLUX's ladder, and **pitch is not corrected** — Web Audio has no shifter and writing one is bigger than the feature. |
+| **Underrun accounting** | Became `minLeadMs`: the least headroom any buffer was scheduled with. |
+
+The one thing deliberately left: **pitch-corrected shuttle**. Their trick is to ask the mixer for
+a different sample rate and correct the pitch before converting it, which is elegant and needs a
+pitch shifter FLUX does not have.
+
+## What was worth taking, in order
 
 1. **Scrub audio.** Four constants and a grain, roughly a hundred lines against FLUX's mixer. It
    is the one thing in this audit an editor would notice within a minute of trying the app.

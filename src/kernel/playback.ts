@@ -44,8 +44,16 @@ import { getSequence, sequenceDuration, subscribeSequence } from './sequence'
  * Something that is playing media and can say where it is, in sequence
  * seconds. Returns null when it cannot — not loaded, stalled, or paused — and
  * the wall clock covers for it.
+ *
+ * The transport's rate is passed in because *which speeds a source can play*
+ * is the source's own business. The mixer answers at 1x, 2x and 4x and is
+ * silent elsewhere; a media element answers at 1x only, because nothing sets
+ * its own rate to the transport's. This used to be a `rate === 1` test here,
+ * which meant the transport decided what its sources were capable of — and
+ * the day one of them learned to play faster, the gate was the thing that had
+ * to be found and changed.
  */
-export type ClockSource = () => number | null
+export type ClockSource = (rate: number) => number | null
 
 /**
  * Who can be the clock, in the order they are asked.
@@ -332,7 +340,7 @@ function reported(now: number): number | null {
   for (const name of CLOCK_ORDER) {
     if (name === stalledSource) continue
 
-    const value = sources.get(name)?.()
+    const value = sources.get(name)?.(rate)
     if (value === null || value === undefined) {
       // Nothing to say is not a stall: a silent stretch has no voices, and the
       // wall clock is meant to cover it.
@@ -360,6 +368,20 @@ export function stalledClock(): ClockName | null {
   return stalledSource
 }
 
+/**
+ * Trusts a source again, for something that has just rebuilt it.
+ *
+ * The stall is otherwise sticky until the transport moves, because taking a
+ * recovered device back mid-play would jump the playhead backwards to wherever
+ * its clock had got to. A source that has been *re-anchored* to the current
+ * time has no such gap, which is why the mixer may call this and nothing else
+ * may.
+ */
+export function trustClockAgain(name: ClockName): void {
+  if (stalledSource === name) stalledSource = null
+  if (said?.name === name) said = null
+}
+
 function stopLoop() {
   if (frame !== null) cancelAnimationFrame(frame)
   frame = null
@@ -380,10 +402,12 @@ function tick(now: number) {
    * clock. Reading rather than accumulating is what makes a throttled animation
    * frame cost smoothness instead of accuracy.
    *
-   * A shuttle has no source to ask: nothing is playing the sequence's audio at
-   * four times or backwards, so the wall clock is the only clock there is.
+   * Which source can answer depends on the rate, and the source decides — see
+   * `ClockSource`. The mixer plays and clocks at one, two and four times;
+   * nothing plays backwards, and past four the wall clock is the only clock
+   * there is.
    */
-  const heard = rate === 1 ? reported(now) : null
+  const heard = reported(now)
   const next = heard ?? time + elapsed * rate
 
   if (next <= 0 && rate < 0) {

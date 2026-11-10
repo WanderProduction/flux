@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "wait-on tcp:127.0.0.1:5273 && electron .",
-    "dev:debug": "wait-on tcp:127.0.0.1:5273 && electron . --remote-debugging-port=9222",
+    "dev:debug": "wait-on tcp:127.0.0.1:5273 && electron . --remote-debugging-port=9222 --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows",
     "build": "tsc --noEmit && vite build",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",

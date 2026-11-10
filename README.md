@@ -2668,6 +2668,56 @@ command the keymap never dispatches would read correctly and do nothing. It pres
 the right order. The first version of it quietly passed while nothing fired at all, because the
 suite sits on the Settings page where the Timeline's commands are not registered.
 
+#### A shuttle sounds up to four times
+
+This file used to say a shuttle is silent, and the reason given was that the device runs one
+speed forwards. That was right about reverse and wrong about everything else — a source node
+takes a `playbackRate`, which the mixer was **already using for a stretched clip**, and the
+mixer's anchor is arithmetic that a rate divides.
+
+So `1x`, `2x` and `4x` play. `8x` and `16x` do not, because no rate makes two octaves up useful,
+and reverse does not, because Web Audio has no negative playback rate and never will. FilmCraft
+draws its band at 0.5–4 and refuses the rest; this is the same line through FLUX's ladder.
+
+**Pitch rises with the speed**, the way a tape machine does. FilmCraft corrects it with a pitch
+shifter placed *before* the rate change — so the correction happens while the top of the spectrum
+is still there to keep — and nothing in Web Audio does that for us. Chipmunk speech is still
+speech, which is what a shuttle is for.
+
+Three places needed the rate and all three are the same mistake if missed: the anchor divides by
+it, the lookahead multiplies by it (the window is a promise about *device* seconds, so at 4x it
+has to reach four times further through the sequence), and a source node's own rate multiplies
+with the clip's stretch. A new rung stops and restarts the mix rather than bending it, because a
+buffer already handed to the device cannot be re-rated — which is also why the rungs are a ladder
+rather than a dial.
+
+**Which speeds a source can play is now the source's own business.** `ClockSource` takes the
+transport's rate and answers `null` when it cannot help: the mixer at anything outside its band,
+a media element at anything but `1x` because nothing sets its rate to the transport's. That used
+to be a `rate === 1` test in the transport, which meant the transport decided what its sources
+were capable of — and the day one of them learned to play faster, that test was the thing that
+had to be found and changed.
+
+#### The sound comes back on its own
+
+A stalled device no longer freezes the transport, but until now it also meant silence until
+somebody pressed stop and play. The mixer rebuilds a stalled output every two seconds while
+playback carries on, and the rebuild re-anchors to the time the transport is *now* at — so when a
+device comes back the sound resumes beside the picture rather than wherever its own clock had
+stopped. That re-anchoring is what makes it safe to trust the clock again; a recovered device
+taken back without it would drag the playhead backwards.
+
+A device that never comes back costs one rebuild every two seconds and nothing else. The status
+bar says it once per play rather than once per attempt.
+
+#### `minLeadMs`: the warning before a dropout
+
+`mixerStats()` reports the least headroom any buffer was scheduled with. `late` counts deadlines
+already missed; this is the number that moves *first* — a figure drifting toward zero is a mixer
+about to drop out, and it is the only instrument that says so while the sound is still perfect.
+FilmCraft's ring reports the same thing from the other side, as the minimum lead its buffer ever
+reached.
+
 #### Dragging the playhead makes a sound
 
 Four constants, which is the whole design — taken from FilmCraft, which took them from Premiere:

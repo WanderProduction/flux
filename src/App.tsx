@@ -5,7 +5,7 @@ import { commands } from './kernel/commands'
 import { importEditDocument } from './kernel/importEdit'
 import { startControlServer, stopControlServer } from './kernel/controlBridge'
 import { addMarker, markerAt, markerNear, removeMarkers } from './kernel/sequence'
-import { getTime, seek, stalledClock, subscribePlayback } from './kernel/playback'
+import { getTime, isPlaying, seek, stalledClock, subscribePlayback } from './kernel/playback'
 import { scrubAudio, setScrubAudio } from './kernel/media/mixer'
 import { pickSequenceXml, readTextFile } from './kernel/fsBridge'
 import { readXmeml } from '../shared/xmeml.js'
@@ -220,15 +220,21 @@ function Editor({ project }: { project: Project }) {
    * the wrong end. Said once per stall: the flag is sticky until the transport
    * moves, so this fires on the edge and not on every tick.
    */
-  const stalledRef = useRef<string | null>(null)
+  const saidStalled = useRef(false)
+  const wasPlaying = useRef(false)
   useEffect(
     () =>
       subscribePlayback(() => {
-        const stalled = stalledClock()
-        if (stalled && stalled !== stalledRef.current) {
+        const playing = isPlaying()
+        // A new play is a new chance for the device to work, and a new chance
+        // to be told that it did not.
+        if (playing && !wasPlaying.current) saidStalled.current = false
+        wasPlaying.current = playing
+
+        if (stalledClock() && !saidStalled.current) {
+          saidStalled.current = true
           say('The audio device stopped responding — playing on without sound')
         }
-        stalledRef.current = stalled
       }),
     [say],
   )

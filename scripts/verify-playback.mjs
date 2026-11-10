@@ -345,9 +345,15 @@ try {
          playback.setClockSource('mixer', source);
          await new Promise((r) => setTimeout(r, 1400));
          const a = playback.getTime();
+         /*
+          * Read between the stall threshold (1s) and the retry (2s). The mixer
+          * rebuilds a stalled output on a timer and re-anchoring trusts it
+          * again, so a verdict taken after that window is reading the recovery
+          * rather than the stall.
+          */
+         const stalled = playback.stalledClock();
          await new Promise((r) => setTimeout(r, 900));
          const b = playback.getTime();
-         const stalled = playback.stalledClock();
          playback.setClockSource('mixer', null);
          playback.pause();
          return { a, b, advanced: b - a, stalled };
@@ -355,8 +361,15 @@ try {
 
        const frozen = await run(() => 7);
        const silent = await run(() => null);
-       let t = 3;
-       const healthy = await run(() => (t += 0.016));
+       /*
+        * Advances with the wall clock rather than per call. A source that
+        * moved 16ms every time it was asked made this check a measurement of
+        * how often the transport asks — which drops to a handful a second the
+        * moment the window is not being painted, and failed for a reason that
+        * had nothing to do with clocks.
+        */
+       const from = performance.now();
+       const healthy = await run(() => 3 + (performance.now() - from) / 1000);
 
        const now = sequence.getSequence();
        sequence.setSequence({ ...now, settings: heldSettings });
@@ -2135,39 +2148,63 @@ try {
     assert.equal(state.rate, 1, 'with the ladder back at the bottom for next time')
   })
 
-  await check('a shuttle is silent, and the sound comes back at 1x', async () => {
+  await check('a shuttle sounds up to four times, and is silent past it', async () => {
     /*
-     * The mixer schedules real buffers at real moments on a device that runs
-     * one speed forwards. Four times or backwards is not something it can play,
-     * so it stops — and letting it keep the clock instead would drag the
-     * playhead back to 1x while the picture claimed otherwise.
+     * This used to assert that a shuttle is silent full stop, and the reason
+     * given was that the device runs one speed forwards. That was right about
+     * reverse and wrong about the rest: a source node takes a `playbackRate`,
+     * which the mixer was already using for a stretched clip, and its anchor
+     * is arithmetic a rate divides.
+     *
+     * So the contract now has a shape rather than a wall, and the edges are
+     * what this checks. 1, 2 and 4 sound. 8 and 16 do not, because no rate
+     * makes two octaves up useful. Reverse does not, because Web Audio has no
+     * negative playback rate and never will.
+     *
+     * `mixerTime() !== null` is the question "is this mix clocking the
+     * transport", which is the same question as "is there sound" — a mix that
+     * is not running returns null, and a running one is by definition playing
+     * buffers.
      */
     const state = await evaluate(
       cdp,
       SHUTTLE +
         `const { mixer } = window.__fluxDev;
-         playback.seek(1);
-         await new Promise(r => setTimeout(r, 200));
-         await window.__press('d');
-         await new Promise(r => setTimeout(r, 500));
-         const atOne = { mixing: mixer.mixerTime() !== null, rate: playback.getRate() };
-         await window.__press('d');
-         await new Promise(r => setTimeout(r, 500));
-         const shuttling = { mixing: mixer.mixerTime() !== null, rate: playback.getRate() };
+         const at = async (rate) => {
+           playback.pause();
+           await new Promise((r) => setTimeout(r, 150));
+           playback.seek(1);
+           playback.setRate(rate);
+           playback.play();
+           await new Promise((r) => setTimeout(r, 700));
+           const sounding = mixer.mixerTime() !== null;
+           const moved = playback.getTime() > 1.05;
+           playback.pause();
+           return { rate: rate, sounding, moved };
+         };
+
+         const forward = [];
+         for (const rate of [1, 2, 4, 8, 16]) forward.push(await at(rate));
+         const back = await at(-1);
+         playback.setRate(1);
          playback.pause();
-         await new Promise(r => setTimeout(r, 200));
-         playback.seek(1);
-         playback.play();
-         await new Promise(r => setTimeout(r, 600));
-         const again = { mixing: mixer.mixerTime() !== null, rate: playback.getRate() };
-         playback.pause();
-         return { atOne, shuttling, again };`,
+         return { forward, back };`,
     )
-    assert.equal(state.atOne.rate, 1, 'setup: one press is ordinary play')
-    assert.equal(state.atOne.mixing, true, 'which has sound')
-    assert.equal(state.shuttling.rate, 2, 'setup: two presses is a shuttle')
-    assert.equal(state.shuttling.mixing, false, 'and a shuttle is silent')
-    assert.equal(state.again.mixing, true, 'and the sound comes back when the transport does')
+
+    console.log(
+      `       ${state.forward.map((f) => f.rate + 'x ' + (f.sounding ? 'sound' : 'silent')).join(' · ')} · reverse ${state.back.sounding ? 'sound' : 'silent'}`,
+    )
+
+    for (const arm of state.forward) {
+      // Every rung moves the playhead whether or not it makes a sound: the
+      // wall clock covers the ones the mixer will not play, and a rung that
+      // stopped moving would be the regression this is really guarding.
+      assert.equal(arm.moved, true, `the playhead did not move at ${arm.rate}x`)
+    }
+
+    const sounding = state.forward.filter((f) => f.sounding).map((f) => f.rate)
+    assert.deepEqual(sounding, [1, 2, 4], `sound at ${sounding.join(', ')}x`)
+    assert.equal(state.back.sounding, false, 'reverse made a sound, which it cannot')
   })
 
   await check('the mixer can reach an audio device at all', async () => {
