@@ -5267,3 +5267,39 @@ kbd {
   font-size: var(--flux-text-sm);
   white-space: nowrap;
 }
+
+/* Shipped keyboard sets: a name and what it is, rather than a bare chip. */
+.hk-presets-row--built {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hk-built {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 210px;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--flux-border-strong);
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-panel);
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hk-built:hover {
+  background: var(--flux-bg-hover);
+}
+.hk-built--active {
+  border-color: var(--flux-accent);
+}
+.hk-built-name {
+  font-size: var(--flux-text-md);
+  font-weight: 600;
+}
+.hk-built-blurb {
+  color: var(--flux-text-faint);
+  font-size: var(--flux-text-sm);
+  line-height: 1.4;
+}

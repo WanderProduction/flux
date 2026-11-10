@@ -162,7 +162,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Layouts** | Saved panel arrangements. `1` Edit, `2` Export, `3` Settings. |
 | **Settings** | `Ctrl ,` — three levels, nineteen pages. Five are real; the rest say what they will be. |
 | **Themes** | Three dark ones, five accents, density and text size — all of it token overrides. |
-| **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets. |
+| **Hotkeys** | Rebind any of 117 commands, conflicts named before they are taken, and named sets — Premiere Pro and DaVinci Resolve ship. |
 | **Layout persistence** | `Ctrl Alt S` saves the current layout's arrangement, `Ctrl Shift R` resets it. |
 | **File association** | `npm run register` gives `.flux` the FLUX icon in Explorer and opens it on double-click. |
 | **Command palette** | `Ctrl K` — fuzzy search over every registered command. |
@@ -2613,6 +2613,60 @@ ruler scrubs.
 
 **There is exactly one clock**, in [`src/kernel/playback.ts`](src/kernel/playback.ts). Panels read
 it and render; only commands move it.
+
+#### Two shipped sets: Premiere Pro and DaVinci Resolve
+
+An editor who cannot press the keys their hands already know does not evaluate a new tool — they
+bounce off it in the first ten minutes, and no amount of playback smoothness buys that back. The
+Hotkeys page shipped with a preset *mechanism* and no presets, which is the same as not having
+the feature.
+
+Both sets are in [`kernel/keymapPresets.ts`](src/kernel/keymapPresets.ts), and each is **the
+whole map** like any other set — written as a diff because that is the readable way to review
+one, resolved against the current defaults when applied. A set follows a change to the FLUX
+default for every chord it does not itself name, which is what should happen when a command moves
+to a different key.
+
+**What they claim is deliberately narrow.** Not "FLUX behaves like Premiere" — it cannot, because
+Premiere has a ripple edit tool, a slip tool, four-point edits and track targeting that FLUX has
+not built. So each set follows one rule, and it is the rule to argue with if they ever feel
+wrong:
+
+> Rebind every chord the source application defines and FLUX can honour. Unbind a chord only
+> where FLUX's own binding would fire a tool switch or a destructive edit from a key that
+> application uses for something else. Leave everything else on the FLUX default.
+
+The third clause is what keeps them usable: a set that cleared every chord it could not map would
+hand a Premiere editor a keyboard that mostly does nothing, and the FLUX defaults underneath are
+reasonable keys for commands neither application has.
+
+The second clause is why `B` is **unbound** in the Premiere set. Premiere's B is Ripple Edit;
+FLUX's B is a paint brush. A reflex that reaches for a ripple edit and gets a brush is found
+during somebody's real work, which is the worst possible moment — unbound is the honest answer,
+and the tool is still on the strip and in the palette.
+
+**The transport is the part that matters most**, and both sets share it because both applications
+do, and Avid did before them: `J` `K` `L` shuttle and stop, `I` and `O` mark, the arrows step a
+frame, `Up` and `Down` walk the cuts. Those are reflex rather than preference, and FLUX's own
+defaults had deliberately kept `I` and `O` for a tool — a decision `kernel/keymap.ts` wrote down
+at the time as one to revisit *"if the I/O muscle memory is worth more than a tool that is still
+a stub"*. For an editor arriving from either application it is, so these sets make that trade and
+the FLUX default does not.
+
+**A shipped set cannot be deleted, and its name cannot be saved over.** It is the way back to a
+keyboard somebody knows; a one-way door there would make the whole feature untrustworthy. Trying
+to save over one is refused by name rather than silently renamed.
+
+```bash
+npm run verify:hotkeys
+```
+
+Eleven checks. Three are about these sets, and the one worth knowing is that the transport is
+asserted by **running the key** rather than by reading the map — a binding that resolves to a
+command the keymap never dispatches would read correctly and do nothing. It presses `L`, `K`,
+`J`, `I` and `O` in each set and checks the shuttle rate, the stop, and the two marks landing in
+the right order. The first version of it quietly passed while nothing fired at all, because the
+suite sits on the Settings page where the Timeline's commands are not registered.
 
 #### The playhead is drawn at a time that is not the time
 

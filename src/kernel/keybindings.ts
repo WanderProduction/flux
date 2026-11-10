@@ -34,6 +34,7 @@
  */
 
 import { defaultKeymap, type Keymap } from './keymap'
+import { builtInPresets, isBuiltInPreset, keymapOf } from './keymapPresets'
 import { loadStore, saveStore } from './store'
 
 const STORE = 'keybindings'
@@ -52,6 +53,17 @@ export interface KeymapPreset {
   keymap: Keymap
   /** Millis. Shown as "saved <when>", and the sort order of the list. */
   savedAt: number
+  /**
+   * Shipped with the app rather than saved by the user.
+   *
+   * These live in code (kernel/keymapPresets.ts), are never written to the
+   * store, and cannot be deleted or overwritten — a preset somebody can
+   * destroy by saving over its name is not something the Hotkeys page can
+   * offer as a way back.
+   */
+  builtIn?: true
+  /** One line under the name. Built-ins only. */
+  blurb?: string
 }
 
 interface Stored {
@@ -86,8 +98,23 @@ export function keybindingsLoaded(): boolean {
   return loaded
 }
 
+/**
+ * The built-ins first, then whatever the user has saved.
+ *
+ * Resolved on every call rather than kept, so a built-in follows a change to
+ * `defaultKeymap` for every chord it does not itself set — which is what
+ * should happen when a command moves to a different key.
+ */
 export function getPresets(): KeymapPreset[] {
-  return presets
+  const shipped: KeymapPreset[] = builtInPresets.map((one) => ({
+    id: one.id,
+    name: one.name,
+    blurb: one.blurb,
+    keymap: keymapOf(one),
+    savedAt: 0,
+    builtIn: true,
+  }))
+  return [...shipped, ...presets]
 }
 
 export function getActivePreset(): string | null {
@@ -270,6 +297,12 @@ let nextPresetId = 0
 export function savePreset(name: string): KeymapPreset | null {
   const clean = name.trim()
   if (!clean) return null
+  /*
+   * Not over a shipped one. "Premiere Pro" has to go on meaning Premiere Pro,
+   * or the way back from an experiment is gone — and the page can say so,
+   * where a silently renamed save could not.
+   */
+  if (builtInPresets.some((one) => one.name.toLowerCase() === clean.toLowerCase())) return null
 
   const existing = presets.find((one) => one.name.toLowerCase() === clean.toLowerCase())
   const preset: KeymapPreset = {
@@ -294,7 +327,7 @@ export function savePreset(name: string): KeymapPreset | null {
  * current map would leave behind any key the set deliberately does not have.
  */
 export function applyPreset(id: string): boolean {
-  const preset = presets.find((one) => one.id === id)
+  const preset = getPresets().find((one) => one.id === id)
   if (!preset) return false
   keymap = { ...preset.keymap }
   activePreset = preset.id
@@ -303,6 +336,9 @@ export function applyPreset(id: string): boolean {
 }
 
 export function deletePreset(id: string): boolean {
+  // A shipped preset is the way back to a known keyboard. Letting it be
+  // deleted would make that a one-way door.
+  if (isBuiltInPreset(id)) return false
   if (!presets.some((one) => one.id === id)) return false
   presets = presets.filter((one) => one.id !== id)
   if (activePreset === id) activePreset = null

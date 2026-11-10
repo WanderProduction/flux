@@ -384,36 +384,70 @@ function Presets({
         thing after a release changes one.
       </p>
 
-      <div className="hk-presets-row">
-        {presets.length === 0 && <span className="hk-unbound">none saved yet</span>}
-        {presets.map((preset) => (
-          <span
-            className={`hk-preset${preset.id === active ? ' hk-preset--active' : ''}`}
-            key={preset.id}
-          >
+      {/*
+        The shipped sets first, with what they are. They cannot be deleted and
+        their names cannot be saved over: a set somebody can destroy by typing
+        its name is not a way back to a keyboard they know.
+      */}
+      <div className="hk-presets-row hk-presets-row--built">
+        {presets
+          .filter((preset) => preset.builtIn)
+          .map((preset) => (
             <button
-              className="hk-preset-name"
-              title={`Use "${preset.name}"`}
+              key={preset.id}
+              className={`hk-built${preset.id === active ? ' hk-built--active' : ''}`}
               onClick={() => {
                 applyPreset(preset.id)
                 onNote(`Using "${preset.name}"`)
               }}
             >
-              {preset.name}
+              <span className="hk-built-name">{preset.name}</span>
+              {preset.blurb && <span className="hk-built-blurb">{preset.blurb}</span>}
             </button>
-            <button
-              className="hk-chord-x"
-              title={`Delete "${preset.name}"`}
-              aria-label={`Delete the set "${preset.name}"`}
-              onClick={() => {
-                deletePreset(preset.id)
-                onNote(`Deleted "${preset.name}"`)
-              }}
+          ))}
+      </div>
+
+      <p className="hk-presets-why">
+        The two shipped sets cover the transport and the keys each application puts the timeline
+        on. Where FLUX has no equivalent for a tool — a ripple edit, a slip, a trim mode — the key
+        is left unbound rather than pointed at the nearest thing, because a reflex that does the
+        wrong edit is found during real work.
+      </p>
+
+      <div className="hk-presets-row">
+        {presets.filter((preset) => !preset.builtIn).length === 0 && (
+          <span className="hk-unbound">none of your own yet</span>
+        )}
+        {presets
+          .filter((preset) => !preset.builtIn)
+          .map((preset) => (
+            <span
+              className={`hk-preset${preset.id === active ? ' hk-preset--active' : ''}`}
+              key={preset.id}
             >
-              ×
-            </button>
-          </span>
-        ))}
+              <button
+                className="hk-preset-name"
+                title={`Use "${preset.name}"`}
+                onClick={() => {
+                  applyPreset(preset.id)
+                  onNote(`Using "${preset.name}"`)
+                }}
+              >
+                {preset.name}
+              </button>
+              <button
+                className="hk-chord-x"
+                title={`Delete "${preset.name}"`}
+                aria-label={`Delete the set "${preset.name}"`}
+                onClick={() => {
+                  deletePreset(preset.id)
+                  onNote(`Deleted "${preset.name}"`)
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
       </div>
 
       <div className="hk-presets-row">
@@ -432,7 +466,11 @@ function Presets({
             if (saved) {
               onNote(`Saved "${saved.name}"`)
               setName('')
+              return
             }
+            // The only way to be refused: a shipped set already has the name,
+            // and those stay meaning what they say.
+            onNote(`"${name.trim()}" is a set that ships with FLUX — pick another name`)
           }}
         >
           Save current as

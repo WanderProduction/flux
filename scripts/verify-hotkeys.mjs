@@ -326,10 +326,12 @@ try {
        // Saving under the same name replaces rather than duplicating.
        keybindings.savePreset('Mine');
        keybindings.savePreset('mine');
-       const count = keybindings.getPresets().length;
+       // The user's own sets: the shipped ones are always in this list now.
+       const ownSets = () => keybindings.getPresets().filter((one) => !one.builtIn);
+       const count = ownSets().length;
 
        const removed = keybindings.deletePreset(mine.id);
-       const left = keybindings.getPresets().length;
+       const left = ownSets().length;
 
        keybindings.resetAllKeybindings();
        return { afterReset, afterApply, activeAfterApply, activeAfterEdit, count, removed, left };`,
@@ -455,6 +457,173 @@ try {
     )
     console.log(`       ${result.conflictText?.slice(0, 96)}`)
   })
+  await check('the shipped sets exist, and every chord in them runs something real', async () => {
+    /*
+     * A preset is the whole map, so a binding pointing at a command that does
+     * not exist is not a dead key in a menu somewhere — it is a key the editor
+     * presses by reflex that silently does nothing, and there is no way to
+     * tell that from the app being slow to respond.
+     */
+    const out = await evaluate(
+      cdp,
+      `const { keybindings, commands } = window.__fluxDev;
+       const known = new Set(commands.catalogue().map((one) => one.id));
+       const built = keybindings.getPresets().filter((one) => one.builtIn);
+       return {
+         names: built.map((one) => one.name),
+         blurbs: built.filter((one) => one.blurb).length,
+         sets: built.map((one) => ({
+           name: one.name,
+           chords: Object.keys(one.keymap).length,
+           unknown: Object.entries(one.keymap)
+             .filter(([, command]) => !known.has(command))
+             .map(([chord, command]) => chord + ' -> ' + command),
+         })),
+       };`,
+    )
+
+    console.log(`       ${out.sets.map((s) => `${s.name} (${s.chords})`).join(', ')}`)
+    assert.deepEqual(
+      out.names.sort(),
+      ['DaVinci Resolve', 'Premiere Pro'],
+      `shipped sets are ${out.names.join(', ')}`,
+    )
+    assert.equal(out.blurbs, out.names.length, 'a shipped set has no line saying what it is')
+    for (const set of out.sets) {
+      assert.deepEqual(set.unknown, [], `${set.name} binds commands that do not exist`)
+      // A set that lost most of its map would still pass the check above.
+      assert.ok(set.chords > 50, `${set.name} has only ${set.chords} bindings`)
+    }
+  })
+
+  await check('the transport lands where an editor expects it', async () => {
+    /*
+     * J/K/L and I/O are the reflex both applications share, and the whole
+     * reason these sets exist. Asserted by *running the key*, not by reading
+     * the map: a binding that resolves to a command the keymap never dispatches
+     * would read correctly and do nothing.
+     */
+    const out = await evaluate(
+      cdp,
+      `const { keybindings, playback, sequence, commands } = window.__fluxDev;
+       /*
+        * Back to Edit first. The Timeline registers the commands these keys
+        * run, and this suite otherwise sits on the Settings page where it is
+        * not mounted — so every press would resolve to a command that is not
+        * there and do nothing, which reads exactly like a broken binding.
+        */
+       await commands.run('layout.switch.edit');
+       await new Promise((r) => setTimeout(r, 700));
+       const results = {};
+
+       const press = (key, opts = {}) => {
+         window.dispatchEvent(new KeyboardEvent('keydown', {
+           key, bubbles: true, cancelable: true, ...opts,
+         }));
+         window.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, ...opts }));
+       };
+
+       for (const preset of keybindings.getPresets().filter((one) => one.builtIn)) {
+         keybindings.applyPreset(preset.id);
+         await new Promise((r) => setTimeout(r, 120));
+
+         playback.pause();
+         playback.seek(1);
+         await new Promise((r) => setTimeout(r, 200));
+
+         // L shuttles forward, K stops.
+         press('l');
+         await new Promise((r) => setTimeout(r, 150));
+         const afterL = playback.getRate();
+         press('k');
+         await new Promise((r) => setTimeout(r, 150));
+         const afterK = playback.isPlaying();
+
+         // J shuttles back.
+         press('j');
+         await new Promise((r) => setTimeout(r, 150));
+         const afterJ = playback.getRate();
+         playback.pause();
+
+         // I and O mark.
+         /*
+          * A length to seek within. An earlier check in this suite clears the
+          * sequence, and a seek into a zero-length one clamps to 0 — so both
+          * marks landed on 0 and the check could not tell a working key from a
+          * key that fired at the wrong time.
+          */
+         const held = sequence.getSequence();
+         sequence.setSequence({
+           ...held,
+           settings: { ...held.settings, duration: 10 },
+         });
+         sequence.setRangeEnd('in', null);
+         sequence.setRangeEnd('out', null);
+         playback.seek(1);
+         await new Promise((r) => setTimeout(r, 120));
+         press('i');
+         await new Promise((r) => setTimeout(r, 120));
+         playback.seek(2);
+         await new Promise((r) => setTimeout(r, 120));
+         press('o');
+         await new Promise((r) => setTimeout(r, 150));
+         const r = sequence.getSequence().range ?? {};
+         const marks = { in: r.inPoint ?? null, out: r.outPoint ?? null };
+
+         results[preset.name] = { afterL, afterK, afterJ, marks };
+       }
+
+       keybindings.resetAllKeybindings();
+       return results;`,
+    )
+
+    for (const [name, r] of Object.entries(out)) {
+      console.log(
+        `       ${name}: L→${r.afterL}x  K→${r.afterK ? 'playing' : 'stopped'}  ` +
+          `J→${r.afterJ}x  marks ${r.marks.in}–${r.marks.out}`,
+      )
+      assert.ok(r.afterL > 0, `${name}: L did not shuttle forward (rate ${r.afterL})`)
+      assert.equal(r.afterK, false, `${name}: K did not stop playback`)
+      assert.ok(r.afterJ < 0, `${name}: J did not shuttle back (rate ${r.afterJ})`)
+      assert.ok(r.marks.in !== null, `${name}: I did not mark in`)
+      assert.ok(r.marks.out !== null, `${name}: O did not mark out`)
+      assert.ok(r.marks.out > r.marks.in, `${name}: the marks came out backwards`)
+    }
+  })
+
+  await check('a shipped set cannot be deleted or saved over', async () => {
+    // It is the way back to a keyboard somebody knows. A one-way door there
+    // would make the whole feature untrustworthy.
+    const out = await evaluate(
+      cdp,
+      `const { keybindings } = window.__fluxDev;
+       const built = keybindings.getPresets().find((one) => one.builtIn);
+
+       const deleted = keybindings.deletePreset(built.id);
+       const stillThere = keybindings.getPresets().some((one) => one.id === built.id);
+       const savedOver = keybindings.savePreset(built.name);
+       const savedOverLower = keybindings.savePreset(built.name.toLowerCase());
+       const ownName = keybindings.savePreset('harness set');
+       if (ownName) keybindings.deletePreset(ownName.id);
+
+       keybindings.resetAllKeybindings();
+       return {
+         deleted, stillThere,
+         savedOver: savedOver === null,
+         savedOverLower: savedOverLower === null,
+         ownNameWorked: ownName !== null,
+         name: built.name,
+       };`,
+    )
+
+    assert.equal(out.deleted, false, `${out.name} reported itself deleted`)
+    assert.equal(out.stillThere, true, `${out.name} is gone from the list`)
+    assert.equal(out.savedOver, true, `a set could be saved over "${out.name}"`)
+    assert.equal(out.savedOverLower, true, 'the name check is case-sensitive')
+    // And the refusal is specific to shipped names, not to saving at all.
+    assert.equal(out.ownNameWorked, true, 'an ordinary name could not be saved')
+  })
+
 } finally {
   await restore().catch(() => {})
   report()
