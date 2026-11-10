@@ -174,6 +174,10 @@ if (import.meta.env.DEV) {
  * No StrictMode: dockview owns imperative DOM and a double-invoked effect
  * rebuilds the layout twice on boot, which shows up as panels flickering.
  */
+// Not gated on, unlike the look: a preference about sound has nothing to flash
+// if it arrives a moment after the first paint.
+void mixer.loadScrubAudio()
+
 void appearance.loadAppearance().finally(() => {
   createRoot(container).render(<App />)
 })

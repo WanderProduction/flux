@@ -6,6 +6,7 @@ import { importEditDocument } from './kernel/importEdit'
 import { startControlServer, stopControlServer } from './kernel/controlBridge'
 import { addMarker, markerAt, markerNear, removeMarkers } from './kernel/sequence'
 import { getTime, seek, stalledClock, subscribePlayback } from './kernel/playback'
+import { scrubAudio, setScrubAudio } from './kernel/media/mixer'
 import { pickSequenceXml, readTextFile } from './kernel/fsBridge'
 import { readXmeml } from '../shared/xmeml.js'
 import { panels } from './kernel/panels'
@@ -478,6 +479,23 @@ function Editor({ project }: { project: Project }) {
         category: 'App',
         detail: 'How much of this machine FLUX may spend on playback',
         run: () => setPerformanceOpen(true),
+      },
+      {
+        /*
+         * App-level rather than the Timeline's, for the reason the Cache page
+         * found the hard way: a command registered by a panel does not exist
+         * while that panel is closed, and this one has to be reachable from
+         * Settings.
+         */
+        id: 'app.toggleScrubAudio',
+        title: 'Play Audio While Scrubbing',
+        category: 'App',
+        detail: 'Whether dragging the playhead plays a short grain of the sequence',
+        run: () => {
+          const next = !scrubAudio()
+          setScrubAudio(next)
+          say(next ? 'Scrubbing plays audio' : 'Scrubbing is silent')
+        },
       },
       {
         id: 'layout.save',

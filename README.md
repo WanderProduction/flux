@@ -183,7 +183,7 @@ when the panel opens and reported plainly, rather than discovered as four hundre
 | **Chord keys** | `S` held is a modifier: with the arrows it walks the selection clip by clip. |
 | **Open GOP** | Files whose keyframes are not IDR frames — most phone footage — seek and play. |
 | **Timeline wheel** | Scroll travels time · `Ctrl` travels tracks · `Alt` zooms, anchored on the pointer. |
-| **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer. |
+| **Playback** | `Space` plays the sequence. Playhead in the timeline, picture in the viewer — and dragging it plays sound. |
 | **Decode pipeline** | H.264 and HEVC mp4 are demuxed here and decoded through WebCodecs onto a canvas. |
 | **Audio tracks** | A file with sound lands as a linked picture-and-sound pair, with its waveform drawn. |
 | **No sound, said out loud** | A file with none says so on its card and on the drop, rather than landing as picture alone in silence. |
@@ -2667,6 +2667,55 @@ command the keymap never dispatches would read correctly and do nothing. It pres
 `J`, `I` and `O` in each set and checks the shuttle rate, the stop, and the two marks landing in
 the right order. The first version of it quietly passed while nothing fired at all, because the
 suite sits on the Settings page where the Timeline's commands are not registered.
+
+#### Dragging the playhead makes a sound
+
+Four constants, which is the whole design — taken from FilmCraft, which took them from Premiere:
+
+| | | |
+|---|---|---|
+| `GRAIN_S` | 80 ms | played from the new position after each move |
+| `RAMP_S` | 4 ms | fade at each end, because a buffer that starts mid-wave is a click |
+| `GRAIN_GAP_S` | 40 ms | the least time between grains |
+| `GRAIN_IDLE_S` | 1.5 s | how long the decoders are kept after the last move |
+
+An editor looking for a word or a beat finds it by ear. Silent scrubbing means doing that by
+watching a waveform, which is slower and worse, and it is the one thing in either FilmCraft audit
+that changes what the app can *do* rather than how well it does it.
+
+**A grain is not the mixer in a different mode.** The playing mixer pins a context time to a
+sequence time and schedules ahead of a clock; a scrub has no clock to be ahead of. So this is its
+own fifty lines: decode a little from here, play it now, fade both ends. Mute and solo come free,
+because every grain goes out through the same per-track gain the playing mixer uses.
+
+**The gap and the idle are FLUX's, not theirs.** A pointer moves sixty to a hundred and twenty
+times a second and each grain costs a decode, so without `GRAIN_GAP_S` a drag would ask for a
+hundred decodes a second and hear almost none of them; at 40 ms a grain is half played before the
+next replaces it, which is what makes a drag sound continuous rather than like a machine gun.
+FilmCraft keeps an *output stream* open across a scrub because reopening the device costs more
+than the grain does — FLUX has no stream to keep, the mixer's context is already there, but it
+does have decoders, and opening one per grain is the same mistake in a different place.
+
+**A drag is told from a seek by one thing: whether a pointer is down.** Listened for on the
+window rather than passed in by the Timeline, because the playhead is dragged from four places —
+the ruler, the playhead's grip, the viewer's scrub bar, a dragged timecode — and all of them end
+at the same `seek`. Two listeners cover all four, and the ones nobody has built yet. The arrow
+keys deliberately stay silent: stepping a frame is a different gesture from dragging through
+material, and Premiere draws the line in the same place.
+
+On by default, and `app.toggleScrubAudio` turns it off — a command, so it is in the palette and
+rebindable, and registered at app level rather than by the Timeline for the reason the Cache page
+found the hard way.
+
+```bash
+npm run verify:playback
+```
+
+The check asserts what was *heard*, not what was configured: `mixerStats().scrubNodes` counts the
+nodes actually connected to the graph. Reading the preference back would prove nothing. It takes
+the **peak** over the drag rather than a reading at the end, which is the mistake its first
+version made — a grain is 80 ms long and its nodes remove themselves as they end, so a single
+sample taken a moment late sees an empty set and calls it silence.
 
 #### A clock that stops is not a clock that is right
 

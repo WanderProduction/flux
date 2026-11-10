@@ -319,10 +319,14 @@ export const settingsPages: SettingsPage[] = [
       'Output device and its sample rate and buffer, so the mixer can be told to use the ' +
       'interface rather than the motherboard. Input for live recording: which microphone, ' +
       'which channels, a level meter and a monitoring switch. And what to do when the device ' +
-      'disappears mid-session, which on USB audio is a matter of when rather than if.',
+      'disappears mid-session, which on USB audio is a matter of when rather than if — the ' +
+      'transport already survives it and plays on in silence, but nothing yet brings the ' +
+      'sound back without a stop and a start. The sequence’s own rate and channel count stay ' +
+      'in Sequence settings, because they are a document fact rather than a device one.',
     livesAt: {
-      what: 'The sequence’s own rate and channel count, which is a document fact',
-      where: 'Sequence settings, per sequence, saved in the .fluxseq',
+      what: 'Whether dragging the playhead plays a grain of the sequence',
+      where: 'A command, until this page exists',
+      command: 'app.toggleScrubAudio',
     },
   },
   {

@@ -216,6 +216,96 @@ try {
     )
   })
 
+  await check('dragging the playhead makes a sound, and stepping does not', async () => {
+    /*
+     * The whole feature, asserted where it can be seen: a grain is real audio
+     * nodes connected to the mixer's graph, so the question "did it play
+     * anything" is "did nodes appear". Reading the preference back would prove
+     * nothing about whether a sound was made.
+     *
+     * The distinction that matters is the second half. A pointer down means a
+     * drag through material and should be heard; the arrow keys step a frame
+     * and should be silent, which is where Premiere draws the line too.
+     */
+    const out = await evaluate(
+      cdp,
+      `const { playback, mixer, sequence, assets, importPipeline } = window.__fluxDev;
+
+       /*
+        * A clip with sound on an audio track, which is what there is to hear —
+        * and the sequence put back afterwards, because every check after this
+        * one is about the picture and an earlier version of this left them a
+        * timeline with no video on it.
+        */
+       const held = sequence.getSequence();
+       const added = await importPipeline.importFiles(
+         [{ path: ${LONG}, kind: 'video' }], 'link');
+       const asset = added[0] ?? assets.getAssets().find((a) => a.name === 'long_take.mp4');
+       const probed = await assets.ensureProbed(asset.id);
+       sequence.addClip({ assetId: asset.id, trackId: 'A1', start: 0, duration: probed.duration });
+       await new Promise((r) => setTimeout(r, 600));
+
+       playback.pause();
+       mixer.setScrubAudio(true);
+
+       /*
+        * The *peak*, not a snapshot. A grain is eighty milliseconds long and
+        * its nodes remove themselves as they end, so a single reading taken a
+        * moment too late sees an empty set and calls it silence — which is
+        * exactly what the first version of this check did.
+        */
+       const peakWhile = async (ms, body) => {
+         let peak = 0;
+         let done = false;
+         const poll = setInterval(() => {
+           peak = Math.max(peak, mixer.mixerStats().scrubNodes);
+         }, 10);
+         await body();
+         const until = performance.now() + ms;
+         while (performance.now() < until && !done) await new Promise((r) => setTimeout(r, 10));
+         clearInterval(poll);
+         return peak;
+       };
+
+       const drag = (from, to) =>
+         peakWhile(500, async () => {
+           window.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+           playback.seek(from);
+           await new Promise((r) => setTimeout(r, 120));
+           playback.seek(to);
+         }).finally(() => {
+           window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+         });
+
+       const whileDragging = await drag(2, 2.4);
+
+       // The same movement with no button down: a seek, not a scrub.
+       await new Promise((r) => setTimeout(r, 500));
+       const whileStepping = await peakWhile(500, async () => {
+         playback.seek(5);
+       });
+
+       // And with the preference off, a drag is silent again.
+       mixer.setScrubAudio(false);
+       await new Promise((r) => setTimeout(r, 300));
+       const whileOff = await drag(8, 8.4);
+       mixer.setScrubAudio(true);
+
+       sequence.setSequence(held);
+       playback.seek(0);
+       await new Promise((r) => setTimeout(r, 400));
+       return { whileDragging, whileStepping, whileOff, on: mixer.scrubAudio() };`,
+    )
+
+    console.log(
+      `       dragging ${out.whileDragging} nodes · stepping ${out.whileStepping} · off ${out.whileOff}`,
+    )
+    assert.ok(out.whileDragging > 0, 'dragging the playhead played nothing')
+    assert.equal(out.whileStepping, 0, 'a seek with no button down played a grain')
+    assert.equal(out.whileOff, 0, 'a grain played with the preference off')
+    assert.equal(out.on, true, 'the preference did not come back on')
+  })
+
   await check('a clock that stops advancing does not take the transport with it', async () => {
     /*
      * An output stream can open and then never call back — a device pulled

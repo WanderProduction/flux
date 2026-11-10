@@ -15,6 +15,7 @@ import {
   type Clip,
   type Track,
 } from '../sequence'
+import { loadStore, saveStore } from '../store'
 import { AudioSource } from './audioSource'
 
 /**
@@ -106,6 +107,15 @@ export interface MixerStats {
   /** Frames dropped for arriving after their moment. */
   late: number
   /**
+   * Nodes sounding from the current scrub grain.
+   *
+   * The only way to ask "did dragging the playhead actually play something" —
+   * the preference says what was asked for, this says what was done.
+   */
+  scrubNodes: number
+  /** Decoders held open across a scrub. */
+  scrubSources: number
+  /**
    * Times playback has been pinned to a moment on the context's clock.
    *
    * One per play, plus one per seek, and never one per tick. Re-anchoring
@@ -173,6 +183,8 @@ export function mixerStats(): MixerStats {
     voices: voices.size,
     scheduled,
     late,
+    scrubNodes: grainNodes.size,
+    scrubSources: grainSources.size,
     anchors,
     sampleRate: context?.sampleRate ?? 0,
     state: context?.state ?? 'none',
@@ -440,6 +452,230 @@ function schedule() {
 }
 
 /** Starts playing the sequence's audio from `at`. */
+// ── sound while scrubbing ────────────────────────────────────
+
+/**
+ * Whether a dragged playhead makes a sound.
+ *
+ * On by default, because it is what Premiere and Resolve both do and because
+ * an editor looking for a word expects to hear one. Installation state rather
+ * than project state: it is a property of how somebody likes to work, not of
+ * the work.
+ */
+const SCRUB_STORE = 'scrub-audio'
+let scrubAudioOn = true
+const scrubListeners = new Set<() => void>()
+
+export function scrubAudio(): boolean {
+  return scrubAudioOn
+}
+
+export function subscribeScrubAudio(listener: () => void): () => void {
+  scrubListeners.add(listener)
+  return () => scrubListeners.delete(listener)
+}
+
+export function setScrubAudio(on: boolean): void {
+  if (on === scrubAudioOn) return
+  scrubAudioOn = on
+  if (!on) endScrub()
+  void saveStore(SCRUB_STORE, on)
+  scrubListeners.forEach((listener) => listener())
+}
+
+export async function loadScrubAudio(): Promise<void> {
+  const stored = await loadStore<boolean | null>(SCRUB_STORE, null)
+  if (typeof stored === 'boolean') scrubAudioOn = stored
+  scrubListeners.forEach((listener) => listener())
+}
+
+
+/**
+ * How much of the sequence is played after each move of a dragged playhead.
+ *
+ * Eighty milliseconds is Premiere's figure and FilmCraft's, and it is about
+ * right for the job: long enough to recognise a word or a beat, short enough
+ * that dragging produces the granular stutter editors read as *position*
+ * rather than as playback.
+ */
+export const GRAIN_S = 0.08
+/**
+ * Fade at each end of a grain.
+ *
+ * A buffer that starts and stops at a non-zero sample is a click, and a drag
+ * makes dozens of them a second. Four milliseconds is below the threshold of
+ * hearing it as a fade and far above the threshold of hearing the click.
+ */
+const RAMP_S = 0.004
+/**
+ * The least time between grains.
+ *
+ * A pointer moves sixty to a hundred and twenty times a second and each grain
+ * costs a decode, so without this a drag would ask for a hundred decodes a
+ * second and hear almost none of them. At forty milliseconds a grain is half
+ * played before the next one replaces it, which is what makes a drag sound
+ * continuous rather than like a machine gun.
+ */
+const GRAIN_GAP_S = 0.04
+/**
+ * How long the decoders opened for scrubbing are kept after the last move.
+ *
+ * FilmCraft keeps an output stream open across a scrub because reopening the
+ * device costs more than the grain does. FLUX has no stream to keep — the
+ * mixer's context is already there — but it does have decoders, and opening
+ * one per grain is the same mistake in a different place.
+ */
+const GRAIN_IDLE_S = 1.5
+
+/** Decoders held open across a scrub, by asset path. */
+const grainSources = new Map<string, AudioSource>()
+/** Source nodes currently sounding, so the next move can cut them short. */
+const grainNodes = new Set<AudioBufferSourceNode>()
+/**
+ * The gain each grain fades through, kept apart from the sources.
+ *
+ * A gain node has no `ended` event, so it cannot clean itself up the way a
+ * source can — and keeping it in the sounding set meant that set never
+ * emptied, which made `scrubNodes` report a grain that had finished a second
+ * ago. The measurement found it before an ear would have.
+ */
+const grainEnvelopes = new Set<GainNode>()
+let grainAt = 0
+let grainToken = 0
+let grainIdle: number | null = null
+
+/** Stops whatever is sounding from the last grain. A move supersedes it. */
+function stopGrain(): void {
+  for (const node of grainNodes) {
+    try {
+      node.stop()
+    } catch {
+      // Already finished. Stopping an ended node throws and means nothing.
+    }
+    node.disconnect()
+  }
+  grainNodes.clear()
+  for (const envelope of grainEnvelopes) envelope.disconnect()
+  grainEnvelopes.clear()
+}
+
+/** Lets the decoders go once a scrub is over. */
+function releaseGrainSources(): void {
+  for (const source of grainSources.values()) source.close()
+  grainSources.clear()
+}
+
+/**
+ * Plays a short grain of the sequence from `at`.
+ *
+ * Called while the playhead is dragged and the transport is stopped — see
+ * `connectMixer`. Deliberately *not* built on the playing mixer: that one
+ * anchors a context time to a sequence time and schedules ahead of a clock,
+ * and a scrub has no clock to be ahead of. A grain is "decode a little from
+ * here and play it now", which is a different enough job to be its own
+ * fifty lines rather than a mode inside the other.
+ *
+ * Mute and solo come for free, because every grain goes out through the same
+ * per-track gain the playing mixer uses.
+ */
+export async function scrubGrain(at: number): Promise<void> {
+  const ctx = ensureContext()
+  if (!ctx || !master) return
+  // A context created before any user gesture starts suspended; a drag is a
+  // gesture, so this is the moment it is allowed to start.
+  if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
+
+  const now = ctx.currentTime
+  if (now - grainAt < GRAIN_GAP_S) return
+  grainAt = now
+
+  const token = ++grainToken
+  stopGrain()
+  if (grainIdle !== null) window.clearTimeout(grainIdle)
+  grainIdle = window.setTimeout(releaseGrainSources, GRAIN_IDLE_S * 1000)
+
+  for (const clip of clipsAt(at)) {
+    const asset = getAsset(clip.assetId)
+    if (!asset || asset.missing) continue
+
+    let source = grainSources.get(asset.path)
+    if (!source) {
+      const opened = await AudioSource.open(asset.path)
+      if (!opened.ok) continue
+      if (token !== grainToken) {
+        // A newer move landed while this was opening. Keep the decoder — the
+        // newer grain will want it — but do not play this one.
+        grainSources.set(asset.path, opened.source)
+        return
+      }
+      source = opened.source
+      grainSources.set(asset.path, source)
+    }
+
+    const from = Math.max(0, at - clip.start)
+    const start = clip.offset + from * clip.speed
+    const until = start + GRAIN_S * clip.speed
+    source.seek(start)
+
+    /*
+     * One envelope per clip rather than one for the grain, because each has to
+     * sit in front of its own track's gain for mute and solo to apply. The
+     * shape is the same on all of them.
+     */
+    const envelope = ctx.createGain()
+    envelope.connect(gainFor(clip.trackId) ?? master)
+    const t0 = ctx.currentTime
+    envelope.gain.setValueAtTime(0, t0)
+    envelope.gain.linearRampToValueAtTime(1, t0 + RAMP_S)
+    envelope.gain.setValueAtTime(1, t0 + GRAIN_S - RAMP_S)
+    envelope.gain.linearRampToValueAtTime(0, t0 + GRAIN_S)
+    grainEnvelopes.add(envelope)
+    // Nothing tells a gain node it is finished, so the grain's own length does.
+    window.setTimeout(
+      () => {
+        if (!grainEnvelopes.has(envelope)) return
+        grainEnvelopes.delete(envelope)
+        envelope.disconnect()
+      },
+      (GRAIN_S + RAMP_S) * 1000,
+    )
+
+    for (;;) {
+      const frame = await source.next()
+      if (!frame || frame.time >= until) break
+      if (token !== grainToken) return
+
+      const buffer = ctx.createBuffer(
+        frame.planes.length,
+        frame.planes[0].length,
+        frame.sampleRate,
+      )
+      for (let c = 0; c < frame.planes.length; c++) buffer.copyToChannel(frame.planes[c], c)
+
+      const node = ctx.createBufferSource()
+      node.buffer = buffer
+      if (clip.speed !== 1) node.playbackRate.value = clip.speed
+      node.connect(envelope)
+      node.onended = () => {
+        grainNodes.delete(node)
+        node.disconnect()
+      }
+      // Where this frame falls inside the grain, which is almost always zero
+      // for the first one and a few milliseconds for the rest.
+      node.start(t0 + Math.max(0, (frame.time - start) / clip.speed))
+      grainNodes.add(node)
+    }
+  }
+}
+
+/** Everything scrubbing is holding. Called when the transport takes over. */
+export function endScrub(): void {
+  stopGrain()
+  if (grainIdle !== null) window.clearTimeout(grainIdle)
+  grainIdle = null
+  releaseGrainSources()
+}
+
 export function startMix(at: number): void {
   const ctx = ensureContext()
   if (!ctx) return
@@ -505,6 +741,33 @@ export function connectMixer(): () => void {
   let wasPlaying = isPlaying()
   let lastSeek = getSeekToken()
 
+  /*
+   * Whether a pointer is down, which is the whole of how a scrub is told from
+   * a seek.
+   *
+   * Listened for here rather than passed in by the Timeline, because the
+   * playhead is dragged from four places — the ruler, the playhead's own grip,
+   * the viewer's scrub bar and a dragged timecode — and every one of them ends
+   * at the same `seek`. A flag on the window costs two listeners and covers
+   * all of them, including the ones nobody has built yet.
+   *
+   * The arrow keys deliberately do not make a sound. Stepping a frame is a
+   * different gesture from dragging through material, and Premiere draws the
+   * line in the same place.
+   */
+  let pointerDown = false
+  const onDown = () => {
+    pointerDown = true
+  }
+  const onUp = () => {
+    pointerDown = false
+    // The decoders go a moment later, not now: releasing the button at the end
+    // of one drag is usually the middle of a sequence of them.
+  }
+  window.addEventListener('pointerdown', onDown, true)
+  window.addEventListener('pointerup', onUp, true)
+  window.addEventListener('pointercancel', onUp, true)
+
   // Levels follow the sequence rather than the transport: a mute pressed while
   // paused has to be in force by the time play is pressed, and one pressed
   // while playing has to be in force now.
@@ -523,15 +786,28 @@ export function connectMixer(): () => void {
     const playing = isPlaying() && getRate() === 1
     const token = getSeekToken()
 
-    if (playing && !wasPlaying) startMix(getTime())
-    else if (!playing && wasPlaying) stopMix()
+    if (playing && !wasPlaying) {
+      // The transport takes the device back; a grain half-played would be
+      // heard underneath the first second of playback.
+      endScrub()
+      startMix(getTime())
+    } else if (!playing && wasPlaying) stopMix()
     else if (playing && token !== lastSeek) seekMix(getTime())
+    else if (!playing && token !== lastSeek && pointerDown && scrubAudio()) {
+      // Stopped, the playhead moved, and a button is down: a drag through the
+      // material rather than a jump to a mark.
+      void scrubGrain(getTime())
+    }
 
     wasPlaying = playing
     lastSeek = token
   })
 
   return () => {
+    window.removeEventListener('pointerdown', onDown, true)
+    window.removeEventListener('pointerup', onUp, true)
+    window.removeEventListener('pointercancel', onUp, true)
+    endScrub()
     stopSequence()
     stopPlayback()
   }
