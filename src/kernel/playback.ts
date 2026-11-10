@@ -256,6 +256,7 @@ export function shuttle(direction: 1 | -1): number {
 export function setRate(next: number): void {
   // A new rung predicts forward at the old speed for one frame otherwise.
   drawn = null
+  clearStall()
   const wanted = Math.max(-16, Math.min(16, next))
   if (wanted === rate) return
   rate = wanted
@@ -279,12 +280,84 @@ export function setClockSource(name: ClockName, next: ClockSource | null): void 
 }
 
 /** The first source that can say where it is, in priority order. */
-function reported(): number | null {
+/**
+ * How long a clock may report the same time before it is treated as stalled.
+ *
+ * A second is far longer than any legitimate stillness while playing — at 1x
+ * the mixer's time advances with every buffer the device asks for — and short
+ * enough that nobody sits through the freeze. Their figure, for the same
+ * reason and from the same kind of bug report.
+ */
+const STALL_S = 1
+
+/** The last reading taken from a source, and when it last *changed*. */
+let said: { name: ClockName; value: number; at: number } | null = null
+/**
+ * A source that stopped advancing during this play.
+ *
+ * Sticky until the transport moves on its own — play, seek, or a rate change.
+ * Taking a recovered device back mid-play would mean jumping the playhead to
+ * wherever its clock had got to, which is backwards from where the wall clock
+ * has carried it, and a playhead that jumps backwards during playback is a
+ * worse bug than silence. Pausing and playing again reopens the mixer, which
+ * is the thing that actually brings the sound back.
+ */
+let stalledSource: ClockName | null = null
+
+/** Forgets the stall, for a transport change that will rebuild the sources. */
+function clearStall(): void {
+  said = null
+  stalledSource = null
+}
+
+/**
+ * The time the thing playing the media says it is at, or null for the wall
+ * clock.
+ *
+ * ## Why a number is not enough
+ *
+ * The first version of this trusted any non-null reading, and that is the
+ * difference between "nothing is playing" and "something is playing and has
+ * stopped telling the truth". An output stream can open and then never call
+ * back — a device pulled mid-playback, Bluetooth dropping, the OS taking audio
+ * focus — and `mixerTime` reads `AudioContext.currentTime`, which simply stops
+ * advancing while the voices it scheduled are still there to be counted. So it
+ * returned a number, the same number, forever.
+ *
+ * Measured before this existed: the playhead froze at 7.000 and stayed there
+ * through every later tick. Not a drift, not a stutter — the transport stopped
+ * and never came back.
+ */
+function reported(now: number): number | null {
   for (const name of CLOCK_ORDER) {
+    if (name === stalledSource) continue
+
     const value = sources.get(name)?.()
-    if (value !== null && value !== undefined) return value
+    if (value === null || value === undefined) {
+      // Nothing to say is not a stall: a silent stretch has no voices, and the
+      // wall clock is meant to cover it.
+      if (said?.name === name) said = null
+      continue
+    }
+
+    if (said?.name !== name || value !== said.value) {
+      said = { name, value, at: now }
+      return value
+    }
+    if (now - said.at < STALL_S * 1000) return value
+
+    // Standing still for a second with something still scheduled. Give up on
+    // it for this play and let the next source — or the wall clock — carry on.
+    stalledSource = name
+    said = null
+    console.warn(`[flux] the ${name} clock stopped advancing; playing on the wall clock`)
   }
   return null
+}
+
+/** Which clock stopped advancing during this play, if any. For the harness and the UI. */
+export function stalledClock(): ClockName | null {
+  return stalledSource
 }
 
 function stopLoop() {
@@ -310,8 +383,8 @@ function tick(now: number) {
    * A shuttle has no source to ask: nothing is playing the sequence's audio at
    * four times or backwards, so the wall clock is the only clock there is.
    */
-  const said = rate === 1 ? reported() : null
-  const next = said ?? time + elapsed * rate
+  const heard = rate === 1 ? reported(now) : null
+  const next = heard ?? time + elapsed * rate
 
   if (next <= 0 && rate < 0) {
     // Reached the start going backwards. Park there and stop, which is what the
@@ -382,6 +455,9 @@ export function play(): void {
   // starts from there. Carrying a position over from the last play would make
   // the playhead crawl out of wherever it stopped.
   drawn = null
+  // A new play reopens the mixer, so a device that stalled during the last one
+  // deserves to be trusted again.
+  clearStall()
   lastTick = performance.now()
   lastFrame = performance.now()
   frame = requestAnimationFrame(tick)
@@ -418,6 +494,7 @@ export function seek(seconds: number): void {
   // quarter second, but a short drag is inside that window and would be drawn
   // as a slide through material nobody played.
   drawn = null
+  clearStall()
   seekToken += 1
   // Reset the tick baseline, or the next frame would charge the playhead for
   // however long the drag took.

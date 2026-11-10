@@ -216,6 +216,88 @@ try {
     )
   })
 
+  await check('a clock that stops advancing does not take the transport with it', async () => {
+    /*
+     * An output stream can open and then never call back — a device pulled
+     * mid-playback, Bluetooth dropping, the OS taking audio focus. From here
+     * that looks like `mixerTime` returning a number, the same number,
+     * forever, because `AudioContext.currentTime` stops while the voices it
+     * scheduled are still there to be counted.
+     *
+     * Before this was handled the playhead froze at that number and never came
+     * back. Not a drift and not a stutter: the transport stopped.
+     *
+     * Three sources, because the interesting part is what must *not* be
+     * treated as a stall. A source with nothing to say is a silent stretch,
+     * which the wall clock has always covered, and a healthy one must be left
+     * alone entirely.
+     */
+    const out = await evaluate(
+      cdp,
+      `const { playback, sequence } = window.__fluxDev;
+       /*
+        * A length to play through, put back at the end. A pinned duration left
+        * behind here changes where the sequence ends, and the checks after
+        * this one are about exactly that.
+        */
+       const held = sequence.getSequence();
+       const heldSettings = { ...held.settings };
+       sequence.setSequence({ ...held, settings: { ...held.settings, duration: 60 } });
+
+       const run = async (source) => {
+         playback.setClockSource('mixer', null);
+         playback.pause();
+         playback.seek(0);
+         await new Promise((r) => setTimeout(r, 300));
+         playback.play();
+         await new Promise((r) => setTimeout(r, 400));
+
+         playback.setClockSource('mixer', source);
+         await new Promise((r) => setTimeout(r, 1400));
+         const a = playback.getTime();
+         await new Promise((r) => setTimeout(r, 900));
+         const b = playback.getTime();
+         const stalled = playback.stalledClock();
+         playback.setClockSource('mixer', null);
+         playback.pause();
+         return { a, b, advanced: b - a, stalled };
+       };
+
+       const frozen = await run(() => 7);
+       const silent = await run(() => null);
+       let t = 3;
+       const healthy = await run(() => (t += 0.016));
+
+       const now = sequence.getSequence();
+       sequence.setSequence({ ...now, settings: heldSettings });
+       playback.seek(0);
+       await new Promise((r) => setTimeout(r, 200));
+       return { frozen, silent, healthy };`,
+    )
+
+    console.log(
+      `       frozen +${out.frozen.advanced.toFixed(2)}s (${out.frozen.stalled}) · ` +
+        `silent +${out.silent.advanced.toFixed(2)}s · healthy +${out.healthy.advanced.toFixed(2)}s`,
+    )
+
+    // The bug: this used to be 0 for ever.
+    assert.ok(
+      out.frozen.advanced > 0.4,
+      `the playhead moved ${out.frozen.advanced.toFixed(3)}s in 0.9s on a frozen clock`,
+    )
+    assert.equal(out.frozen.stalled, 'mixer', 'the stalled source was not named')
+
+    // A source with nothing to say is not a stalled source. Reporting it as
+    // one would mean a silent stretch permanently demoted the mixer, and the
+    // sound would not come back when the next clip arrived.
+    assert.ok(out.silent.advanced > 0.4, 'the wall clock did not cover a silent stretch')
+    assert.equal(out.silent.stalled, null, 'a source with nothing to say was called stalled')
+
+    // And a working clock is left alone.
+    assert.ok(out.healthy.advanced > 0.4, 'a healthy clock did not advance the transport')
+    assert.equal(out.healthy.stalled, null, 'a healthy clock was called stalled')
+  })
+
   await check('a seek is taken whole, not slid through', async () => {
     /*
      * A jump is not jitter. Smoothing one would draw the playhead sliding

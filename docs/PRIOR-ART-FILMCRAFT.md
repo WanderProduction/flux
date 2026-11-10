@@ -304,6 +304,156 @@ The timeline re-render that the 2026-10-31 investigation blamed for the lag is *
 `placePlayhead` writes `style.left` directly and `keepUp` sets `scrollLeft` directly, so a tick
 re-renders nothing. The audit's third recommendation had been done before the audit was written.
 
+---
+
+# Their audio, and what FLUX is missing
+
+A second pass, on 2026-11-10, looking only at how sound is *previewed*.
+
+The mixer itself is out of scope and worth one paragraph: `crates/render/src/mixer.rs` is
+Premiere's documented signal path — clip gain, inserts, pre- and post-fader sends, mute, fader,
+meter, pan — with **sample-accurate automation**, **latency compensation** (an insert that
+reports delay delays its strip, and every route into a bus is compensated so inputs line up),
+solo-safe routing, constant-power pan laws and 5.1. FLUX has track gain, mute, solo and nothing
+else. That gap is a feature list, not a technique, and copying it is a year of work nobody asked
+for.
+
+What follows is the part that is about *previewing*, where the gaps are small and the techniques
+are transferable.
+
+## 1. Audio while scrubbing — FLUX has none
+
+`crates/ui-egui/src/scrub.rs`, about 270 lines including tests, and the whole design is four
+constants:
+
+```rust
+pub const GRAIN_S: f64 = 0.08;   // length of the grain played after each move
+const RAMP_S: f64 = 0.004;       // fade at each end, so it does not click
+const LINGER_S: f64 = 0.25;      // how long the stream stays open after the last move
+```
+
+While the playhead moves under a held mouse button and playback is stopped, an 80 ms grain of the
+sequence plays from the new position. **One output stream stays open for the whole scrub** — each
+move only re-aims it, because reopening the device per frame is slow (their playback code notes
+that a WASAPI open is slow enough to be felt).
+
+The fade is one expression, and it is the nice part:
+
+```rust
+let gain = (pos.min(g.total - 1 - pos) as f32 / ramp as f32).clamp(0.0, 1.0);
+```
+
+Distance from whichever end is nearer, over the ramp length, clamped — a symmetric fade in and
+out with no branch and no second constant.
+
+**FLUX scrubs silently.** For an editor finding a word or a beat, scrub audio is not a luxury; it
+is how the job is done. This is the biggest gap in this audit and the cheapest to close.
+
+## 2. Shuttle audio: 0.5× to 4×, pitch-corrected — and silent outside it
+
+The technique is worth more than the feature. From `crates/ui-egui/src/shuttle.rs`:
+
+> Pitch-preserving shuttle playback. Pitch is corrected **before** changing the sample rate, so
+> faster playback does not first discard the upper part of the audible spectrum.
+
+And the mechanism is not a resampler bolted onto the mixer's output — it asks the mixer for a
+**different sample rate**:
+
+```rust
+let rate = (f64::from(device_rate) / speed).round();
+```
+
+At 2× the mixer renders at 24 kHz and the device plays it at 48 kHz, so the timeline passes twice
+as fast with no special case anywhere in the mixer. Then pitch correction and a stream resampler
+put it back at the device rate. The mixer never learns that shuttling exists.
+
+**And the band is narrow on purpose:**
+
+```rust
+if device_rate == 0 || !speed.is_finite() || !(0.5..=4.0).contains(&speed) {
+    return None;   // no audio
+}
+```
+
+Reverse and anything past 4× are **silent** — the same conclusion FLUX reached independently, in
+`kernel/media/mixer.ts`:
+
+> A shuttle is silent. The mixer schedules real buffers at real moments on a device that runs at
+> one speed forwards; four times or backwards is not something it can play.
+
+That reasoning is exactly right for reverse. It is **overstated for 2× and 4×**, and FLUX's own
+code proves it: `mixer.ts` already sets `node.playbackRate.value = clip.speed` for a
+speed-changed clip. The machinery to play faster is there and in use — it is only the shuttle
+that does not reach for it. FLUX's ladder is −16 … −2, −1, 1, 2, 4 … 16, so **2× and 4× sit
+inside the band filmcraft considers audible** and 8× and 16× do not.
+
+Web Audio has no negative `playbackRate`, so reverse stays silent either way.
+
+## 3. A stalled device, and the freeze FLUX has
+
+Two constants in `crates/ui-egui/src/audio.rs`, each with the bug number that produced it:
+
+```rust
+/// How long (s) the audio clock may stand still during playback before the wall clock takes over.
+/// An output stream can open and then never call back (ALSA with a busy or misconfigured device,
+/// #136); playback must not freeze on it.
+pub const AUDIO_STALL_S: f64 = 1.0;
+
+/// How often (s) playback re-opens the output after its stream or device failed, while playing
+/// goes on silently on the wall clock (#2503).
+pub const AUDIO_RETRY_S: f64 = 2.0;
+```
+
+**FLUX has neither, and the consequence is measured.** `kernel/playback.ts` falls back to the
+wall clock when a source returns `null` — not loaded, nothing sounding, paused. It has no answer
+for a source that returns a *number that has stopped changing*, which is what a stalled device
+looks like from the outside: `mixerTime()` reads `context.currentTime`, and a context that stops
+advancing while voices are still scheduled returns a stale time rather than null.
+
+Driven through the dev handle on 2026-11-10 — a clock source pinned to a constant while playing:
+
+| | |
+|---|---|
+| playhead before | advancing normally (0.56 s) |
+| after 0.9 s on a frozen clock | 7.000 |
+| after 1.8 s | 7.000 |
+
+The transport freezes and never recovers. A USB interface pulled mid-playback, Bluetooth
+headphones disconnecting, or an OS audio interruption are all plausible ways to reach it on the
+machines editors actually use. The fix is their shape: notice the clock standing still for a
+second, drop to the wall clock, and retry the device on a timer so the sound comes back by itself.
+
+## 4. Audio played ahead — different, not missing
+
+`crates/ui-egui/src/play_ahead.rs` keeps a lock-free single-producer ring **200 ms** ahead of the
+device on its own mixing thread; the device callback *"never decodes, allocates or takes a
+lock"*. When the ring runs dry the callback plays silence for the missing frames **and counts
+them**, and the mixer **skips the same span**, so sound stays locked to picture instead of
+drifting. `AudioStats` reports callbacks, underruns, missing frames and the minimum lead reached.
+
+FLUX gets the same property from somewhere else: Web Audio schedules real buffers at absolute
+times on its own rendering thread, so the lookahead and the lock-free handoff are the platform's.
+What FLUX does **not** have is the accounting — there is no equivalent of "the ring ran dry
+eleven times and 430 frames were silence", which is the number that would have told us whether a
+dropout was the device or the decoder.
+
+## 5. Waveforms — already equivalent
+
+Min/max pairs at 256 samples per bucket, one screen column per pixel, a normalisation gain from
+the clip's own peak, and an option for dynamic scaling. FLUX's `shared/peaks.js` does the same
+job the same way. Nothing to take.
+
+## What is worth taking, in order
+
+1. **Scrub audio.** Four constants and a grain, roughly a hundred lines against FLUX's mixer. It
+   is the one thing in this audit an editor would notice within a minute of trying the app.
+2. **Stall detection and device retry.** Small, and it fixes a measured permanent freeze rather
+   than a missing feature.
+3. **Shuttle audio at 2× and 4×.** The sample-rate trick makes it cheap and FLUX already has the
+   `playbackRate` machinery; reverse stays silent, as it does for them.
+4. **Underrun accounting.** Not a feature, an instrument — and this project has twice found that
+   the number it was missing was the one that located the fault.
+
 ## A note on their repository
 
 It carries `CLAUDE.md` and `AGENTS.md` at the root: instructions for AI agents working on *that*

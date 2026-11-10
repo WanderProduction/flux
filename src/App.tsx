@@ -5,7 +5,7 @@ import { commands } from './kernel/commands'
 import { importEditDocument } from './kernel/importEdit'
 import { startControlServer, stopControlServer } from './kernel/controlBridge'
 import { addMarker, markerAt, markerNear, removeMarkers } from './kernel/sequence'
-import { getTime, seek } from './kernel/playback'
+import { getTime, seek, stalledClock, subscribePlayback } from './kernel/playback'
 import { pickSequenceXml, readTextFile } from './kernel/fsBridge'
 import { readXmeml } from '../shared/xmeml.js'
 import { panels } from './kernel/panels'
@@ -209,6 +209,28 @@ function Editor({ project }: { project: Project }) {
     setFlash(message)
     window.setTimeout(() => setFlash((current) => (current === message ? null : current)), 1800)
   }, [])
+
+  /*
+   * Say it when the sound stops, because otherwise nothing does.
+   *
+   * A device that stops responding mid-playback now costs silence rather than
+   * a frozen playhead — see `reported` in kernel/playback.ts — and silence
+   * with no explanation is the kind of thing somebody files a bug about from
+   * the wrong end. Said once per stall: the flag is sticky until the transport
+   * moves, so this fires on the edge and not on every tick.
+   */
+  const stalledRef = useRef<string | null>(null)
+  useEffect(
+    () =>
+      subscribePlayback(() => {
+        const stalled = stalledClock()
+        if (stalled && stalled !== stalledRef.current) {
+          say('The audio device stopped responding — playing on without sound')
+        }
+        stalledRef.current = stalled
+      }),
+    [say],
+  )
 
   /** Rebuild the dock for a layout: the saved arrangement if there is one, else the shipped default. */
   /**

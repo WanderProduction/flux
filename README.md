@@ -2668,6 +2668,38 @@ command the keymap never dispatches would read correctly and do nothing. It pres
 the right order. The first version of it quietly passed while nothing fired at all, because the
 suite sits on the Settings page where the Timeline's commands are not registered.
 
+#### A clock that stops is not a clock that is right
+
+The transport reads whatever is playing the media and falls back to the wall clock when nothing
+is. The first version of that trusted any number it was handed, and the gap is the difference
+between *nothing is playing* and *something is playing and has stopped telling the truth*.
+
+An output stream can open and then never call back — a device pulled mid-playback, Bluetooth
+dropping, the OS taking audio focus. From the transport's side that looks like `mixerTime()`
+returning a number, the same number, for ever: it reads `AudioContext.currentTime`, which stops
+advancing while the voices it scheduled are still there to be counted. So the playhead froze on
+it, and never came back.
+
+Measured through the dev handle, a clock source pinned to a constant mid-play:
+
+| | before | after |
+|---|---|---|
+| playhead after 0.9 s | 7.000 | 7.801 |
+| after 1.8 s | **7.000** | **8.709** |
+
+A source that reports the same time for a second while playing is now dropped for the rest of
+that play and the next one down — another source, or the wall clock — carries on. The flag is
+sticky until the transport moves on its own, because taking a recovered device back mid-play
+would jump the playhead *backwards* to wherever its clock had got to, and that is a worse bug
+than silence. Pressing stop and play reopens the mixer, which is what actually brings the sound
+back; the status bar says so when it happens, because silence with no explanation gets filed as a
+different bug entirely.
+
+Two things deliberately do **not** count as a stall. A source with nothing to say returns null —
+a silent stretch, which the wall clock has always covered — and demoting the mixer for that would
+mean the sound never came back when the next clip arrived. And a healthy clock is left alone
+entirely. `verify:playback` asserts all three.
+
 #### The playhead is drawn at a time that is not the time
 
 The one place the single clock is deliberately not used directly.
